@@ -70,28 +70,36 @@ def run_llm(system_prompt: str, user_prompt: str):
 
 
 async def run_llm_with_tools(system_prompt: str, user_prompt: str):
+    # Guard against missing Groq API keys before attempting MCP/LLM calls
+    keys = get_all_groq_keys()
+    if not keys:
+        ws = current_ws.get(None)
+        err = "[ERROR] No GROQ_API_KEY found in environment. Please set it in your .env file."
+        if ws:
+            await ws.broadcast({"agent": "System", "msg": err, "color": "text-red-500"})
+        raise ValueError(err)
+
     try:
         from mcp.client.stdio import stdio_client, StdioServerParameters
         from mcp.client.session import ClientSession
         from langchain_mcp_adapters.tools import load_mcp_tools
-        
+
         server_params = StdioServerParameters(
             command="gitnexus",
             args=["mcp"]
         )
-        
+
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await load_mcp_tools(session)
 
-                keys = get_all_groq_keys()
                 llms = [ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys]
                 if len(llms) > 1:
                     llm = llms[0].with_fallbacks(llms[1:])
                 else:
                     llm = llms[0]
-                
+
                 agent = create_react_agent(llm, tools=tools)
 
                 final_res = None
@@ -114,12 +122,25 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
 
                 return final_res["messages"][-1].content
     except Exception as e:
+        # Broadcast GitNexus/MCP failure as a visible warning in the dashboard
+        ws = current_ws.get(None)
+        if ws:
+            await ws.broadcast(
+                {
+                    "agent": "System",
+                    "msg": f"⚠️ GitNexus MCP unavailable, falling back to direct LLM: {e}",
+                    "color": "text-amber-400",
+                }
+            )
         print(f"MCP Tool execution fallback: {e}")
         try:
             return run_llm(system_prompt, user_prompt)
         except Exception as e2:
-            print(f"LLM execution completely failed: {e2}")
-            return f"[ERROR] LLM execution failed: {e2}"
+            err_msg = f"[ERROR] LLM execution completely failed: {e2}"
+            if ws:
+                await ws.broadcast({"agent": "System", "msg": err_msg, "color": "text-red-500"})
+            print(err_msg)
+            return err_msg
 
 
 async def architect_node(state: AgentState):
@@ -184,22 +205,52 @@ async def architect_node(state: AgentState):
             tree_content = "Unable to fetch repo tree."
             readme_content = "Inaccessible."
 
-    # Clone the repo locally and analyze it with GitNexus so the MCP server has data
+    # Clone (or update) the repo locally so GitNexus has fresh data to index
     import subprocess
     import shutil
     repo_dir = f"/tmp/{repo.replace('/', '_')}"
-    if not os.path.exists(repo_dir):
+
+    # Build an authenticated URL so private repos work when GITHUB_TOKEN is set
+    if GITHUB_TOKEN:
+        repo_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
+    else:
+        repo_url = f"https://github.com/{repo}.git"
+
+    if os.path.exists(repo_dir):
+        # Repo already cached — pull latest to avoid stale analysis
         try:
-            repo_url = f"https://github.com/{repo}.git"
-            subprocess.run(["git", "clone", repo_url, repo_dir], check=True)
+            subprocess.run(["git", "-C", repo_dir, "pull", "--ff-only"], check=True)
+            state["log_messages"].append(
+                {"agent": "Architect", "msg": "Refreshed local repo cache (git pull).", "color": "text-zinc-500"}
+            )
         except Exception as e:
-            print(f"Failed to clone repo: {e}")
-            
+            state["log_messages"].append(
+                {"agent": "Architect", "msg": f"⚠️ git pull failed (continuing with cached data): {e}", "color": "text-amber-400"}
+            )
+    else:
+        try:
+            subprocess.run(["git", "clone", repo_url, repo_dir], check=True)
+            state["log_messages"].append(
+                {"agent": "Architect", "msg": "Cloned repo locally for GitNexus analysis.", "color": "text-zinc-500"}
+            )
+        except Exception as e:
+            state["log_messages"].append(
+                {"agent": "Architect", "msg": f"⚠️ Failed to clone repo: {e}", "color": "text-red-400"}
+            )
+
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:
             subprocess.run(["gitnexus", "analyze"], cwd=repo_dir, check=True)
             subprocess.run(["gitnexus", "index"], cwd=repo_dir, check=True)
         except Exception as e:
+            # Broadcast GitNexus index failure to the dashboard
+            ws = current_ws.get(None)
+            warn_msg = f"⚠️ GitNexus indexing failed (agents will use raw LLM context): {e}"
+            state["log_messages"].append(
+                {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
+            )
+            if ws:
+                await ws.broadcast({"agent": "System", "msg": warn_msg, "color": "text-amber-400"})
             print(f"Failed to analyze repo with GitNexus: {e}")
 
     system_prompt = "You are the Principal Architect. Analyze the provided repository root file structure and README context. Assess the current state of the project (is it working, what tech stack is it using) and give a strict 2-sentence directive on what the team should build or fix next."

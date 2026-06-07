@@ -5,6 +5,31 @@ import { useState, useEffect } from "react";
 import { BrainCircuit, GitPullRequest, Search, FileCode, CheckCircle, Activity, GitBranch, Settings, Terminal, Play, Square } from "lucide-react";
 import { motion } from "framer-motion";
 
+/**
+ * Resolves the backend base URL.
+ *
+ * Priority order:
+ *  1. NEXT_PUBLIC_BACKEND_URL env var (e.g. for custom cloud deployments)
+ *  2. In local dev (Next.js runs on :3000, FastAPI on :8000) → use localhost:8000
+ *  3. In production (static export served from FastAPI itself) → use same host
+ */
+function getBackendUrl(): string {
+  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
+    return process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    const port = window.location.port;
+    const hostname = window.location.hostname;
+    // If frontend is on the standard Next.js dev port, point to the FastAPI port
+    if (port === "3000") {
+      return `${window.location.protocol}//${hostname}:8000`;
+    }
+    // Otherwise (production / Docker), same host serves both
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+  return "http://localhost:8000";
+}
+
 export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [repoUrl, setRepoUrl] = useState("owner/repo");
@@ -29,9 +54,8 @@ export default function Home() {
       setIsRunning(true);
       setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: `Triggering AI Agent Loop for ${repoUrl}...`, color: "text-zinc-500" }]);
       try {
-        const protocol = window.location.protocol;
-        const host = window.location.host;
-        await fetch(`${protocol}//${host}/start`, {
+        const backendUrl = getBackendUrl();
+        await fetch(`${backendUrl}/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ 
@@ -41,6 +65,8 @@ export default function Home() {
         });
       } catch (err) {
         console.error(err);
+        setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: `Failed to reach backend. Is it running? (${err})`, color: "text-red-400" }]);
+        setIsRunning(false);
       }
     } else {
       setIsRunning(false);
@@ -49,9 +75,10 @@ export default function Home() {
   };
 
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const ws = new WebSocket(`${protocol}//${host}/ws`);
+    const backendUrl = getBackendUrl();
+    const wsProtocol = backendUrl.startsWith("https") ? "wss:" : "ws:";
+    const wsHost = backendUrl.replace(/^https?:\/\//, "");
+    const ws = new WebSocket(`${wsProtocol}//${wsHost}/ws`);
     
     ws.onopen = () => {
       setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: "Connected to AutoMaintainer Core", color: "text-emerald-500" }]);
