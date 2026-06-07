@@ -55,6 +55,8 @@ GROQ_API_KEY=your_groq_api_key_here
 GITHUB_TOKEN=your_github_token_here
 ```
 
+Optionally, you can also define `NEXT_PUBLIC_BACKEND_URL` in the dashboard environment if your backend runs on a custom address. By default, when running the dashboard on the Next.js development port (`3000`), it will dynamically auto-detect and route all API and WebSocket requests to `localhost:8000`.
+
 ### 3. Run the Backend (FastAPI + LangGraph)
 Open a terminal and navigate to the backend directory:
 ```bash
