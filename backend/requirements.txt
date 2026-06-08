@@ -9,5 +9,8 @@ websockets
 pydantic
 mcp
 langchain-mcp-adapters
-langchain-groq 
- 
+langchain-groq
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
