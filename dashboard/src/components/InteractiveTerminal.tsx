@@ -16,6 +16,7 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
   const ws = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reconnectKey, setReconnectKey] = useState(0);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -78,6 +79,7 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
 
     socket.onclose = () => {
       setIsConnected(false);
+      setError("Disconnected");
       term.write("\r\n\x1b[31m[Process Exited / Connection Closed]\x1b[0m\r\n");
     };
 
@@ -104,7 +106,7 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
       socket.close();
       term.dispose();
     };
-  }, [repoUrl]);
+  }, [repoUrl, reconnectKey]);
 
   return (
     <div className="flex flex-col h-full w-full bg-[#1e1e1e] border-l border-zinc-800">
@@ -117,7 +119,10 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
           {isConnected ? (
             <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> Connected</span>
           ) : error ? (
-            <span className="flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span> Error</span>
+            <>
+              <span className="flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span> Disconnected</span>
+              <button onClick={() => setReconnectKey(k => k + 1)} className="ml-2 px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors border border-zinc-700">Reconnect</button>
+            </>
           ) : (
             <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-zinc-500"></span> Connecting...</span>
           )}
