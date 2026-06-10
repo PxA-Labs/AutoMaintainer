@@ -159,13 +159,25 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
+    origin = websocket.headers.get("origin")
+    if origin and not (origin.startswith("http://localhost") or "huggingface.co" in origin or origin.startswith("http://127.0.0.1")):
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
 
     cwd = None
     if repo_url:
         from urllib.parse import urlparse
         parsed = urlparse(repo_url)
-        repo_name = parsed.path.strip("/") if parsed.netloc in ["github.com", "www.github.com"] else repo_url
+        repo_name = parsed.path.strip("/")
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        
+        parts = [p for p in repo_name.split("/") if p]
+        if len(parts) >= 2:
+            repo_name = f"{parts[-2]}/{parts[-1]}"
+            
         clean_name = repo_name.replace("/", "_").replace("\\", "_")
         repo_dir = f"/tmp/{clean_name}"
         if os.path.exists(repo_dir):
@@ -198,9 +210,14 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
                     pty.set_size(msg_data["cols"], msg_data["rows"])
                 else:
                     await asyncio.to_thread(pty.write, message)
-        except WebSocketDisconnect:
+        except Exception:
+            pass
+        finally:
             read_task.cancel()
-            del pty
+            try:
+                del pty
+            except Exception:
+                pass
     else:
         import pty
         import fcntl
@@ -237,9 +254,14 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
                         fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
                     else:
                         await asyncio.to_thread(os.write, fd, message.encode("utf-8"))
-            except WebSocketDisconnect:
+            except Exception:
+                pass
+            finally:
                 read_task.cancel()
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
                 try:
                     os.kill(pid, signal.SIGKILL)
                     os.waitpid(pid, 0)
