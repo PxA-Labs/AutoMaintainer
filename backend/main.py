@@ -15,6 +15,8 @@ from agents import run_agent_loop
 import asyncio
 import json
 import os
+import sys
+import platform
 import subprocess
 import re
 import logging
@@ -154,6 +156,95 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+
+@app.websocket("/api/terminal/ws")
+async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
+    await websocket.accept()
+
+    cwd = None
+    if repo_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(repo_url)
+        repo_name = parsed.path.strip("/") if parsed.netloc in ["github.com", "www.github.com"] else repo_url
+        clean_name = repo_name.replace("/", "_").replace("\\", "_")
+        repo_dir = f"/tmp/{clean_name}"
+        if os.path.exists(repo_dir):
+            cwd = repo_dir
+
+    if sys.platform == "win32":
+        import pywinpty
+        cols, rows = 80, 24
+        pty = pywinpty.PTY(cols, rows)
+        pty.spawn(pywinpty.winpty.get_default_cmd(), cwd=cwd)
+
+        async def read_from_pty():
+            while True:
+                try:
+                    data = await asyncio.to_thread(pty.read)
+                    if data:
+                        await websocket.send_text(data)
+                    else:
+                        await asyncio.sleep(0.01)
+                except Exception:
+                    break
+
+        read_task = asyncio.create_task(read_from_pty())
+
+        try:
+            while True:
+                message = await websocket.receive_text()
+                if message.startswith('{"type":"resize"'):
+                    msg_data = json.loads(message)
+                    pty.set_size(msg_data["cols"], msg_data["rows"])
+                else:
+                    await asyncio.to_thread(pty.write, message)
+        except WebSocketDisconnect:
+            read_task.cancel()
+            del pty
+    else:
+        import pty
+        import fcntl
+        import termios
+        import struct
+        import signal
+
+        pid, fd = pty.fork()
+        if pid == 0:
+            if cwd:
+                os.chdir(cwd)
+            os.environ["TERM"] = "xterm-256color"
+            os.execv("/bin/bash", ["/bin/bash"])
+        else:
+            async def read_from_pty():
+                while True:
+                    try:
+                        data = await asyncio.to_thread(os.read, fd, 1024)
+                        if data:
+                            await websocket.send_text(data.decode("utf-8", errors="replace"))
+                        else:
+                            break
+                    except Exception:
+                        break
+
+            read_task = asyncio.create_task(read_from_pty())
+
+            try:
+                while True:
+                    message = await websocket.receive_text()
+                    if message.startswith('{"type":"resize"'):
+                        msg_data = json.loads(message)
+                        winsize = struct.pack("HHHH", msg_data["rows"], msg_data["cols"], 0, 0)
+                        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+                    else:
+                        await asyncio.to_thread(os.write, fd, message.encode("utf-8"))
+            except WebSocketDisconnect:
+                read_task.cancel()
+                os.close(fd)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                except Exception:
+                    pass
 
 @app.get("/repo/{repo_name:path}/tree")
 def get_repo_tree(repo_name: str):
