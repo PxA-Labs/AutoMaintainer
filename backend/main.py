@@ -87,6 +87,7 @@ class StartRequest(BaseModel):
     repo_name: str
     target_issue: Optional[int] = None
 
+
 class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
@@ -106,6 +107,7 @@ async def start_agents(req: StartRequest):
     )
     return {"status": "started"}
 
+
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
     token = os.getenv("GITHUB_TOKEN")
@@ -120,7 +122,9 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
         file = repo.get_contents(payload.file_path)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
-    message = payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
+    message = (
+        payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
+    )
     try:
         repo.update_file(file.path, message, payload.content, file.sha)
     except Exception as e:
@@ -160,7 +164,11 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     origin = websocket.headers.get("origin")
-    if origin and not (origin.startswith("http://localhost") or "huggingface.co" in origin or origin.startswith("http://127.0.0.1")):
+    if origin and not (
+        origin.startswith("http://localhost")
+        or "huggingface.co" in origin
+        or origin.startswith("http://127.0.0.1")
+    ):
         await websocket.close(code=1008)
         return
 
@@ -169,22 +177,26 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     cwd = None
     if repo_url:
         from urllib.parse import urlparse
+
         parsed = urlparse(repo_url)
         repo_name = parsed.path.strip("/")
         if repo_name.endswith(".git"):
             repo_name = repo_name[:-4]
-        
+
         parts = [p for p in repo_name.split("/") if p]
         if len(parts) >= 2:
             repo_name = f"{parts[-2]}/{parts[-1]}"
-            
+
         clean_name = repo_name.replace("/", "_").replace("\\", "_")
-        repo_dir = f"/tmp/{clean_name}"
-        if os.path.exists(repo_dir):
+        base_tmp = os.path.abspath("/tmp")
+        repo_dir = os.path.abspath(os.path.join(base_tmp, clean_name))
+
+        if repo_dir.startswith(base_tmp + os.sep) and os.path.exists(repo_dir):
             cwd = repo_dir
 
     if sys.platform == "win32":
         import pywinpty
+
         cols, rows = 80, 24
         pty = pywinpty.PTY(cols, rows)
         pty.spawn(pywinpty.winpty.get_default_cmd(), cwd=cwd)
@@ -232,12 +244,15 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
             os.environ["TERM"] = "xterm-256color"
             os.execv("/bin/bash", ["/bin/bash"])
         else:
+
             async def read_from_pty():
                 while True:
                     try:
                         data = await asyncio.to_thread(os.read, fd, 1024)
                         if data:
-                            await websocket.send_text(data.decode("utf-8", errors="replace"))
+                            await websocket.send_text(
+                                data.decode("utf-8", errors="replace")
+                            )
                         else:
                             break
                     except Exception:
@@ -250,7 +265,9 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
                     message = await websocket.receive_text()
                     if message.startswith('{"type":"resize"'):
                         msg_data = json.loads(message)
-                        winsize = struct.pack("HHHH", msg_data["rows"], msg_data["cols"], 0, 0)
+                        winsize = struct.pack(
+                            "HHHH", msg_data["rows"], msg_data["cols"], 0, 0
+                        )
                         fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
                     else:
                         await asyncio.to_thread(os.write, fd, message.encode("utf-8"))
@@ -267,6 +284,7 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
                     os.waitpid(pid, 0)
                 except Exception:
                     pass
+
 
 @app.get("/repo/{repo_name:path}/tree")
 def get_repo_tree(repo_name: str):
