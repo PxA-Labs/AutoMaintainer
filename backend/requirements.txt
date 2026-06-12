@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+langchain
+litellm
+langgraph
+pygithub
+python-dotenv
+websockets
+pydantic
+mcp
+langchain-mcp-adapters
+langchain-groq
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+pywinpty; sys_platform == "win32"

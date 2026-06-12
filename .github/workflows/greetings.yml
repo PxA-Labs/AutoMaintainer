@@ -1,0 +1,16 @@
+name: Greetings
+
+on: [pull_request_target, issues]
+
+jobs:
+  greeting:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+    - uses: actions/first-interaction@v1
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        issue-message: "Welcome to AutoMaintainer! 👋 Thank you for opening your first issue. A maintainer or our AI agent will review it shortly."
+        pr-message: "Welcome to AutoMaintainer! 🚀 Thank you for submitting your first Pull Request. Our CI pipelines are running, and a maintainer will review your code soon!"
