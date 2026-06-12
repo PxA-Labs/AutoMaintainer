@@ -152,12 +152,13 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
 
 
 async def architect_node(state: AgentState):
+    new_logs = []
     repo = state["repo_name"]
     target_issue = state.get("target_issue")
     tree_content = ""
     readme_content = ""
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Architect": "active"}}
     )
 
@@ -168,7 +169,7 @@ async def architect_node(state: AgentState):
             directive = f"Targeted Issue #{target_issue}: {issue.title}\n{issue.body}"
             state["architect_directive"] = directive
 
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "type": "ui_update",
                     "pipeline": {
@@ -179,19 +180,19 @@ async def architect_node(state: AgentState):
                     },
                 }
             )
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "Architect",
                     "msg": f"Targeting specific issue #{target_issue}: {issue.title}",
                     "color": "text-rose-400",
                 }
             )
-            state["log_messages"].append(
+            new_logs.append(
                 {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
             )
-            return state
+            return {"architect_directive": directive, "log_messages": new_logs} # ARCHITECT EARLY RETURN
         except Exception as e:
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "Architect",
                     "msg": f"Failed to fetch issue #{target_issue}: {str(e)}",
@@ -258,7 +259,7 @@ async def architect_node(state: AgentState):
             warn_msg = (
                 f"⚠️ GitNexus indexing failed (agents will use raw LLM context): {e}"
             )
-            state["log_messages"].append(
+            new_logs.append(
                 {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
             )
             ws = current_ws.get(None)
@@ -274,7 +275,7 @@ async def architect_node(state: AgentState):
                 try:
                     shutil.rmtree(gitnexus_dir)
                     info_msg = "ℹ️ Cleaned up partial GitNexus cache directory."
-                    state["log_messages"].append(
+                    new_logs.append(
                         {"agent": "System", "msg": info_msg, "color": "text-zinc-500"}
                     )
                     if ws:
@@ -330,7 +331,7 @@ async def architect_node(state: AgentState):
             ast_context_str = "\n".join(ast_lines)
         except Exception as e:
             print(f"AST parsing failed locally: {e}")
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "Architect",
                     "msg": f"AST parsing failed: {str(e)}",
@@ -338,7 +339,7 @@ async def architect_node(state: AgentState):
                 }
             )
     else:
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "agent": "Architect",
                 "msg": f"AST generation skipped: repo_dir {repo_dir} not found.",
@@ -352,7 +353,7 @@ async def architect_node(state: AgentState):
     directive = await run_llm_with_tools(system_prompt, user_prompt)
     state["architect_directive"] = directive
 
-    state["log_messages"].append(
+    new_logs.append(
         {
             "type": "ui_update",
             "pipeline": {
@@ -363,20 +364,20 @@ async def architect_node(state: AgentState):
             },
         }
     )
-    state["log_messages"].append(
+    new_logs.append(
         {
             "agent": "Architect",
             "msg": f"Directive: {directive}",
             "color": "text-rose-400",
         }
     )
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
     )
-    return state
-
+    return {"architect_directive": state.get("architect_directive", ""), "log_messages": new_logs}
 
 async def brainstormer_node(state: AgentState):
+    new_logs = []
     repo = state["repo_name"]
     directive = state.get("architect_directive", "")
     target_issue = state.get("target_issue")
@@ -384,20 +385,20 @@ async def brainstormer_node(state: AgentState):
     if target_issue:
         state["idea"] = directive
         state["issue_number"] = target_issue
-        state["log_messages"].append(
+        new_logs.append(
             {"type": "ui_update", "agentStatus": {"Visionary": "active"}}
         )
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "agent": "Visionary",
                 "msg": f"Bypassing brainstorm. Focusing on Issue #{target_issue}",
                 "color": "text-emerald-400",
             }
         )
-        state["log_messages"].append(
+        new_logs.append(
             {"type": "ui_update", "agentStatus": {"Visionary": "idle"}}
         )
-        return state
+        return {"idea": directive, "issue_number": target_issue, "log_messages": new_logs}
 
     system_prompt = "You are the Visionary Agent. Your job is to brainstorm one single, highly innovative feature that fulfills the Architect's directive."
     user_prompt = f"Architect Directive:\n{directive}\n\nBrainstorm a new feature for {repo}. Keep it under 3 sentences."
@@ -405,10 +406,10 @@ async def brainstormer_node(state: AgentState):
     idea = await run_llm_with_tools(system_prompt, user_prompt)
     state["idea"] = idea
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Visionary": "active"}}
     )
-    state["log_messages"].append(
+    new_logs.append(
         {
             "type": "ui_update",
             "pipeline": {
@@ -419,7 +420,7 @@ async def brainstormer_node(state: AgentState):
             },
         }
     )
-    state["log_messages"].append(
+    new_logs.append(
         {
             "agent": "Visionary",
             "msg": f"Proposed Feature: {idea}",
@@ -435,7 +436,7 @@ async def brainstormer_node(state: AgentState):
                 body=f"### Architect Directive\n{directive}\n\n### Proposed Feature\n{idea}",
             )
             state["issue_number"] = issue.number
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Created GitHub Issue #{issue.number}",
@@ -443,7 +444,7 @@ async def brainstormer_node(state: AgentState):
                 }
             )
         except Exception as e:
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Failed to create Issue: {str(e)}",
@@ -451,23 +452,23 @@ async def brainstormer_node(state: AgentState):
                 }
             )
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Visionary": "idle"}}
     )
-    return state
-
+    return {"idea": idea, "issue_number": state.get("issue_number", 0), "log_messages": new_logs}
 
 async def pm_node(state: AgentState):
+    new_logs = []
     idea = state["idea"]
     directive = state.get("architect_directive", "")
     repo = state["repo_name"]
     issue_number = state.get("issue_number")
     target_issue = state.get("target_issue")
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Reviewer": "active"}}
     )
-    state["log_messages"].append(
+    new_logs.append(
         {
             "type": "ui_update",
             "pipeline": {
@@ -482,17 +483,17 @@ async def pm_node(state: AgentState):
     if target_issue:
         decision = "APPROVED (Auto-approved by Targeted Issue Mode)"
         state["pm_decision"] = decision
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "agent": "Reviewer",
                 "msg": f"Decision: {decision}",
                 "color": "text-amber-400",
             }
         )
-        state["log_messages"].append(
+        new_logs.append(
             {"type": "ui_update", "agentStatus": {"Reviewer": "idle"}}
         )
-        return state
+        return {"pm_decision": decision, "log_messages": new_logs}
 
     system_prompt = "You are the Product Manager. Review the proposed feature against the Architect's directive. Decide if we should build it ('APPROVED') or not ('REJECTED'). Start your response with APPROVED or REJECTED, then give a 1 sentence reason."
 
@@ -503,7 +504,7 @@ async def pm_node(state: AgentState):
 
     is_approved = decision.strip().upper().startswith("APPROVED")
     msg_color = "text-amber-400" if is_approved else "text-red-400"
-    state["log_messages"].append(
+    new_logs.append(
         {"agent": "Reviewer", "msg": f"Decision: {decision}", "color": msg_color}
     )
 
@@ -514,7 +515,7 @@ async def pm_node(state: AgentState):
             issue.create_comment(f"**Reviewer Decision:** {decision}")
             if not is_approved:
                 issue.edit(state="closed")
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Commented on Issue #{issue_number}",
@@ -522,7 +523,7 @@ async def pm_node(state: AgentState):
                 }
             )
         except Exception as e:
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Failed to comment on Issue: {str(e)}",
@@ -530,11 +531,10 @@ async def pm_node(state: AgentState):
                 }
             )
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Reviewer": "idle"}}
     )
-    return state
-
+    return {"pm_decision": decision, "log_messages": new_logs}
 
 def should_implement(state: AgentState):
     return (
@@ -545,6 +545,7 @@ def should_implement(state: AgentState):
 
 
 async def implementer_node(state: AgentState):
+    new_logs = []
     idea = state["idea"]
     issue_number = state.get("issue_number")
     iteration = state.get("iteration", 0)
@@ -561,12 +562,12 @@ async def implementer_node(state: AgentState):
     code = await run_llm_with_tools(system_prompt, user_prompt)
     state["code"] = code
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Implementer": "active"}}
     )
 
     if iteration > 0:
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "agent": "Implementer",
                 "msg": f"Fixed code based on feedback (Iteration {iteration}).",
@@ -574,14 +575,14 @@ async def implementer_node(state: AgentState):
             }
         )
     else:
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "agent": "Implementer",
                 "msg": "Generated initial code implementation.",
                 "color": "text-blue-400",
             }
         )
-        state["log_messages"].append(
+        new_logs.append(
             {
                 "type": "ui_update",
                 "pipeline": {
@@ -628,7 +629,7 @@ async def implementer_node(state: AgentState):
                     base=default_branch,
                 )
                 state["pr_number"] = pr.number
-                state["log_messages"].append(
+                new_logs.append(
                     {
                         "agent": "System",
                         "msg": f"Created PR #{pr.number}: {pr.html_url}",
@@ -650,7 +651,7 @@ async def implementer_node(state: AgentState):
                 pr.create_issue_comment(
                     f"I have pushed a new commit to address the feedback. (Iteration {iteration})"
                 )
-                state["log_messages"].append(
+                new_logs.append(
                     {
                         "agent": "System",
                         "msg": f"Pushed fix to PR #{pr_number}",
@@ -659,7 +660,7 @@ async def implementer_node(state: AgentState):
                 )
 
         except Exception as e:
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Failed GitHub API Action: {str(e)}",
@@ -667,13 +668,13 @@ async def implementer_node(state: AgentState):
                 }
             )
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Implementer": "idle"}}
     )
-    return state
-
+    return {"code": code, "branch_name": state.get("branch_name", ""), "pr_number": state.get("pr_number", 0), "log_messages": new_logs}
 
 async def maintainer_node(state: AgentState):
+    new_logs = []
     code = state["code"]
     repo_name = state["repo_name"]
     pr_number = state.get("pr_number")
@@ -683,10 +684,10 @@ async def maintainer_node(state: AgentState):
     review = await run_llm_with_tools(system_prompt, f"Review this code:\n{code}")
     state["review"] = review
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Maintainer": "active"}}
     )
-    state["log_messages"].append(
+    new_logs.append(
         {
             "agent": "Maintainer",
             "msg": f"Code Review: {review}",
@@ -704,7 +705,7 @@ async def maintainer_node(state: AgentState):
 
             if is_lgtm:
                 pr.merge(commit_message=f"Merged PR #{pr_number}")
-                state["log_messages"].append(
+                new_logs.append(
                     {
                         "type": "ui_update",
                         "activity": {
@@ -714,7 +715,7 @@ async def maintainer_node(state: AgentState):
                         },
                     }
                 )
-                state["log_messages"].append(
+                new_logs.append(
                     {
                         "agent": "System",
                         "msg": f"Successfully merged PR #{pr_number}!",
@@ -722,7 +723,7 @@ async def maintainer_node(state: AgentState):
                     }
                 )
         except Exception as e:
-            state["log_messages"].append(
+            new_logs.append(
                 {
                     "agent": "System",
                     "msg": f"Failed to review/merge PR: {str(e)}",
@@ -733,11 +734,10 @@ async def maintainer_node(state: AgentState):
     if not is_lgtm:
         state["iteration"] = iteration + 1
 
-    state["log_messages"].append(
+    new_logs.append(
         {"type": "ui_update", "agentStatus": {"Maintainer": "idle"}}
     )
-    return state
-
+    return {"review": review, "iteration": state.get("iteration", 0), "log_messages": new_logs}
 
 def should_iterate(state: AgentState):
     if "LGTM" in state.get("review", "").upper():
@@ -800,9 +800,7 @@ async def run_agent_loop(repo_name: str, ws_manager, target_issue: int | None = 
     )
 
     last_idx = 0
-    async for s in app.astream(initial_state):
-        node_name = list(s.keys())[0]
-        state = s[node_name]
+    async for state in app.astream(initial_state, stream_mode="values"):
 
         new_msgs = state["log_messages"][last_idx:]
         for msg in new_msgs:
