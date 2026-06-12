@@ -354,26 +354,44 @@ def get_repo_file(repo_name: str, file_path: str):
     if not repo_dir.is_relative_to(base_tmp):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
-    target_path = (repo_dir / file_path).resolve()
+    try:
+        target_path = (repo_dir / file_path).resolve()
+    except (OSError, RuntimeError) as e:
+        logger.warning(f"Error resolving path {file_path}: {e}")
+        raise HTTPException(status_code=400, detail="Invalid or looping file path")
 
     # Strict path traversal security check for CodeQL
     if not target_path.is_relative_to(repo_dir):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    if not target_path.exists() or not target_path.is_file():
+    import os, stat
+    try:
+        fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        with target_path.open("r", encoding="utf-8") as f:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
             content = f.read()
         return {"content": content}
     except UnicodeDecodeError:
         raise HTTPException(status_code=415, detail="Cannot read binary file")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to read file {target_path}: {e}")
         raise HTTPException(
             status_code=500, detail="An internal error occurred while reading the file"
         )
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 # Serve the static Next.js frontend if the out directory exists
