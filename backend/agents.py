@@ -148,7 +148,9 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
         from mcp.client.session import ClientSession
         from langchain_mcp_adapters.tools import load_mcp_tools
 
-        server_params = StdioServerParameters(command="gitnexus", args=["mcp"])
+        import platform
+        cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
+        server_params = StdioServerParameters(command=cmd, args=["mcp"])
 
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -312,7 +314,7 @@ async def architect_node(state: AgentState):
     import subprocess
     import shutil
 
-    repo_dir = f"/tmp/{repo.replace('/', '_')}"
+    repo_dir = os.path.abspath(os.path.join("/tmp", repo.replace("/", "_").replace("\\", "_")))
     repo_url = (
         f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
         if GITHUB_TOKEN
@@ -339,14 +341,16 @@ async def architect_node(state: AgentState):
 
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:
+            import platform
+            cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
             # Run gitnexus asynchronously so it doesn't block the FastAPI event loop
             analyze_proc = await asyncio.create_subprocess_exec(
-                "gitnexus", "analyze", cwd=repo_dir
+                cmd, "analyze", cwd=repo_dir
             )
             await analyze_proc.communicate()
 
             index_proc = await asyncio.create_subprocess_exec(
-                "gitnexus", "index", cwd=repo_dir
+                cmd, "index", cwd=repo_dir
             )
             await index_proc.communicate()
         except Exception as e:
@@ -778,6 +782,24 @@ async def implementer_node(state: AgentState):
                         "color": "text-emerald-500",
                     }
                 )
+
+            # Local sync to update the workspace clone on disk
+            repo_dir = os.path.abspath(os.path.join("/tmp", state["repo_name"].replace("/", "_").replace("\\", "_")))
+            if os.path.exists(repo_dir):
+                local_path = os.path.join(repo_dir, path)
+                try:
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    with open(local_path, "w", encoding="utf-8") as f:
+                        f.write(code_to_commit)
+                    new_logs.append(
+                        {
+                            "agent": "System",
+                            "msg": f"Synced generated code locally: {path}",
+                            "color": "text-zinc-500",
+                        }
+                    )
+                except Exception as local_err:
+                    print(f"Failed to sync code locally: {local_err}")
 
         except Exception as e:
             new_logs.append(
