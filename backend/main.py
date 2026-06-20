@@ -58,8 +58,10 @@ async def lifespan(app: FastAPI):
     global gitnexus_process
     # Start the GitNexus MCP server in the background
     try:
+        import platform
+        cmd = ["gitnexus.cmd", "serve"] if platform.system() == "Windows" else ["gitnexus", "serve"]
         gitnexus_process = subprocess.Popen(
-            ["gitnexus", "serve"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -79,7 +81,7 @@ app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 # Allow the Next.js frontend to connect to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -202,6 +204,12 @@ async def delete_repo_file(repo_name: str, file_path: str):
         file = repo.get_contents(file_path)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
+
+    if isinstance(file, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Directories cannot be deleted directly via this endpoint."
+        )
 
     message = f"Delete {file_path} via AutoMaintainer IDE"
     try:
