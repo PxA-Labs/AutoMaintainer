@@ -59,7 +59,12 @@ async def lifespan(app: FastAPI):
     # Start the GitNexus MCP server in the background
     try:
         import platform
-        cmd = ["gitnexus.cmd", "serve"] if platform.system() == "Windows" else ["gitnexus", "serve"]
+
+        cmd = (
+            ["gitnexus.cmd", "serve"]
+            if platform.system() == "Windows"
+            else ["gitnexus", "serve"]
+        )
         gitnexus_process = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -208,7 +213,7 @@ async def delete_repo_file(repo_name: str, file_path: str):
     if isinstance(file, list):
         raise HTTPException(
             status_code=400,
-            detail="Directories cannot be deleted directly via this endpoint."
+            detail="Directories cannot be deleted directly via this endpoint.",
         )
 
     message = f"Delete {file_path} via AutoMaintainer IDE"

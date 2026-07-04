@@ -149,6 +149,7 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
         from langchain_mcp_adapters.tools import load_mcp_tools
 
         import platform
+
         cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
         server_params = StdioServerParameters(command=cmd, args=["mcp"])
 
@@ -314,7 +315,9 @@ async def architect_node(state: AgentState):
     import subprocess
     import shutil
 
-    repo_dir = os.path.abspath(os.path.join("/tmp", repo.replace("/", "_").replace("\\", "_")))
+    repo_dir = os.path.abspath(
+        os.path.join("/tmp", repo.replace("/", "_").replace("\\", "_"))
+    )
     repo_url = (
         f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
         if GITHUB_TOKEN
@@ -342,6 +345,7 @@ async def architect_node(state: AgentState):
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:
             import platform
+
             cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
             # Run gitnexus asynchronously so it doesn't block the FastAPI event loop
             analyze_proc = await asyncio.create_subprocess_exec(
@@ -784,7 +788,11 @@ async def implementer_node(state: AgentState):
                 )
 
             # Local sync to update the workspace clone on disk
-            repo_dir = os.path.abspath(os.path.join("/tmp", state["repo_name"].replace("/", "_").replace("\\", "_")))
+            repo_dir = os.path.abspath(
+                os.path.join(
+                    "/tmp", state["repo_name"].replace("/", "_").replace("\\", "_")
+                )
+            )
             if os.path.exists(repo_dir):
                 local_path = os.path.join(repo_dir, path)
                 try:
