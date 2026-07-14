@@ -110,40 +110,57 @@ jobs:
           
           ENTRY="- ${PR_TITLE} ([#${PR_NUMBER}](${PR_URL})) - @${PR_AUTHOR}"
           
+          UNRELEASED_LINE=$(grep -n "^## \[Unreleased\]" "$CHANGELOG_FILE" | head -1 | cut -d: -f1)
+          
+          if [ -z "$UNRELEASED_LINE" ]; then
+            echo "Error: Could not find Unreleased section"
+            exit 1
+          fi
+          
           case $PR_TYPE in
             "added")
-              if grep -q "### Added" "$CHANGELOG_FILE"; then
-                sed -i "/^### Added$/a\\$ENTRY" "$CHANGELOG_FILE"
+              ADDED_LINE=$(tail -n +"$UNRELEASED_LINE" "$CHANGELOG_FILE" | grep -n "^### Added" | head -1 | cut -d: -f1)
+              if [ -n "$ADDED_LINE" ]; then
+                ADDED_LINE=$((UNRELEASED_LINE + ADDED_LINE - 1))
+                sed -i "${ADDED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
               else
-                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "changed")
-              if grep -q "### Changed" "$CHANGELOG_FILE"; then
-                sed -i "/^### Changed$/a\\$ENTRY" "$CHANGELOG_FILE"
+              CHANGED_LINE=$(tail -n +"$UNRELEASED_LINE" "$CHANGELOG_FILE" | grep -n "^### Changed" | head -1 | cut -d: -f1)
+              if [ -n "$CHANGED_LINE" ]; then
+                CHANGED_LINE=$((UNRELEASED_LINE + CHANGED_LINE - 1))
+                sed -i "${CHANGED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
               else
-                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "fixed")
-              if grep -q "### Fixed" "$CHANGELOG_FILE"; then
-                sed -i "/^### Fixed$/a\\$ENTRY" "$CHANGELOG_FILE"
+              FIXED_LINE=$(tail -n +"$UNRELEASED_LINE" "$CHANGELOG_FILE" | grep -n "^### Fixed" | head -1 | cut -d: -f1)
+              if [ -n "$FIXED_LINE" ]; then
+                FIXED_LINE=$((UNRELEASED_LINE + FIXED_LINE - 1))
+                sed -i "${FIXED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
               else
-                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "documentation")
-              if grep -q "### Documentation" "$CHANGELOG_FILE"; then
-                sed -i "/^### Documentation$/a\\$ENTRY" "$CHANGELOG_FILE"
+              DOC_LINE=$(tail -n +"$UNRELEASED_LINE" "$CHANGELOG_FILE" | grep -n "^### Documentation" | head -1 | cut -d: -f1)
+              if [ -n "$DOC_LINE" ]; then
+                DOC_LINE=$((UNRELEASED_LINE + DOC_LINE - 1))
+                sed -i "${DOC_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
               else
-                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "maintenance")
-              if grep -q "### Maintenance" "$CHANGELOG_FILE"; then
-                sed -i "/^### Maintenance$/a\\$ENTRY" "$CHANGELOG_FILE"
+              MAINT_LINE=$(tail -n +"$UNRELEASED_LINE" "$CHANGELOG_FILE" | grep -n "^### Maintenance" | head -1 | cut -d: -f1)
+              if [ -n "$MAINT_LINE" ]; then
+                MAINT_LINE=$((UNRELEASED_LINE + MAINT_LINE - 1))
+                sed -i "${MAINT_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
               else
-                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
           esac
