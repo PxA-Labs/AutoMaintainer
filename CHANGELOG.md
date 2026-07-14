@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive terminal with xterm.js
 
 ### Fixed
+- fix(ci): simplify auto-changelog workflow to prevent duplicate sections ([#70](https://github.com/PxA-Labs/AutoMaintainer/pull/70)) - @purvanshjoshi
 - Auto-changelog workflow to preserve existing content (#69)
 - CI lint-and-check failures on Black formatting (#58)
 - Supabase database inactivity issues (#57)
@@ -66,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implemented tree-sitter AST parsing
 
 ### Fixed
+- fix(ci): simplify auto-changelog workflow to prevent duplicate sections ([#70](https://github.com/PxA-Labs/AutoMaintainer/pull/70)) - @purvanshjoshi
 - Multiple security vulnerabilities
 - Cross-platform compatibility issues
 - CI/CD pipeline reliability
