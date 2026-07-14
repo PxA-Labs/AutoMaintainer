@@ -24,15 +24,12 @@ jobs:
       - name: Check CI status
         id: check-ci
         run: |
-          # Get the last commit SHA from the merged PR
           PR_SHA="${{ github.event.pull_request.merge_commit_sha }}"
           echo "Merged commit: $PR_SHA"
           
-          # Check if all CI checks passed for this commit
           CHECKS_URL="https://api.github.com/repos/${{ github.repository }}/commits/$PR_SHA/check-runs"
           RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$CHECKS_URL")
           
-          # Count total checks and successful checks
           TOTAL=$(echo "$RESPONSE" | jq '.total_count')
           SUCCESSFUL=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "success")] | length')
           FAILED=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
@@ -58,9 +55,7 @@ jobs:
           PR_URL="${{ github.event.pull_request.html_url }}"
           PR_AUTHOR="${{ github.event.pull_request.user.login }}"
           MERGE_DATE="${{ github.event.pull_request.merged_at }}"
-          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
           
-          # Determine PR type from title or labels
           PR_TYPE="changed"
           if echo "$PR_TITLE" | grep -qi "^feat"; then
             PR_TYPE="added"
@@ -78,23 +73,17 @@ jobs:
             PR_TYPE="maintenance"
           fi
           
-          # Format date
-          FORMATTED_DATE=$(date -d "$MERGE_DATE" +"%Y-%m-%d" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$MERGE_DATE" +"%Y-%m-%d" 2>/dev/null || echo "$(date +%Y-%m-%d)")
-          
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "pr_author=$PR_AUTHOR" >> $GITHUB_OUTPUT
           echo "pr_type=$PR_TYPE" >> $GITHUB_OUTPUT
-          echo "merge_date=$FORMATTED_DATE" >> $GITHUB_OUTPUT
-          echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Create or update CHANGELOG.md
+      - name: Update CHANGELOG.md
         if: steps.check-ci.outputs.has_failure == 'false'
         run: |
           CHANGELOG_FILE="CHANGELOG.md"
           
-          # Create changelog header if file doesn't exist
           if [ ! -f "$CHANGELOG_FILE" ]; then
             cat > "$CHANGELOG_FILE" << 'EOF'
           # Changelog
@@ -109,137 +98,55 @@ jobs:
           EOF
           fi
           
-          # Check if Unreleased section exists, if not create it
           if ! grep -q "## \[Unreleased\]" "$CHANGELOG_FILE"; then
-            # Add Unreleased section after the header
-            sed -i '/^# Changelog$/,/^## \[.*\]$/{
-              /^## \[.*\]$/i\\
-          ## [Unreleased]
-            }' "$CHANGELOG_FILE"
+            sed -i '1a\\n## [Unreleased]' "$CHANGELOG_FILE"
           fi
           
-          # Create temporary file with new entry
-          TEMP_FILE=$(mktemp)
-          
-          # Add new entry under appropriate category
           PR_TYPE="${{ steps.pr-info.outputs.pr_type }}"
           PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
           PR_NUMBER="${{ steps.pr-info.outputs.pr_number }}"
           PR_URL="${{ steps.pr-info.outputs.pr_url }}"
           PR_AUTHOR="${{ steps.pr-info.outputs.pr_author }}"
           
-          # Find the line number of "## [Unreleased]" and the next version header
-          UNRELEASED_LINE=$(grep -n "^## \[Unreleased\]" "$CHANGELOG_FILE" | head -1 | cut -d: -f1)
+          ENTRY="- ${PR_TITLE} ([#${PR_NUMBER}](${PR_URL})) - @${PR_AUTHOR}"
           
-          if [ -z "$UNRELEASED_LINE" ]; then
-            echo "Error: Could not find Unreleased section"
-            exit 1
-          fi
-          
-          # Find the next version header after Unreleased
-          NEXT_VERSION_LINE=$(tail -n +"$((UNRELEASED_LINE + 1))" "$CHANGELOG_FILE" | grep -n "^## \[" | head -1 | cut -d: -f1)
-          
-          if [ -n "$NEXT_VERSION_LINE" ]; then
-            NEXT_VERSION_LINE=$((UNRELEASED_LINE + NEXT_VERSION_LINE))
-          else
-            NEXT_VERSION_LINE=$(wc -l < "$CHANGELOG_FILE")
-          fi
-          
-          # Extract the Unreleased section content (excluding the header)
-          UNRELEASED_CONTENT=$(sed -n "$((UNRELEASED_LINE + 1)),$((NEXT_VERSION_LINE - 1))p" "$CHANGELOG_FILE")
-          
-          # Check if the category already exists in the Unreleased section
-          CATEGORY_FOUND=false
           case $PR_TYPE in
             "added")
-              if echo "$UNRELEASED_CONTENT" | grep -q "### Added"; then
-                CATEGORY_FOUND=true
+              if grep -q "### Added" "$CHANGELOG_FILE"; then
+                sed -i "/^### Added$/a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "changed")
-              if echo "$UNRELEASED_CONTENT" | grep -q "### Changed"; then
-                CATEGORY_FOUND=true
+              if grep -q "### Changed" "$CHANGELOG_FILE"; then
+                sed -i "/^### Changed$/a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "fixed")
-              if echo "$UNRELEASED_CONTENT" | grep -q "### Fixed"; then
-                CATEGORY_FOUND=true
+              if grep -q "### Fixed" "$CHANGELOG_FILE"; then
+                sed -i "/^### Fixed$/a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "documentation")
-              if echo "$UNRELEASED_CONTENT" | grep -q "### Documentation"; then
-                CATEGORY_FOUND=true
+              if grep -q "### Documentation" "$CHANGELOG_FILE"; then
+                sed -i "/^### Documentation$/a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
             "maintenance")
-              if echo "$UNRELEASED_CONTENT" | grep -q "### Maintenance"; then
-                CATEGORY_FOUND=true
+              if grep -q "### Maintenance" "$CHANGELOG_FILE"; then
+                sed -i "/^### Maintenance$/a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "/^## \[Unreleased\]/a\\$ENTRY\n" "$CHANGELOG_FILE"
               fi
               ;;
           esac
-          
-          # Build the new Unreleased section
-          NEW_UNRELEASED="## [Unreleased]"
-          NEW_UNRELEASED="$NEW_UNRELEASED"$'\n'
-          
-          if [ "$CATEGORY_FOUND" = true ]; then
-            # Category exists, add entry under it
-            case $PR_TYPE in
-              "added")
-                NEW_UNRELEASED="$NEW_UNRELEASED$(echo "$UNRELEASED_CONTENT" | sed '/^### Added$/a\- '"$PR_TITLE"' ([#'"$PR_NUMBER"']('"$PR_URL"')) - @'"$PR_AUTHOR")"
-                ;;
-              "changed")
-                NEW_UNRELEASED="$NEW_UNRELEASED$(echo "$UNRELEASED_CONTENT" | sed '/^### Changed$/a\- '"$PR_TITLE"' ([#'"$PR_NUMBER"']('"$PR_URL"')) - @'"$PR_AUTHOR")"
-                ;;
-              "fixed")
-                NEW_UNRELEASED="$NEW_UNRELEASED$(echo "$UNRELEASED_CONTENT" | sed '/^### Fixed$/a\- '"$PR_TITLE"' ([#'"$PR_NUMBER"']('"$PR_URL"')) - @'"$PR_AUTHOR")"
-                ;;
-              "documentation")
-                NEW_UNRELEASED="$NEW_UNRELEASED$(echo "$UNRELEASED_CONTENT" | sed '/^### Documentation$/a\- '"$PR_TITLE"' ([#'"$PR_NUMBER"']('"$PR_URL"')) - @'"$PR_AUTHOR")"
-                ;;
-              "maintenance")
-                NEW_UNRELEASED="$NEW_UNRELEASED$(echo "$UNRELEASED_CONTENT" | sed '/^### Maintenance$/a\- '"$PR_TITLE"' ([#'"$PR_NUMBER"']('"$PR_URL"')) - @'"$PR_AUTHOR")"
-                ;;
-            esac
-          else
-            # Category doesn't exist, add it with the entry
-            NEW_UNRELEASED="$NEW_UNRELEASED"$'\n'
-            case $PR_TYPE in
-              "added")
-                NEW_UNRELEASED="$NEW_UNRELEASED### Added"$'\n'
-                ;;
-              "changed")
-                NEW_UNRELEASED="$NEW_UNRELEASED### Changed"$'\n'
-                ;;
-              "fixed")
-                NEW_UNRELEASED="$NEW_UNRELEASED### Fixed"$'\n'
-                ;;
-              "documentation")
-                NEW_UNRELEASED="$NEW_UNRELEASED### Documentation"$'\n'
-                ;;
-              "maintenance")
-                NEW_UNRELEASED="$NEW_UNRELEASED### Maintenance"$'\n'
-                ;;
-            esac
-            NEW_UNRELEASED="$NEW_UNRELEASED"$'\n'
-            NEW_UNRELEASED="$NEW_UNRELEASED- $PR_TITLE ([#$PR_NUMBER]($PR_URL)) - @$PR_AUTHOR"$'\n'
-            NEW_UNRELEASED="$NEW_UNRELEASED"$'\n'
-            NEW_UNRELEASED="$NEW_UNRELEASED$UNRELEASED_CONTENT"
-          fi
-          
-          # Build the final file
-          # 1. Content before Unreleased section
-          head -n "$((UNRELEASED_LINE - 1))" "$CHANGELOG_FILE" > "$TEMP_FILE"
-          
-          # 2. New Unreleased section
-          echo "$NEW_UNRELEASED" >> "$TEMP_FILE"
-          echo "" >> "$TEMP_FILE"
-          
-          # 3. Content after Unreleased section (remaining versions)
-          tail -n +"$NEXT_VERSION_LINE" "$CHANGELOG_FILE" >> "$TEMP_FILE"
-          
-          # Replace original file
-          mv "$TEMP_FILE" "$CHANGELOG_FILE"
           
           echo "Changelog updated successfully"
           cat "$CHANGELOG_FILE"
@@ -252,7 +159,6 @@ jobs:
           
           git add CHANGELOG.md
           
-          # Check if there are changes to commit
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
