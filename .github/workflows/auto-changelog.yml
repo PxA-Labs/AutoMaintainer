@@ -1,0 +1,222 @@
+name: Auto Update Changelog
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-changelog:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check CI status
+        id: check-ci
+        run: |
+          # Get the last commit SHA from the merged PR
+          PR_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "Merged commit: $PR_SHA"
+          
+          # Check if all CI checks passed for this commit
+          CHECKS_URL="https://api.github.com/repos/${{ github.repository }}/commits/$PR_SHA/check-runs"
+          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$CHECKS_URL")
+          
+          # Count total checks and successful checks
+          TOTAL=$(echo "$RESPONSE" | jq '.total_count')
+          SUCCESSFUL=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "success")] | length')
+          FAILED=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+          
+          echo "Total checks: $TOTAL"
+          echo "Successful: $SUCCESSFUL"
+          echo "Failed: $FAILED"
+          
+          if [ "$FAILED" -gt 0 ]; then
+            echo "has_failure=true" >> $GITHUB_OUTPUT
+            echo "Some CI checks failed. Skipping changelog update."
+          else
+            echo "has_failure=false" >> $GITHUB_OUTPUT
+            echo "All CI checks passed. Proceeding with changelog update."
+          fi
+
+      - name: Extract PR information
+        if: steps.check-ci.outputs.has_failure == 'false'
+        id: pr-info
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          MERGE_DATE="${{ github.event.pull_request.merged_at }}"
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          
+          # Determine PR type from title or labels
+          PR_TYPE="changed"
+          if echo "$PR_TITLE" | grep -qi "^feat"; then
+            PR_TYPE="added"
+          elif echo "$PR_TITLE" | grep -qi "^fix"; then
+            PR_TYPE="fixed"
+          elif echo "$PR_TITLE" | grep -qi "^docs"; then
+            PR_TYPE="documentation"
+          elif echo "$PR_TITLE" | grep -qi "^refactor"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^style"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^test"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^chore"; then
+            PR_TYPE="maintenance"
+          fi
+          
+          # Format date
+          FORMATTED_DATE=$(date -d "$MERGE_DATE" +"%Y-%m-%d" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$MERGE_DATE" +"%Y-%m-%d" 2>/dev/null || echo "$(date +%Y-%m-%d)")
+          
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "pr_author=$PR_AUTHOR" >> $GITHUB_OUTPUT
+          echo "pr_type=$PR_TYPE" >> $GITHUB_OUTPUT
+          echo "merge_date=$FORMATTED_DATE" >> $GITHUB_OUTPUT
+          echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Create or update CHANGELOG.md
+        if: steps.check-ci.outputs.has_failure == 'false'
+        run: |
+          CHANGELOG_FILE="CHANGELOG.md"
+          
+          # Create changelog header if file doesn't exist
+          if [ ! -f "$CHANGELOG_FILE" ]; then
+            cat > "$CHANGELOG_FILE" << 'EOF'
+          # Changelog
+
+          All notable changes to this project will be documented in this file.
+
+          The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+          and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+          ## [Unreleased]
+
+          EOF
+          fi
+          
+          # Check if Unreleased section exists, if not create it
+          if ! grep -q "## \[Unreleased\]" "$CHANGELOG_FILE"; then
+            # Add Unreleased section after the header
+            sed -i '/^# Changelog$/,/^## \[.*\]$/{
+              /^## \[.*\]$/i\\
+          ## [Unreleased]
+            }' "$CHANGELOG_FILE"
+          fi
+          
+          # Create temporary file with new entry
+          TEMP_FILE=$(mktemp)
+          
+          # Read existing content up to Unreleased section
+          awk '/^## \[Unreleased\]/{print; found=1; next} found{exit} !found{print}' "$CHANGELOG_FILE" > "$TEMP_FILE"
+          
+          # Add Unreleased header
+          echo "## [Unreleased]" >> "$TEMP_FILE"
+          echo "" >> "$TEMP_FILE"
+          
+          # Add new entry under appropriate category
+          PR_TYPE="${{ steps.pr-info.outputs.pr_type }}"
+          PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
+          PR_NUMBER="${{ steps.pr-info.outputs.pr_number }}"
+          PR_URL="${{ steps.pr-info.outputs.pr_url }}"
+          PR_AUTHOR="${{ steps.pr-info.outputs.pr_author }}"
+          
+          # Check if category exists, if not create it
+          CATEGORY_FOUND=false
+          case $PR_TYPE in
+            "added")
+              if grep -q "### Added" "$TEMP_FILE"; then
+                CATEGORY_FOUND=true
+              fi
+              ;;
+            "changed")
+              if grep -q "### Changed" "$TEMP_FILE"; then
+                CATEGORY_FOUND=true
+              fi
+              ;;
+            "fixed")
+              if grep -q "### Fixed" "$TEMP_FILE"; then
+                CATEGORY_FOUND=true
+              fi
+              ;;
+            "documentation")
+              if grep -q "### Documentation" "$TEMP_FILE"; then
+                CATEGORY_FOUND=true
+              fi
+              ;;
+            "maintenance")
+              if grep -q "### Maintenance" "$TEMP_FILE"; then
+                CATEGORY_FOUND=true
+              fi
+              ;;
+          esac
+          
+          # Add category if not found
+          if [ "$CATEGORY_FOUND" = false ]; then
+            case $PR_TYPE in
+              "added")
+                echo "### Added" >> "$TEMP_FILE"
+                echo "" >> "$TEMP_FILE"
+                ;;
+              "changed")
+                echo "### Changed" >> "$TEMP_FILE"
+                echo "" >> "$TEMP_FILE"
+                ;;
+              "fixed")
+                echo "### Fixed" >> "$TEMP_FILE"
+                echo "" >> "$TEMP_FILE"
+                ;;
+              "documentation")
+                echo "### Documentation" >> "$TEMP_FILE"
+                echo "" >> "$TEMP_FILE"
+                ;;
+              "maintenance")
+                echo "### Maintenance" >> "$TEMP_FILE"
+                echo "" >> "$TEMP_FILE"
+                ;;
+            esac
+          fi
+          
+          # Add the entry
+          echo "- ${PR_TITLE} ([#${PR_NUMBER}](${PR_URL})) - @${PR_AUTHOR}" >> "$TEMP_FILE"
+          echo "" >> "$TEMP_FILE"
+          
+          # Add remaining content (skip old Unreleased section and any existing entries)
+          awk '/^## \[.*\]/{if(/## \[Unreleased\]/){skip=1; next} else{skip=0}} !skip{print}' "$CHANGELOG_FILE" >> "$TEMP_FILE"
+          
+          # Replace original file
+          mv "$TEMP_FILE" "$CHANGELOG_FILE"
+          
+          echo "Changelog updated successfully"
+          cat "$CHANGELOG_FILE"
+
+      - name: Commit and push changes
+        if: steps.check-ci.outputs.has_failure == 'false'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add CHANGELOG.md
+          
+          # Check if there are changes to commit
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "docs: update CHANGELOG.md with PR #${{ steps.pr-info.outputs.pr_number }} [skip ci]"
+            git push
+            echo "Changelog updated and pushed successfully"
+          fi
