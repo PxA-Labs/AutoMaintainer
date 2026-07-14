@@ -6,42 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [Unreleased]
 
 ### Added
-- Auto-updating changelog workflow for merged PRs (#68)
-- Security issue documentation for exposed API keys (#60)
-- Code quality issue documentation (#61)
-- Test file issue documentation (#62)
-- Frontend code quality issue documentation (#63)
-- Dockerfile configuration issue documentation (#64)
-- Architecture issue documentation (#65)
-- CI/CD improvement issue documentation (#66)
-- Documentation improvement issue documentation (#67)
 
-### Changed
-- Backend CI formatting fixes (#59)
-- Supabase Realtime ecosystem migration
-- GitNexus code intelligence integration
-- Web IDE implementation with Monaco editor
-- Interactive terminal with xterm.js
+- feat(ci): add auto-updating changelog workflow ([#68](https://github.com/PxA-Labs/AutoMaintainer/pull/68)) - @purvanshjoshi
 
-### Fixed
-- CI lint-and-check failures on Black formatting (#58)
-- Supabase database inactivity issues (#57)
-- CORS misconfiguration in production (#51)
-- Implementer commits dummy Python file (#52)
-- WebSocket log streaming issues (#40)
+# Changelog
 
-### Documentation
-- Contributing guidelines and code standards (#67)
-- Architecture documentation
-- API documentation
-- Deployment guide
+All notable changes to this project will be documented in this file.
 
-### Maintenance
-- GitHub Actions workflow improvements
-- Docker configuration updates
-- Dependency updates
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0] - 2026-06-20
 
