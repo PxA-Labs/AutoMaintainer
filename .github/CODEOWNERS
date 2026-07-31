@@ -1,0 +1,26 @@
+# Default owners for everything in the repo
+* @purvanshjoshi @archittmittal
+
+# Backend code
+/backend/ @purvanshjoshi @archittmittal
+
+# Frontend/Dashboard code
+/dashboard/ @purvanshjoshi @archittmittal
+
+# CI/CD and GitHub Actions
+/.github/ @purvanshjoshi @archittmittal
+
+# Docker configuration
+Dockerfile @purvanshjoshi @archittmittal
+
+# Documentation
+*.md @purvanshjoshi @archittmittal
+
+# Security-related files
+SECURITY.md @purvanshjoshi @archittmittal
+.github/workflows/codeql-analysis.yml @purvanshjoshi @archittmittal
+
+# Dependencies
+backend/requirements.txt @purvanshjoshi @archittmittal
+dashboard/package.json @purvanshjoshi @archittmittal
+dashboard/package-lock.json @purvanshjoshi @archittmittal
