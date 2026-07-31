@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployment guide
 
 ### Maintenance
+- chore(deps): bump pascalgn/size-label-action from 0.5.1 to 0.5.7 ([#74](https://github.com/PxA-Labs/AutoMaintainer/pull/74)) - @dependabot[bot]
 - GitHub Actions workflow improvements
 - Docker configuration updates
 - Dependency updates
