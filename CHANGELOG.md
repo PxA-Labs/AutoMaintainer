@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployment guide
 
 ### Maintenance
+- chore(deps): bump lucide-react from 1.27.0 to 1.28.0 in /dashboard ([#103](https://github.com/PxA-Labs/AutoMaintainer/pull/103)) - @dependabot[bot]
 - chore(deps-dev): bump eslint-config-next from 16.2.12 to 16.3.0 in /dashboard ([#98](https://github.com/PxA-Labs/AutoMaintainer/pull/98)) - @dependabot[bot]
 - chore(deps): bump actions/setup-python from 5 to 7 ([#97](https://github.com/PxA-Labs/AutoMaintainer/pull/97)) - @dependabot[bot]
 - chore(deps): bump docker/build-push-action from 5 to 7 ([#99](https://github.com/PxA-Labs/AutoMaintainer/pull/99)) - @dependabot[bot]
