@@ -69,8 +69,9 @@ async def broadcast_log(message: dict):
 
 def get_all_groq_keys():
     keys = []
-    if GROQ_API_KEY:
-        keys.append(GROQ_API_KEY)
+    primary = os.getenv("GROQ_API_KEY")
+    if primary:
+        keys.append(primary)
     for i in range(1, 10):
         k = os.getenv(f"GROQ_API_KEY_{i}")
         if k:
