@@ -26,20 +26,21 @@ def setup_dummy_repo():
     return repo_name
 
 
-if __name__ == "__main__":
+def test_get_repo_tree():
     repo_name = setup_dummy_repo()
-
-    print("--- Testing /tree Endpoint ---")
     response = client.get(f"/repo/{repo_name}/tree")
-    print(f"Status: {response.status_code}")
-    print(json.dumps(response.json(), indent=2))
+    assert response.status_code == 200
+    assert response.json()["name"] == repo_name
 
-    print("\n--- Testing /file Endpoint (Valid File) ---")
-    response2 = client.get(f"/repo/{repo_name}/file?file_path=src/index.py")
-    print(f"Status: {response2.status_code}")
-    print(response2.json())
 
-    print("\n--- Testing /file Endpoint (Path Traversal Attack) ---")
-    response3 = client.get(f"/repo/{repo_name}/file?file_path=../../../../etc/passwd")
-    print(f"Status: {response3.status_code}")
-    print(response3.json())
+def test_get_repo_file_valid():
+    repo_name = "PxA-Labs/AutoMaintainer"
+    response = client.get(f"/repo/{repo_name}/file?file_path=src/index.py")
+    assert response.status_code == 200
+    assert response.json()["content"] == "print('hello world')"
+
+
+def test_get_repo_file_path_traversal():
+    repo_name = "PxA-Labs/AutoMaintainer"
+    response = client.get(f"/repo/{repo_name}/file?file_path=../../../../etc/passwd")
+    assert response.status_code in (400, 403)
