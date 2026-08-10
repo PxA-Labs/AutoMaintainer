@@ -18,10 +18,10 @@ jobs:
         working-directory: ./dashboard
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Use Node.js 22.x
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: '22.x'
         cache: 'npm'
@@ -34,4 +34,7 @@ jobs:
       run: npm run lint
       
     - name: Build Next.js App
+      env:
+        NEXT_PUBLIC_SUPABASE_URL: "https://mock.supabase.co"
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: "mock_key"
       run: npm run build

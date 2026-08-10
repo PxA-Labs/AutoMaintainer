@@ -11,15 +11,60 @@ import asyncio
 from github import Github
 import uuid
 import json
+import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
-
-current_ws = ContextVar("current_ws")
+from supabase import create_client, Client
 
 load_dotenv()
+current_run_id = ContextVar("current_run_id")
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 gh = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+async def broadcast_log(message: dict):
+    run_id = current_run_id.get(None)
+    if not run_id or not supabase:
+        print("Log fallback:", message)
+        return
+
+    log_type = message.get("type", "message")
+    agent_name = message.get("agent", "System")
+    msg_text = message.get("msg")
+    color = message.get("color")
+
+    metadata = None
+    if log_type == "ui_update":
+        metadata = {k: v for k, v in message.items() if k != "type"}
+        agent_name = "System"
+        msg_text = "UI Update"
+
+    try:
+        # Run sync supabase call in executor to avoid blocking event loop
+        await asyncio.to_thread(
+            lambda: supabase.table("logs")
+            .insert(
+                {
+                    "run_id": run_id,
+                    "agent_name": agent_name,
+                    "log_type": log_type,
+                    "message": msg_text,
+                    "color": color,
+                    "metadata": metadata,
+                }
+            )
+            .execute()
+        )
+    except Exception as e:
+        print(f"Supabase insert failed: {e}")
 
 
 def get_all_groq_keys():
@@ -51,29 +96,50 @@ class AgentState(TypedDict):
     log_messages: Annotated[list, operator.add]
 
 
-def run_llm(system_prompt: str, user_prompt: str):
-    from litellm.exceptions import RateLimitError
-
+async def run_llm(system_prompt: str, user_prompt: str) -> str:
     keys = get_all_groq_keys()
     if not keys:
+        run_id = current_run_id.get(None)
+        if run_id:
+            await broadcast_log(
+                {
+                    "agent": "System",
+                    "msg": "[ERROR] No GROQ_API_KEY found in environment. Agents cannot run.",
+                    "color": "text-red-500",
+                }
+            )
         raise ValueError("No GROQ_API_KEY found in environment")
 
-    for idx, key in enumerate(keys):
-        for model_name in ["groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant"]:
-            try:
-                response = completion(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    api_key=key,
-                )
-                return response.choices[0].message.content
-            except RateLimitError:
-                print(f"Key {idx} rate limited on {model_name}, falling back...")
-                continue
-    raise Exception("All Groq keys and models are currently rate limited. Please wait a minute.")
+    llms = [ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys] + [
+        ChatGroq(model="llama-3.1-8b-instant", api_key=k) for k in keys
+    ]
+    if len(llms) > 1:
+        llm = llms[0].with_fallbacks(llms[1:])
+    else:
+        llm = llms[0]
+
+    start_t = time.time()
+    response = await llm.ainvoke(
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    )
+    latency_ms = int((time.time() - start_t) * 1000)
+
+    tokens = 0
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        tokens = response.usage_metadata.get("total_tokens", 0)
+
+    run_id = current_run_id.get(None)
+    if run_id:
+        asyncio.create_task(
+            broadcast_log(
+                {
+                    "type": "ui_update",
+                    "systemHealth": {"latency": latency_ms, "tokensUsed": tokens},
+                }
+            )
+        )
+
+    return response.content
 
 
 async def run_llm_with_tools(system_prompt: str, user_prompt: str):
@@ -82,7 +148,10 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
         from mcp.client.session import ClientSession
         from langchain_mcp_adapters.tools import load_mcp_tools
 
-        server_params = StdioServerParameters(command="gitnexus", args=["mcp"])
+        import platform
+
+        cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
+        server_params = StdioServerParameters(command=cmd, args=["mcp"])
 
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -91,9 +160,9 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
 
                 keys = get_all_groq_keys()
                 if not keys:
-                    ws = current_ws.get(None)
-                    if ws:
-                        await ws.broadcast(
+                    run_id = current_run_id.get(None)
+                    if run_id:
+                        await broadcast_log(
                             {
                                 "agent": "System",
                                 "msg": "[ERROR] No GROQ_API_KEY found in environment. Agents cannot run.",
@@ -104,9 +173,7 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
 
                 llms = [
                     ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys
-                ] + [
-                    ChatGroq(model="llama-3.1-8b-instant", api_key=k) for k in keys
-                ]
+                ] + [ChatGroq(model="llama-3.1-8b-instant", api_key=k) for k in keys]
                 if len(llms) > 1:
                     llm = llms[0].with_fallbacks(llms[1:])
                 else:
@@ -115,14 +182,16 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
                 agent = create_react_agent(llm, tools=tools)
 
                 final_res = None
+                start_t = time.time()
+
                 async for chunk in agent.astream(
                     {"messages": [("system", system_prompt), ("user", user_prompt)]},
                     stream_mode="updates",
                 ):
-                    ws = current_ws.get(None)
-                    if "tools" in chunk and ws:
+                    run_id = current_run_id.get(None)
+                    if "tools" in chunk and run_id:
                         for tm in chunk["tools"].get("messages", []):
-                            await ws.broadcast(
+                            await broadcast_log(
                                 {
                                     "agent": "GitNexus",
                                     "msg": f"🔍 Searched code graph using '{tm.name}'...",
@@ -131,23 +200,52 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
                             )
                     if "agent" in chunk:
                         final_res = chunk["agent"]
+                        if (
+                            "messages" in chunk["agent"]
+                            and len(chunk["agent"]["messages"]) > 0
+                        ):
+                            msg = chunk["agent"]["messages"][-1]
+                            if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                                tokens = msg.usage_metadata.get("total_tokens", 0)
+                                latency_ms = int((time.time() - start_t) * 1000)
+                                if run_id:
+                                    await broadcast_log(
+                                        {
+                                            "type": "ui_update",
+                                            "systemHealth": {
+                                                "latency": latency_ms,
+                                                "tokensUsed": tokens,
+                                            },
+                                        }
+                                    )
 
                 return final_res["messages"][-1].content
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"MCP Tool execution fallback: {e}")
+        err_str = str(e)
+        if "RateLimitError" in err_str or "429" in err_str:
+            print(
+                f"⚠️ Groq Rate Limit Reached during Tool loop. Falling back to simple LLM prompt."
+            )
+        else:
+            import traceback
+
+            traceback.print_exc()
+            print(f"MCP Tool execution fallback: {e}")
         try:
-            return run_llm(system_prompt, user_prompt)
+            return await run_llm(system_prompt, user_prompt)
         except Exception as e2:
             print(f"LLM execution completely failed: {e2}")
-            ws = current_ws.get(None)
-            if ws:
-                asyncio.create_task(ws.broadcast({
-                    "agent": "System",
-                    "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
-                    "color": "text-red-500"
-                }))
+            run_id = current_run_id.get(None)
+            if run_id:
+                asyncio.create_task(
+                    broadcast_log(
+                        {
+                            "agent": "System",
+                            "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
+                            "color": "text-red-500",
+                        }
+                    )
+                )
             return f"[ERROR] LLM execution failed: {e2}"
 
 
@@ -158,9 +256,7 @@ async def architect_node(state: AgentState):
     tree_content = ""
     readme_content = ""
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Architect": "active"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "active"}})
 
     if target_issue and gh:
         try:
@@ -187,10 +283,11 @@ async def architect_node(state: AgentState):
                     "color": "text-rose-400",
                 }
             )
-            new_logs.append(
-                {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
-            )
-            return {"architect_directive": directive, "log_messages": new_logs} # ARCHITECT EARLY RETURN
+            new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
+            return {
+                "architect_directive": directive,
+                "log_messages": new_logs,
+            }  # ARCHITECT EARLY RETURN
         except Exception as e:
             new_logs.append(
                 {
@@ -218,7 +315,9 @@ async def architect_node(state: AgentState):
     import subprocess
     import shutil
 
-    repo_dir = f"/tmp/{repo.replace('/', '_')}"
+    repo_dir = os.path.abspath(
+        os.path.join("/tmp", repo.replace("/", "_").replace("\\", "_"))
+    )
     repo_url = (
         f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
         if GITHUB_TOKEN
@@ -245,14 +344,17 @@ async def architect_node(state: AgentState):
 
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:
+            import platform
+
+            cmd = "gitnexus.cmd" if platform.system() == "Windows" else "gitnexus"
             # Run gitnexus asynchronously so it doesn't block the FastAPI event loop
             analyze_proc = await asyncio.create_subprocess_exec(
-                "gitnexus", "analyze", cwd=repo_dir
+                cmd, "analyze", cwd=repo_dir
             )
             await analyze_proc.communicate()
 
             index_proc = await asyncio.create_subprocess_exec(
-                "gitnexus", "index", cwd=repo_dir
+                cmd, "index", cwd=repo_dir
             )
             await index_proc.communicate()
         except Exception as e:
@@ -262,9 +364,9 @@ async def architect_node(state: AgentState):
             new_logs.append(
                 {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
             )
-            ws = current_ws.get(None)
-            if ws:
-                await ws.broadcast(
+            run_id = current_run_id.get(None)
+            if run_id:
+                await broadcast_log(
                     {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
                 )
             print(f"Failed to analyze repo with GitNexus: {e}")
@@ -278,8 +380,8 @@ async def architect_node(state: AgentState):
                     new_logs.append(
                         {"agent": "System", "msg": info_msg, "color": "text-zinc-500"}
                     )
-                    if ws:
-                        await ws.broadcast(
+                    if run_id:
+                        await broadcast_log(
                             {
                                 "agent": "System",
                                 "msg": info_msg,
@@ -372,9 +474,21 @@ async def architect_node(state: AgentState):
         }
     )
     new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
+        {
+            "type": "ui_update",
+            "activity": {
+                "title": "Analyzed Repository Architecture",
+                "time": "Just now",
+                "type": "search",
+            },
+        }
     )
-    return {"architect_directive": state.get("architect_directive", ""), "log_messages": new_logs}
+    new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
+    return {
+        "architect_directive": state.get("architect_directive", ""),
+        "log_messages": new_logs,
+    }
+
 
 async def brainstormer_node(state: AgentState):
     new_logs = []
@@ -385,9 +499,7 @@ async def brainstormer_node(state: AgentState):
     if target_issue:
         state["idea"] = directive
         state["issue_number"] = target_issue
-        new_logs.append(
-            {"type": "ui_update", "agentStatus": {"Visionary": "active"}}
-        )
+        new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "active"}})
         new_logs.append(
             {
                 "agent": "Visionary",
@@ -395,10 +507,12 @@ async def brainstormer_node(state: AgentState):
                 "color": "text-emerald-400",
             }
         )
-        new_logs.append(
-            {"type": "ui_update", "agentStatus": {"Visionary": "idle"}}
-        )
-        return {"idea": directive, "issue_number": target_issue, "log_messages": new_logs}
+        new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "idle"}})
+        return {
+            "idea": directive,
+            "issue_number": target_issue,
+            "log_messages": new_logs,
+        }
 
     system_prompt = "You are the Visionary Agent. Your job is to brainstorm one single, highly innovative feature that fulfills the Architect's directive."
     user_prompt = f"Architect Directive:\n{directive}\n\nBrainstorm a new feature for {repo}. Keep it under 3 sentences."
@@ -406,9 +520,7 @@ async def brainstormer_node(state: AgentState):
     idea = await run_llm_with_tools(system_prompt, user_prompt)
     state["idea"] = idea
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Visionary": "active"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "active"}})
     new_logs.append(
         {
             "type": "ui_update",
@@ -443,6 +555,16 @@ async def brainstormer_node(state: AgentState):
                     "color": "text-emerald-500",
                 }
             )
+            new_logs.append(
+                {
+                    "type": "ui_update",
+                    "activity": {
+                        "title": f"Created Issue #{issue.number}",
+                        "time": "Just now",
+                        "type": "search",
+                    },
+                }
+            )
         except Exception as e:
             new_logs.append(
                 {
@@ -452,10 +574,13 @@ async def brainstormer_node(state: AgentState):
                 }
             )
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Visionary": "idle"}}
-    )
-    return {"idea": idea, "issue_number": state.get("issue_number", 0), "log_messages": new_logs}
+    new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "idle"}})
+    return {
+        "idea": idea,
+        "issue_number": state.get("issue_number", 0),
+        "log_messages": new_logs,
+    }
+
 
 async def pm_node(state: AgentState):
     new_logs = []
@@ -465,9 +590,7 @@ async def pm_node(state: AgentState):
     issue_number = state.get("issue_number")
     target_issue = state.get("target_issue")
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Reviewer": "active"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "active"}})
     new_logs.append(
         {
             "type": "ui_update",
@@ -490,9 +613,7 @@ async def pm_node(state: AgentState):
                 "color": "text-amber-400",
             }
         )
-        new_logs.append(
-            {"type": "ui_update", "agentStatus": {"Reviewer": "idle"}}
-        )
+        new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
         return {"pm_decision": decision, "log_messages": new_logs}
 
     system_prompt = "You are the Product Manager. Review the proposed feature against the Architect's directive. Decide if we should build it ('APPROVED') or not ('REJECTED'). Start your response with APPROVED or REJECTED, then give a 1 sentence reason."
@@ -531,10 +652,9 @@ async def pm_node(state: AgentState):
                 }
             )
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Reviewer": "idle"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
     return {"pm_decision": decision, "log_messages": new_logs}
+
 
 def should_implement(state: AgentState):
     return (
@@ -562,9 +682,7 @@ async def implementer_node(state: AgentState):
     code = await run_llm_with_tools(system_prompt, user_prompt)
     state["code"] = code
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Implementer": "active"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "active"}})
 
     if iteration > 0:
         new_logs.append(
@@ -636,6 +754,16 @@ async def implementer_node(state: AgentState):
                         "color": "text-emerald-500",
                     }
                 )
+                new_logs.append(
+                    {
+                        "type": "ui_update",
+                        "activity": {
+                            "title": f"Opened PR #{pr.number}",
+                            "time": "Just now",
+                            "type": "merge",
+                        },
+                    }
+                )
             else:
                 branch_name = state["branch_name"]
                 file = gh_repo.get_contents(path, ref=branch_name)
@@ -659,6 +787,28 @@ async def implementer_node(state: AgentState):
                     }
                 )
 
+            # Local sync to update the workspace clone on disk
+            repo_dir = os.path.abspath(
+                os.path.join(
+                    "/tmp", state["repo_name"].replace("/", "_").replace("\\", "_")
+                )
+            )
+            if os.path.exists(repo_dir):
+                local_path = os.path.join(repo_dir, path)
+                try:
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    with open(local_path, "w", encoding="utf-8") as f:
+                        f.write(code_to_commit)
+                    new_logs.append(
+                        {
+                            "agent": "System",
+                            "msg": f"Synced generated code locally: {path}",
+                            "color": "text-zinc-500",
+                        }
+                    )
+                except Exception as local_err:
+                    print(f"Failed to sync code locally: {local_err}")
+
         except Exception as e:
             new_logs.append(
                 {
@@ -668,10 +818,14 @@ async def implementer_node(state: AgentState):
                 }
             )
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Implementer": "idle"}}
-    )
-    return {"code": code, "branch_name": state.get("branch_name", ""), "pr_number": state.get("pr_number", 0), "log_messages": new_logs}
+    new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "idle"}})
+    return {
+        "code": code,
+        "branch_name": state.get("branch_name", ""),
+        "pr_number": state.get("pr_number", 0),
+        "log_messages": new_logs,
+    }
+
 
 async def maintainer_node(state: AgentState):
     new_logs = []
@@ -684,9 +838,7 @@ async def maintainer_node(state: AgentState):
     review = await run_llm_with_tools(system_prompt, f"Review this code:\n{code}")
     state["review"] = review
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Maintainer": "active"}}
-    )
+    new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "active"}})
     new_logs.append(
         {
             "agent": "Maintainer",
@@ -734,10 +886,13 @@ async def maintainer_node(state: AgentState):
     if not is_lgtm:
         state["iteration"] = iteration + 1
 
-    new_logs.append(
-        {"type": "ui_update", "agentStatus": {"Maintainer": "idle"}}
-    )
-    return {"review": review, "iteration": state.get("iteration", 0), "log_messages": new_logs}
+    new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "idle"}})
+    return {
+        "review": review,
+        "iteration": state.get("iteration", 0),
+        "log_messages": new_logs,
+    }
+
 
 def should_iterate(state: AgentState):
     if "LGTM" in state.get("review", "").upper():
@@ -766,8 +921,31 @@ workflow.add_conditional_edges("maintainer", should_iterate)
 app = workflow.compile()
 
 
-async def run_agent_loop(repo_name: str, ws_manager, target_issue: int | None = None):
-    current_ws.set(ws_manager)
+async def run_agent_loop(
+    repo_name: str, target_issue: int | None = None, run_id: str = None
+):
+    if not run_id:
+        import uuid
+
+        run_id = str(uuid.uuid4())
+    current_run_id.set(run_id)
+
+    if supabase:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("runs")
+                .insert(
+                    {
+                        "id": run_id,
+                        "repo_name": repo_name,
+                        "target_issue": target_issue,
+                        "status": "running",
+                    }
+                )
+                .execute()
+            )
+        except Exception as e:
+            print(f"Failed to create run in Supabase: {e}")
 
     if repo_name.startswith("http://") or repo_name.startswith("https://"):
         from urllib.parse import urlparse
@@ -775,6 +953,16 @@ async def run_agent_loop(repo_name: str, ws_manager, target_issue: int | None = 
         parsed = urlparse(repo_name)
         if parsed.netloc in ["github.com", "www.github.com"]:
             repo_name = parsed.path.strip("/")
+
+    if not repo_name or repo_name == "owner/repo":
+        await broadcast_log(
+            {
+                "agent": "System",
+                "msg": "Invalid repository name. Please configure a valid Target Repository.",
+                "color": "text-red-500",
+            }
+        )
+        return
 
     initial_state = {
         "repo_name": repo_name,
@@ -791,7 +979,7 @@ async def run_agent_loop(repo_name: str, ws_manager, target_issue: int | None = 
         "log_messages": [],
     }
 
-    await ws_manager.broadcast(
+    await broadcast_log(
         {
             "agent": "System",
             "msg": f"Starting loop for repo: {repo_name}...",
@@ -804,11 +992,21 @@ async def run_agent_loop(repo_name: str, ws_manager, target_issue: int | None = 
 
         new_msgs = state["log_messages"][last_idx:]
         for msg in new_msgs:
-            await ws_manager.broadcast(msg)
+            await broadcast_log(msg)
             await asyncio.sleep(0.5)
 
         last_idx = len(state["log_messages"])
 
-    await ws_manager.broadcast(
+    await broadcast_log(
         {"agent": "System", "msg": "Agent loop complete.", "color": "text-zinc-500"}
     )
+    if supabase:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("runs")
+                .update({"status": "completed"})
+                .eq("id", run_id)
+                .execute()
+            )
+        except Exception as e:
+            print(f"Failed to update run status in Supabase: {e}")

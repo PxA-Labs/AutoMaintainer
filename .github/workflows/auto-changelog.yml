@@ -1,0 +1,194 @@
+name: Auto Update Changelog
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-changelog:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Check CI status
+        id: check-ci
+        run: |
+          PR_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          echo "Merged commit: $PR_SHA"
+          
+          CHECKS_URL="https://api.github.com/repos/${{ github.repository }}/commits/$PR_SHA/check-runs"
+          RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$CHECKS_URL")
+          
+          TOTAL=$(echo "$RESPONSE" | jq '.total_count')
+          SUCCESSFUL=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "success")] | length')
+          FAILED=$(echo "$RESPONSE" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+          
+          echo "Total checks: $TOTAL"
+          echo "Successful: $SUCCESSFUL"
+          echo "Failed: $FAILED"
+          
+          if [ "$FAILED" -gt 0 ]; then
+            echo "has_failure=true" >> $GITHUB_OUTPUT
+            echo "Some CI checks failed. Skipping changelog update."
+          else
+            echo "has_failure=false" >> $GITHUB_OUTPUT
+            echo "All CI checks passed. Proceeding with changelog update."
+          fi
+
+      - name: Extract PR information
+        if: steps.check-ci.outputs.has_failure == 'false'
+        id: pr-info
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          
+          PR_TYPE="changed"
+          if echo "$PR_TITLE" | grep -qi "^feat"; then
+            PR_TYPE="added"
+          elif echo "$PR_TITLE" | grep -qi "^fix"; then
+            PR_TYPE="fixed"
+          elif echo "$PR_TITLE" | grep -qi "^docs"; then
+            PR_TYPE="documentation"
+          elif echo "$PR_TITLE" | grep -qi "^refactor"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^style"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^test"; then
+            PR_TYPE="changed"
+          elif echo "$PR_TITLE" | grep -qi "^chore"; then
+            PR_TYPE="maintenance"
+          fi
+          
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "pr_author=$PR_AUTHOR" >> $GITHUB_OUTPUT
+          echo "pr_type=$PR_TYPE" >> $GITHUB_OUTPUT
+
+      - name: Update CHANGELOG.md
+        if: steps.check-ci.outputs.has_failure == 'false'
+        run: |
+          CHANGELOG_FILE="CHANGELOG.md"
+          
+          if [ ! -f "$CHANGELOG_FILE" ]; then
+            cat > "$CHANGELOG_FILE" << 'EOF'
+          # Changelog
+
+          All notable changes to this project will be documented in this file.
+
+          The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+          and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+          ## [Unreleased]
+
+          EOF
+          fi
+          
+          if ! grep -q "## \[Unreleased\]" "$CHANGELOG_FILE"; then
+            sed -i '1a\\n## [Unreleased]' "$CHANGELOG_FILE"
+          fi
+          
+          PR_TYPE="${{ steps.pr-info.outputs.pr_type }}"
+          PR_TITLE="${{ steps.pr-info.outputs.pr_title }}"
+          PR_NUMBER="${{ steps.pr-info.outputs.pr_number }}"
+          PR_URL="${{ steps.pr-info.outputs.pr_url }}"
+          PR_AUTHOR="${{ steps.pr-info.outputs.pr_author }}"
+          
+          ENTRY="- ${PR_TITLE} ([#${PR_NUMBER}](${PR_URL})) - @${PR_AUTHOR}"
+          
+          UNRELEASED_LINE=$(grep -n "^## \[Unreleased\]" "$CHANGELOG_FILE" | head -1 | cut -d: -f1)
+          
+          if [ -z "$UNRELEASED_LINE" ]; then
+            echo "Error: Could not find Unreleased section"
+            exit 1
+          fi
+          
+          NEXT_VERSION_LINE=$(tail -n +"$((UNRELEASED_LINE + 1))" "$CHANGELOG_FILE" | grep -n "^## \[" | head -1 | cut -d: -f1)
+          
+          if [ -n "$NEXT_VERSION_LINE" ]; then
+            NEXT_VERSION_LINE=$((UNRELEASED_LINE + NEXT_VERSION_LINE))
+          else
+            NEXT_VERSION_LINE=$(wc -l < "$CHANGELOG_FILE")
+          fi
+          
+          UNRELEASED_CONTENT=$(sed -n "$((UNRELEASED_LINE + 1)),$((NEXT_VERSION_LINE - 1))p" "$CHANGELOG_FILE")
+          
+          case $PR_TYPE in
+            "added")
+              if echo "$UNRELEASED_CONTENT" | grep -q "### Added"; then
+                ADDED_LINE=$(echo "$UNRELEASED_CONTENT" | grep -n "^### Added" | head -1 | cut -d: -f1)
+                ADDED_LINE=$((UNRELEASED_LINE + ADDED_LINE))
+                sed -i "${ADDED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
+              fi
+              ;;
+            "changed")
+              if echo "$UNRELEASED_CONTENT" | grep -q "### Changed"; then
+                CHANGED_LINE=$(echo "$UNRELEASED_CONTENT" | grep -n "^### Changed" | head -1 | cut -d: -f1)
+                CHANGED_LINE=$((UNRELEASED_LINE + CHANGED_LINE))
+                sed -i "${CHANGED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
+              fi
+              ;;
+            "fixed")
+              if echo "$UNRELEASED_CONTENT" | grep -q "### Fixed"; then
+                FIXED_LINE=$(echo "$UNRELEASED_CONTENT" | grep -n "^### Fixed" | head -1 | cut -d: -f1)
+                FIXED_LINE=$((UNRELEASED_LINE + FIXED_LINE))
+                sed -i "${FIXED_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
+              fi
+              ;;
+            "documentation")
+              if echo "$UNRELEASED_CONTENT" | grep -q "### Documentation"; then
+                DOC_LINE=$(echo "$UNRELEASED_CONTENT" | grep -n "^### Documentation" | head -1 | cut -d: -f1)
+                DOC_LINE=$((UNRELEASED_LINE + DOC_LINE))
+                sed -i "${DOC_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
+              fi
+              ;;
+            "maintenance")
+              if echo "$UNRELEASED_CONTENT" | grep -q "### Maintenance"; then
+                MAINT_LINE=$(echo "$UNRELEASED_CONTENT" | grep -n "^### Maintenance" | head -1 | cut -d: -f1)
+                MAINT_LINE=$((UNRELEASED_LINE + MAINT_LINE))
+                sed -i "${MAINT_LINE}a\\$ENTRY" "$CHANGELOG_FILE"
+              else
+                sed -i "${UNRELEASED_LINE}a\\$ENTRY\n" "$CHANGELOG_FILE"
+              fi
+              ;;
+          esac
+          
+          echo "Changelog updated successfully"
+          cat "$CHANGELOG_FILE"
+
+      - name: Commit and push changes
+        if: steps.check-ci.outputs.has_failure == 'false'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add CHANGELOG.md
+          
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "docs: update CHANGELOG.md with PR #${{ steps.pr-info.outputs.pr_number }} [skip ci]"
+            git push
+            echo "Changelog updated and pushed successfully"
+          fi

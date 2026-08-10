@@ -14,6 +14,8 @@ from typing import Optional
 from agents import run_agent_loop
 import asyncio
 import json
+import uuid
+import httpx
 import os
 import sys
 import platform
@@ -24,6 +26,30 @@ from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
+from pathlib import Path
+
+
+def get_safe_repo_dir(repo_name: str) -> Path:
+    base_tmp = Path("/tmp").resolve()
+    clean_name = repo_name.replace("/", "_").replace("\\", "_")
+    if ".." in clean_name:
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+    repo_dir = (base_tmp / clean_name).resolve()
+    if not repo_dir.is_relative_to(base_tmp) or repo_dir == base_tmp:
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+    return repo_dir
+
+
+def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
+    clean_path = file_path.lstrip("/").lstrip("\\")
+    if ".." in clean_path.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+    target_path = (repo_dir / clean_path).resolve()
+    if not target_path.is_relative_to(repo_dir):
+        raise HTTPException(status_code=403, detail="Invalid file path")
+    return target_path
+
+
 gitnexus_process = None
 
 
@@ -32,8 +58,15 @@ async def lifespan(app: FastAPI):
     global gitnexus_process
     # Start the GitNexus MCP server in the background
     try:
+        import platform
+
+        cmd = (
+            ["gitnexus.cmd", "serve"]
+            if platform.system() == "Windows"
+            else ["gitnexus", "serve"]
+        )
         gitnexus_process = subprocess.Popen(
-            ["gitnexus", "serve"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -53,34 +86,11 @@ app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 # Allow the Next.js frontend to connect to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except Exception:
-                pass
-
-
-manager = ConnectionManager()
 
 
 class StartRequest(BaseModel):
@@ -94,6 +104,13 @@ class FileUpdateRequest(BaseModel):
     commit_message: Optional[str] = None
 
 
+class FileCreateRequest(BaseModel):
+    file_path: str
+    content: str = ""
+    is_dir: bool = False
+    commit_message: Optional[str] = None
+
+
 active_task: Optional[asyncio.Task] = None
 
 
@@ -102,10 +119,11 @@ async def start_agents(req: StartRequest):
     global active_task
     if active_task and not active_task.done():
         return {"status": "already_running"}
+    run_id = str(uuid.uuid4())
     active_task = asyncio.create_task(
-        run_agent_loop(req.repo_name, manager, req.target_issue)
+        run_agent_loop(req.repo_name, req.target_issue, run_id)
     )
-    return {"status": "started"}
+    return {"status": "started", "run_id": run_id}
 
 
 @app.post("/repo/{repo_name:path}/file")
@@ -127,9 +145,95 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
     )
     try:
         repo.update_file(file.path, message, payload.content, file.sha)
+
+        # Write to local clone so the IDE doesn't show stale reads
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
+            target_path = get_safe_target_path(repo_dir, payload.file_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(payload.content, encoding="utf-8")
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update file: {e}")
     return {"status": "updated", "message": message}
+
+
+@app.post("/repo/{repo_name:path}/file/create")
+async def create_repo_file(repo_name: str, payload: FileCreateRequest):
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=401, detail="GitHub token not configured")
+    gh = Github(token)
+    try:
+        repo = gh.get_repo(repo_name)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+
+    message = (
+        payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
+    )
+
+    actual_path = payload.file_path
+    actual_content = payload.content
+    if payload.is_dir:
+        actual_path = f"{payload.file_path.rstrip('/')}/.gitkeep"
+        actual_content = ""
+
+    try:
+        repo.create_file(actual_path, message, actual_content)
+
+        # Write to local clone
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
+            target_path = get_safe_target_path(repo_dir, actual_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(actual_content, encoding="utf-8")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create file: {e}")
+    return {"status": "created", "message": message}
+
+
+@app.delete("/repo/{repo_name:path}/file")
+async def delete_repo_file(repo_name: str, file_path: str):
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=401, detail="GitHub token not configured")
+    gh = Github(token)
+    try:
+        repo = gh.get_repo(repo_name)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+
+    try:
+        file = repo.get_contents(file_path)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
+
+    if isinstance(file, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Directories cannot be deleted directly via this endpoint.",
+        )
+
+    message = f"Delete {file_path} via AutoMaintainer IDE"
+    try:
+        repo.delete_file(file.path, message, file.sha)
+
+        # Local delete
+        import shutil
+
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
+            target_path = get_safe_target_path(repo_dir, file_path)
+            if target_path.exists():
+                if target_path.is_file():
+                    target_path.unlink()
+                elif target_path.is_dir():
+                    shutil.rmtree(target_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
+    return {"status": "deleted", "message": message}
 
 
 @app.post("/stop")
@@ -138,27 +242,8 @@ async def stop_agents():
     if active_task and not active_task.done():
         active_task.cancel()
         active_task = None
-        await manager.broadcast(
-            {
-                "agent": "System",
-                "msg": "Agent loop cancelled by user.",
-                "color": "text-red-500",
-            }
-        )
         return {"status": "stopped"}
     return {"status": "not_running"}
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            # For now, just listen and keep the connection open
-            data = await websocket.receive_text()
-            await manager.broadcast({"type": "system", "msg": f"Received: {data}"})
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
 
 
 @app.websocket("/api/terminal/ws")
@@ -288,12 +373,7 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 
 @app.get("/repo/{repo_name:path}/tree")
 def get_repo_tree(repo_name: str):
-    base_tmp = os.path.abspath("/tmp")
-    clean_name = repo_name.replace("/", "_").replace("\\", "_")
-    repo_dir = os.path.abspath(os.path.join(base_tmp, clean_name))
-
-    if not repo_dir.startswith(base_tmp + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid repository name")
+    repo_dir = get_safe_repo_dir(repo_name)
 
     if not os.path.exists(repo_dir):
         raise HTTPException(
@@ -326,7 +406,7 @@ def get_repo_tree(repo_name: str):
                 is_dir = os.path.isdir(item_path)
                 node = {
                     "name": item,
-                    "path": os.path.relpath(item_path, repo_dir).replace("\\", "/"),
+                    "path": Path(item_path).relative_to(repo_dir).as_posix(),
                     "type": "directory" if is_dir else "file",
                 }
                 if is_dir:
@@ -343,28 +423,67 @@ def get_repo_tree(repo_name: str):
     return {"name": repo_name, "type": "directory", "children": build_tree(repo_dir)}
 
 
-@app.get("/repo/{repo_name:path}/file")
-def get_repo_file(repo_name: str, file_path: str):
-    from pathlib import Path
+@app.get("/repo/{repo_name:path}/search")
+def search_repo(repo_name: str, q: str):
+    repo_dir = get_safe_repo_dir(repo_name)
 
-    base_tmp = Path("/tmp").resolve()
-    clean_name = repo_name.replace("/", "_").replace("\\", "_")
-    repo_dir = (base_tmp / clean_name).resolve()
+    if not repo_dir.exists():
+        raise HTTPException(status_code=404, detail="Repo not found locally")
 
-    if not repo_dir.is_relative_to(base_tmp):
-        raise HTTPException(status_code=400, detail="Invalid repository name")
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        "env",
+        "build",
+        "dist",
+        ".next",
+    }
+    results = []
 
     try:
-        target_path = (repo_dir / file_path).resolve()
-    except (OSError, RuntimeError) as e:
-        logger.warning(f"Error resolving path {file_path}: {e}")
-        raise HTTPException(status_code=400, detail="Invalid or looping file path")
+        for root, dirs, files in os.walk(repo_dir):
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in ignored_dirs and not os.path.islink(os.path.join(root, d))
+            ]
+            for file in files:
+                file_path = os.path.join(root, file)
+                if os.path.islink(file_path):
+                    continue
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        for i, line in enumerate(f):
+                            if q.lower() in line.lower():
+                                rel_path = (
+                                    Path(file_path).relative_to(repo_dir).as_posix()
+                                )
+                                results.append(
+                                    {
+                                        "file": rel_path,
+                                        "line_number": i + 1,
+                                        "snippet": line.strip()[:200],
+                                    }
+                                )
+                except UnicodeDecodeError:
+                    pass
+                except Exception:
+                    pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Strict path traversal security check for CodeQL
-    if not target_path.is_relative_to(repo_dir):
-        raise HTTPException(status_code=403, detail="Invalid file path")
+    return {"query": q, "results": results[:100]}
+
+
+@app.get("/repo/{repo_name:path}/file")
+def get_repo_file(repo_name: str, file_path: str):
+    repo_dir = get_safe_repo_dir(repo_name)
+    target_path = get_safe_target_path(repo_dir, file_path)
 
     import os, stat
+
     try:
         fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:

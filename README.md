@@ -24,6 +24,12 @@ AutoMaintainer is a revolutionary proof-of-concept that demonstrates an entirely
 
 Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (via Groq)**, this system doesn't just print code to a terminal—it brainstorms ideas, creates real GitHub Issues, writes code, submits Pull Requests, reviews the PRs, fixes its own bugs, and merges the code into your `main` branch.
 
+> [!IMPORTANT]
+> **Supabase Real-time Architecture Required!**
+> This repository was recently upgraded from a legacy WebSocket architecture to a high-performance **Supabase Real-time Pub/Sub** ecosystem. For this early access / open-source version, you **must** create a free Supabase project and provide the URL and API Keys in your `.env` files for the UI to receive logs from the AI agents. See the [Database & Environment Setup](#2-database--environment-setup) section below for exact instructions!
+> 
+> *(Note: In the upcoming official ecosystem launch, this will be handled automatically via a central cloud and users will simply run `automaintainer login` without needing to configure their own database!)*
+
 ---
 
 ## Features
@@ -60,19 +66,34 @@ Open your browser to `http://localhost:7860`.
 - [Python](https://www.python.org/) (3.10+)
 - A [Groq API Key](https://console.groq.com/keys)
 - A [GitHub Personal Access Token](https://github.com/settings/tokens) (with `repo` permissions)
+- A [Supabase Project](https://supabase.com/) (Free Tier is fine)
 
-### 2. Environment Setup
+### 2. Database & Environment Setup
 Clone the repository:
 ```bash
 git clone https://github.com/PxA-Labs/AutoMaintainer.git
 cd AutoMaintainer
 ```
 
-Create a `.env` file in the root directory:
+**Supabase Setup:**
+Because AutoMaintainer now uses a high-performance Supabase Realtime architecture to stream logs to the UI:
+1. Create a new [Supabase Project](https://database.new)
+2. Go to your Supabase SQL Editor and run the provided `supabase_schema.sql` file located in the root of this repository. This creates the required `runs` and `logs` tables.
+3. Grab your API keys from **Project Settings -> API**.
+
+Create a `.env` file in the `backend/` directory:
 ```bash
 GROQ_API_KEY=your_groq_api_key_here
 GITHUB_TOKEN=your_github_token_here
-NEXT_PUBLIC_BACKEND_URL=http://your-custom-backend.com:8000  # Optional: For remote backends
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_KEY=your_secret_service_role_key
+```
+
+Create a `.env.local` file in the `dashboard/` directory:
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_public_anon_key
+NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
 ```
 
 ### 3. Run the Backend (FastAPI + LangGraph)
