@@ -137,7 +137,7 @@ function getBackendUrl(): string {
   if (typeof window !== "undefined") {
     const port = window.location.port;
     const hostname = window.location.hostname;
-    if (port === "3000") {
+    if ((hostname === "localhost" || hostname === "127.0.0.1") && port !== "8000") {
       return `${window.location.protocol}//${hostname}:8000`;
     }
     return `${window.location.protocol}//${window.location.host}`;
