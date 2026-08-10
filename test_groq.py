@@ -12,7 +12,7 @@ if not api_key:
 
 url = "https://api.groq.com/openai/v1/models"
 headers = {"Authorization": f"Bearer {api_key}"}
-response = requests.get(url, headers=headers)
+response = requests.get(url, headers=headers, timeout=10)
 response.raise_for_status()
 models = [m["id"] for m in response.json()["data"]]
 print("Available Groq Models:")

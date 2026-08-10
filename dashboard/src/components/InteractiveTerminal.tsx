@@ -49,7 +49,8 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
       const port = window.location.port;
       const hostname = window.location.hostname;
       if (port === "3000") {
-        backendUrl = `${window.location.protocol}//${hostname}:8000`;
+        const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
+        backendUrl = `${window.location.protocol}//${formattedHost}:8000`;
       } else {
         backendUrl = `${window.location.protocol}//${window.location.host}`;
       }
