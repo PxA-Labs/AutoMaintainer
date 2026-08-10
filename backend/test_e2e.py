@@ -2,15 +2,9 @@ import asyncio
 from agents import run_agent_loop
 
 
-class MockManager:
-    async def broadcast(self, message):
-        print(f"[WS BROADCAST] {message}")
-
-
 async def main():
-    manager = MockManager()
     print("--- Starting AutoMaintainer End-to-End Agent Loop Test ---")
-    await run_agent_loop("PxA-Labs/AutoMaintainer", manager, None)
+    await run_agent_loop("PxA-Labs/AutoMaintainer", None, "test-run-123")
     print("--- Done ---")
 
 
