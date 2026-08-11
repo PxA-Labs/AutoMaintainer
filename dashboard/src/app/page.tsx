@@ -32,8 +32,8 @@ function getBackendUrl(): string {
   if (typeof window !== "undefined") {
     const port = window.location.port;
     const hostname = window.location.hostname;
-    // If frontend is on the standard Next.js dev port, point to the FastAPI port
-    if (port === "3000") {
+    // In local dev (Next.js can run on 3000, 3001, etc. but FastAPI runs on 8000)
+    if ((hostname === "localhost" || hostname === "127.0.0.1") && port !== "8000") {
       return `${window.location.protocol}//${hostname}:8000`;
     }
     // Otherwise (production / Docker), same host serves both
