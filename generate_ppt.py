@@ -78,7 +78,7 @@ def create_presentation():
 
     add_bullet(
         tf,
-        "🧠 THINKS (Context & Logic)",
+        "[Logic] THINKS (Context & Logic)",
         level=0,
         bold=True,
         size=Pt(28),
@@ -95,7 +95,7 @@ def create_presentation():
 
     add_bullet(
         tf,
-        "⚖️ DECIDES (Agentic Reasoning)",
+        "[Reasoning] DECIDES (Agentic Reasoning)",
         level=0,
         bold=True,
         size=Pt(28),
@@ -114,7 +114,7 @@ def create_presentation():
 
     add_bullet(
         tf,
-        "⚡ ACTS (Independent Execution)",
+        "[Execution] ACTS (Independent Execution)",
         level=0,
         bold=True,
         size=Pt(28),
@@ -138,7 +138,7 @@ def create_presentation():
     ltf = left_box.text_frame
     add_bullet(
         ltf,
-        "❌ The Passive AI Bottleneck",
+        "[Problem] The Passive AI Bottleneck",
         level=0,
         bold=True,
         size=Pt(26),
@@ -162,7 +162,7 @@ def create_presentation():
     rtf = right_box.text_frame
     add_bullet(
         rtf,
-        "✅ The Autonomous Paradigm Shift",
+        "[Solution] The Autonomous Paradigm Shift",
         level=0,
         bold=True,
         size=Pt(26),
@@ -185,7 +185,7 @@ def create_presentation():
     txBox = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12), Inches(2))
     tf = txBox.text_frame
     add_bullet(
-        tf, "🛠️ The Tech Stack", level=0, bold=True, size=Pt(26), color=accent_color
+        tf, "[Tech] The Tech Stack", level=0, bold=True, size=Pt(26), color=accent_color
     )
     add_bullet(tf, "Agent Orchestration: LangGraph", level=1)
     add_bullet(tf, "Inference Engine: Llama 3 via Groq (Blazing fast LPU)", level=1)
@@ -201,7 +201,12 @@ def create_presentation():
     flow_box = slide.shapes.add_textbox(Inches(0.5), Inches(4.5), Inches(12), Inches(2))
     ftf = flow_box.text_frame
     add_bullet(
-        ftf, "🔄 Execution Flow", level=0, bold=True, size=Pt(26), color=accent_color
+        ftf,
+        "[Flow] Execution Flow",
+        level=0,
+        bold=True,
+        size=Pt(26),
+        color=accent_color,
     )
     add_bullet(
         ftf,

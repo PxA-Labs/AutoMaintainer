@@ -14,7 +14,6 @@ Legend: `[ ]` = Not opened | `[o]` = Opened on GitHub | `[/]` = In Progress | `[
 | 1 | CORS misconfiguration blocks Hugging Face deployments | P0 | `[o]` | [#2](https://github.com/archittmittal/AutoMaintainer/issues/2) | [#51](https://github.com/PxA-Labs/AutoMaintainer/issues/51) |
 | 2 | Implementer commits dummy code instead of real file changes | P0 | `[o]` | [#3](https://github.com/archittmittal/AutoMaintainer/issues/3) | [#52](https://github.com/PxA-Labs/AutoMaintainer/issues/52) |
 | 3 | `/tmp` repo clones never cleaned up — disk exhaustion | P1 | `[ ]` | — | — |
-| 4 | Log stream has no auto-scroll | P1 | `[ ]` | — | — |
 
 ---
 
@@ -22,6 +21,7 @@ Legend: `[ ]` = Not opened | `[o]` = Opened on GitHub | `[/]` = In Progress | `[
 
 | # | Title | Priority | Status | Fork Issue | Upstream Issue |
 |---|-------|----------|--------|------------|----------------|
+| 4 | Log stream has no auto-scroll | P1 | `[ ]` | — | — |
 | 5 | System Health widget shows hardcoded fake metrics | P2 | `[ ]` | — | — |
 | 6 | Refreshing page wipes all session logs & pipeline state | P2 | `[ ]` | — | — |
 | 7 | Rate-limit error strings get committed to GitHub as code | P1 | `[ ]` | — | — |
