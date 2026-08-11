@@ -126,9 +126,10 @@ async def healthz_supabase():
         )
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
+        logger.error(f"Supabase connection check failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail=f"Supabase connection failed (database may be paused or unreachable): {str(e)}",
+            detail="Supabase connection failed (database may be paused or unreachable)",
         )
 
 

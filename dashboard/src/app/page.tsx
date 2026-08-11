@@ -186,23 +186,64 @@ export default function Home() {
   }, [activeRunId]);
 
   useEffect(() => {
+    let active = true;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let currentController: AbortController | null = null;
+
     const checkSupabaseHealth = async () => {
+      if (!active) return;
+
+      if (currentController) {
+        currentController.abort();
+      }
+
+      const controller = new AbortController();
+      currentController = controller;
+
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Request timeout"));
+        }, 8000);
+      });
+
       try {
         const backendUrl = getBackendUrl();
-        const res = await fetch(`${backendUrl}/healthz/supabase`);
+        const fetchPromise = fetch(`${backendUrl}/healthz/supabase`, {
+          signal: controller.signal
+        });
+
+        const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
+        clearTimeout(timeoutId!);
+
         if (!res.ok) {
           setIsSupabaseUnreachable(true);
         } else {
           setIsSupabaseUnreachable(false);
         }
-      } catch (err) {
-        console.error("Failed to check Supabase health:", err);
-        setIsSupabaseUnreachable(true);
+      } catch (err: any) {
+        if (err.name !== "AbortError") {
+          console.error("Failed to check Supabase health:", err);
+          setIsSupabaseUnreachable(true);
+        }
+      } finally {
+        if (active) {
+          timeoutId = setTimeout(checkSupabaseHealth, 15000);
+        }
       }
     };
+
     checkSupabaseHealth();
-    const interval = setInterval(checkSupabaseHealth, 15000);
-    return () => clearInterval(interval);
+
+    return () => {
+      active = false;
+      if (currentController) {
+        currentController.abort();
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, []);
 
   return (
@@ -315,7 +356,7 @@ export default function Home() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden relative bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-[#0a0a0a] to-[#0a0a0a]">
         {isSupabaseUnreachable && (
-          <div className="bg-red-500/10 border-b border-red-500/20 px-8 py-3 flex items-center gap-3 text-red-400 text-sm font-medium transition-all shrink-0">
+          <div role="alert" className="bg-red-500/10 border-b border-red-500/20 px-8 py-3 flex items-center gap-3 text-red-400 text-sm font-medium transition-all shrink-0">
             <span className="flex h-2 w-2 relative shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>

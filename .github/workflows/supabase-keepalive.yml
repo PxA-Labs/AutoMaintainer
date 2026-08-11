@@ -24,6 +24,8 @@ jobs:
 
           echo "Pinging Supabase REST endpoint..."
           STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
             -H "apikey: $SUPABASE_SERVICE_KEY" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
             "$CLEAN_URL/rest/v1/runs?select=id&limit=1")
