@@ -281,6 +281,10 @@ async def stop_agents():
     global active_task
     if active_task and not active_task.done():
         active_task.cancel()
+        try:
+            await active_task
+        except asyncio.CancelledError:
+            pass
         active_task = None
         return {"status": "stopped"}
     return {"status": "not_running"}

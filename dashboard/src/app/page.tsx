@@ -32,7 +32,8 @@ function getBackendUrl(): string {
   if (typeof window !== "undefined") {
     const port = window.location.port;
     const hostname = window.location.hostname;
-    if (port === "3000") {
+    // In local dev (Next.js can run on 3000, 3001, etc. but FastAPI runs on 8000)
+    if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") && port !== "8000") {
       const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
       return `${window.location.protocol}//${formattedHost}:8000`;
     }
