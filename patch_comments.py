@@ -23,5 +23,6 @@ res = requests.patch(
     "https://api.github.com/repos/PxA-Labs/AutoMaintainer/issues/comments/4633057460",
     json={"body": body_13},
     headers=headers,
+    timeout=10,
 )
 print("13 patched:", res.status_code)
