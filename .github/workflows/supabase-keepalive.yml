@@ -1,0 +1,38 @@
+name: Supabase Database Keep-Alive
+
+on:
+  schedule:
+    # Run every 3 days at 00:00 UTC to prevent pausing from inactivity
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+
+jobs:
+  ping-supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST API
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "Error: SUPABASE_URL or SUPABASE_SERVICE_KEY secret is not set."
+            exit 1
+          fi
+
+          CLEAN_URL=$(echo "$SUPABASE_URL" | sed 's/\/$//')
+
+          echo "Pinging Supabase REST endpoint..."
+          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            "$CLEAN_URL/rest/v1/runs?select=id&limit=1")
+
+          echo "Response code: $STATUS_CODE"
+
+          if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 400 ]; then
+            echo "Supabase ping succeeded!"
+          else
+            echo "Supabase ping failed with status code $STATUS_CODE"
+            exit 1
+          fi

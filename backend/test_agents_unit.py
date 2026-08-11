@@ -51,3 +51,69 @@ async def test_broadcast_log_no_supabase():
 
     # This should run without raising any Exception
     await broadcast_log({"msg": "Test fallback logging", "type": "message"})
+
+
+def test_healthz_supabase_not_configured(monkeypatch):
+    import agents
+
+    monkeypatch.setattr(agents, "supabase", None)
+
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+
+    response = client.get("/healthz/supabase")
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+def test_healthz_supabase_healthy(monkeypatch):
+    import agents
+
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_select = MagicMock()
+    mock_limit = MagicMock()
+    mock_execute = MagicMock()
+
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value = mock_select
+    mock_select.limit.return_value = mock_limit
+    mock_limit.execute.return_value = mock_execute
+
+    monkeypatch.setattr(agents, "supabase", mock_client)
+
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+
+    response = client.get("/healthz/supabase")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+
+
+def test_healthz_supabase_unhealthy(monkeypatch):
+    import agents
+
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_select = MagicMock()
+    mock_limit = MagicMock()
+
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value = mock_select
+    mock_select.limit.return_value = mock_limit
+    mock_limit.execute.side_effect = Exception("Database paused")
+
+    monkeypatch.setattr(agents, "supabase", mock_client)
+
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+
+    response = client.get("/healthz/supabase")
+    assert response.status_code == 503
+    assert "connection failed" in response.json()["detail"]

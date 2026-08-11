@@ -74,6 +74,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Failed to start GitNexus: {e}")
 
+    # Check Supabase connection on startup
+    from agents import supabase
+
+    if supabase:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("runs").select("id").limit(1).execute()
+            )
+            print("Supabase connection established successfully.")
+        except Exception as e:
+            logger.critical(
+                f"CRITICAL WARNING: Supabase connection failed on startup. "
+                f"The database might be paused, unreachable, or undergoing maintenance. "
+                f"Error: {e}"
+            )
+    else:
+        logger.warning("Supabase is not configured. Persistence will be disabled.")
+
     yield
 
     if gitnexus_process:
@@ -91,6 +109,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/healthz/supabase")
+async def healthz_supabase():
+    from agents import supabase
+
+    if not supabase:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase is not configured. Please check environment variables.",
+        )
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("runs").select("id").limit(1).execute()
+        )
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Supabase connection failed (database may be paused or unreachable): {str(e)}",
+        )
 
 
 class StartRequest(BaseModel):

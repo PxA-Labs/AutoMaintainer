@@ -63,6 +63,8 @@ export default function Home() {
     Implementer: 'idle',
     Maintainer: 'idle',
   });
+  const [isSupabaseUnreachable, setIsSupabaseUnreachable] = useState(false);
+
 
   const handleStartStop = async () => {
     if (!isRunning) {
@@ -183,6 +185,26 @@ export default function Home() {
     return () => { supabase.removeChannel(channel); };
   }, [activeRunId]);
 
+  useEffect(() => {
+    const checkSupabaseHealth = async () => {
+      try {
+        const backendUrl = getBackendUrl();
+        const res = await fetch(`${backendUrl}/healthz/supabase`);
+        if (!res.ok) {
+          setIsSupabaseUnreachable(true);
+        } else {
+          setIsSupabaseUnreachable(false);
+        }
+      } catch (err) {
+        console.error("Failed to check Supabase health:", err);
+        setIsSupabaseUnreachable(true);
+      }
+    };
+    checkSupabaseHealth();
+    const interval = setInterval(checkSupabaseHealth, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <div className="flex h-screen w-full bg-[#0a0a0a] text-zinc-100 font-sans overflow-hidden">
       {/* Sidebar Panel */}
@@ -292,6 +314,15 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden relative bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-[#0a0a0a] to-[#0a0a0a]">
+        {isSupabaseUnreachable && (
+          <div className="bg-red-500/10 border-b border-red-500/20 px-8 py-3 flex items-center gap-3 text-red-400 text-sm font-medium transition-all shrink-0">
+            <span className="flex h-2 w-2 relative shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+            </span>
+            <span>Supabase Database is unreachable or paused. Historical logs and persistence are currently disabled.</span>
+          </div>
+        )}
         
         {/* Top Header */}
         <header className="h-16 border-b border-zinc-800/50 flex items-center justify-between px-8 backdrop-blur-sm">
