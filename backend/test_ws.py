@@ -24,6 +24,9 @@ def test_terminal_websocket_allowed_origin():
             "/api/terminal/ws", headers={"origin": "http://localhost:3000"}
         ) as ws:
             ws.send_text('{"type":"resize", "cols":80, "rows":24}')
+    except WebSocketDisconnect as e:
+        # If the allowed origin was rejected by origin policy, fail the test.
+        assert e.code != 1008, "Allowed origin was rejected by security policy (1008)"
     except Exception:
         # Prevent platform-specific PTY spawning issues from failing test
         pass
