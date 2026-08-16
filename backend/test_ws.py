@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 from main import app
 
 client = TestClient(app)
@@ -7,14 +8,13 @@ client = TestClient(app)
 
 def test_terminal_websocket_origin_security():
     # Test that connection is closed/rejected for unsupported origin
-    try:
+    with pytest.raises(WebSocketDisconnect) as excinfo:
         with client.websocket_connect(
             "/api/terminal/ws", headers={"origin": "http://malicious.com"}
-        ) as ws:
-            ws.receive_text()
-            assert False, "Should have been disconnected"
-    except Exception:
-        pass
+        ):
+            pass
+
+    assert excinfo.value.code == 1008
 
 
 def test_terminal_websocket_allowed_origin():
@@ -24,6 +24,9 @@ def test_terminal_websocket_allowed_origin():
             "/api/terminal/ws", headers={"origin": "http://localhost:3000"}
         ) as ws:
             ws.send_text('{"type":"resize", "cols":80, "rows":24}')
+    except WebSocketDisconnect as e:
+        # If the allowed origin was rejected by origin policy, fail the test.
+        assert e.code != 1008, "Allowed origin was rejected by security policy (1008)"
     except Exception:
         # Prevent platform-specific PTY spawning issues from failing test
         pass
