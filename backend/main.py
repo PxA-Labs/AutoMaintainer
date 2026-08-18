@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from github import Github
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+
 from typing import Optional
 from agents import run_agent_loop
 import asyncio
