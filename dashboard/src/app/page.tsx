@@ -112,55 +112,112 @@ export default function Home() {
   useEffect(() => {
     if (!activeRunId) return;
 
+    let isMounted = true;
     setSystemHealth({ latency: 0, tokensUsed: 0 });
+
+    let isReplaying = true;
+    const realtimeBuffer: any[] = [];
+    const processedLogIds = new Set<string>();
+
+    const processLogRow = (row: any) => {
+      if (!isMounted) return;
+      if (row.id && processedLogIds.has(row.id)) return;
+      if (row.id) processedLogIds.add(row.id);
+
+      if (row.log_type === 'ui_update') {
+        const msgData = row.metadata || {};
+        if (msgData.systemHealth) {
+          setSystemHealth((prev) => ({
+            latency: msgData.systemHealth.latency ?? prev.latency,
+            tokensUsed: prev.tokensUsed + (msgData.systemHealth.tokensUsed || 0)
+          }));
+        }
+        if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
+        if (msgData.pipeline) {
+          setPipeline((prev) => {
+            const exists = prev.find(p => p.id === msgData.pipeline.id);
+            if (exists) return prev.map(p => p.id === msgData.pipeline.id ? msgData.pipeline : p);
+            return [msgData.pipeline, ...prev];
+          });
+        }
+        if (msgData.activity) setActivity((prev) => [msgData.activity, ...prev]);
+      } else {
+        const date = new Date(row.created_at || Date.now());
+        setLogs(prev => [...prev, {
+          time: date.toLocaleTimeString(),
+          agent: row.agent_name || "System",
+          msg: row.message || "",
+          color: row.color || "text-zinc-400"
+        }]);
+      }
+    };
 
     // Fetch existing historical logs from Supabase
     const fetchHistory = async () => {
-      const { data, error } = await supabase.from('logs').select('*').eq('run_id', activeRunId).order('created_at', { ascending: true });
-      if (data && data.length > 0) {
-        const historyLogs: any[] = [];
-        // accumulate historical tokens and capture the latest latency reported
-        let historyTokens = 0;
-        let lastLatency: number | null = null;
+      try {
+        const { data, error } = await supabase.from('logs').select('*').eq('run_id', activeRunId).order('created_at', { ascending: true });
+        if (!isMounted) return;
+        if (data && data.length > 0) {
+          const historyLogs: any[] = [];
+          // accumulate historical tokens and capture the latest latency reported
+          let historyTokens = 0;
+          let lastLatency: number | null = null;
 
-        data.forEach((row: any) => {
-          if (row.log_type === 'ui_update') {
-            const msgData = row.metadata || {};
-            if (msgData.systemHealth) {
-              // sum tokens from history only; do not increment existing UI state repeatedly
-              historyTokens += msgData.systemHealth.tokensUsed || 0;
-              if (msgData.systemHealth.latency) lastLatency = msgData.systemHealth.latency;
-            }
-            if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
-            if (msgData.pipeline) {
-              setPipeline((prev) => {
-                const exists = prev.find(p => p.id === msgData.pipeline.id);
-                if (exists) return prev.map(p => p.id === msgData.pipeline.id ? msgData.pipeline : p);
-                return [msgData.pipeline, ...prev];
+          data.forEach((row: any) => {
+            if (row.id) processedLogIds.add(row.id);
+            if (row.log_type === 'ui_update') {
+              const msgData = row.metadata || {};
+              if (msgData.systemHealth) {
+                // sum tokens from history only; do not increment existing UI state repeatedly
+                historyTokens += msgData.systemHealth.tokensUsed || 0;
+                if (msgData.systemHealth.latency !== undefined && msgData.systemHealth.latency !== null) {
+                  lastLatency = msgData.systemHealth.latency;
+                }
+              }
+              if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
+              if (msgData.pipeline) {
+                setPipeline((prev) => {
+                  const exists = prev.find(p => p.id === msgData.pipeline.id);
+                  if (exists) return prev.map(p => p.id === msgData.pipeline.id ? msgData.pipeline : p);
+                  return [msgData.pipeline, ...prev];
+                });
+              }
+              if (msgData.activity) setActivity((prev) => [msgData.activity, ...prev]);
+            } else {
+              const date = new Date(row.created_at);
+              historyLogs.push({
+                time: date.toLocaleTimeString(),
+                agent: row.agent_name || "System",
+                msg: row.message || "",
+                color: row.color || "text-zinc-400"
               });
             }
-            if (msgData.activity) setActivity((prev) => [msgData.activity, ...prev]);
-          } else {
-            const date = new Date(row.created_at);
-            historyLogs.push({
-              time: date.toLocaleTimeString(),
-              agent: row.agent_name || "System",
-              msg: row.message || "",
-              color: row.color || "text-zinc-400"
-            });
+          });
+
+          if (!isMounted) return;
+
+          // If history reported any tokens, set the systemHealth.tokensUsed to the summed value
+          if (historyTokens > 0 || lastLatency !== null) {
+            setSystemHealth((prev) => ({
+              latency: lastLatency ?? prev.latency,
+              tokensUsed: historyTokens
+            }));
           }
-        });
 
-        // If history reported any tokens, set the systemHealth.tokensUsed to the summed value
-        if (historyTokens > 0 || lastLatency !== null) {
-          setSystemHealth((prev) => ({
-            latency: lastLatency ?? prev.latency,
-            tokensUsed: historyTokens
-          }));
+          if (historyLogs.length > 0) {
+            setLogs(prev => [...prev, ...historyLogs]);
+          }
         }
-
-        if (historyLogs.length > 0) {
-          setLogs(prev => [...prev, ...historyLogs]);
+      } catch (err) {
+        if (isMounted) {
+          console.error("Error fetching historical logs:", err);
+        }
+      } finally {
+        if (isMounted) {
+          isReplaying = false;
+          // Flush any real-time events that arrived during replay
+          realtimeBuffer.forEach((row) => processLogRow(row));
+          realtimeBuffer.length = 0;
         }
       }
     };
@@ -169,32 +226,12 @@ export default function Home() {
     // Subscribe to new real-time logs
     const channel = supabase.channel(`logs_${activeRunId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'logs', filter: `run_id=eq.${activeRunId}` }, (payload) => {
+        if (!isMounted) return;
         const row = payload.new as any;
-        if (row.log_type === 'ui_update') {
-          const msgData = row.metadata || {};
-          if (msgData.systemHealth) {
-            setSystemHealth((prev) => ({
-              latency: msgData.systemHealth.latency || prev.latency,
-              tokensUsed: prev.tokensUsed + (msgData.systemHealth.tokensUsed || 0)
-            }));
-          }
-          if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
-          if (msgData.pipeline) {
-            setPipeline((prev) => {
-              const exists = prev.find(p => p.id === msgData.pipeline.id);
-              if (exists) return prev.map(p => p.id === msgData.pipeline.id ? msgData.pipeline : p);
-              return [msgData.pipeline, ...prev];
-            });
-          }
-          if (msgData.activity) setActivity((prev) => [msgData.activity, ...prev]);
+        if (isReplaying) {
+          realtimeBuffer.push(row);
         } else {
-          const date = new Date(row.created_at || Date.now());
-          setLogs(prev => [...prev, {
-            time: date.toLocaleTimeString(),
-            agent: row.agent_name || "System",
-            msg: row.message || "",
-            color: row.color || "text-zinc-400"
-          }]);
+          processLogRow(row);
         }
       })
       .subscribe((status) => {
@@ -203,7 +240,10 @@ export default function Home() {
         }
       });
       
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
   }, [activeRunId]);
 
   useEffect(() => {
