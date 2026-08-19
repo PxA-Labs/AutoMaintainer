@@ -112,19 +112,24 @@ export default function Home() {
   useEffect(() => {
     if (!activeRunId) return;
 
+    setSystemHealth({ latency: 0, tokensUsed: 0 });
+
     // Fetch existing historical logs from Supabase
     const fetchHistory = async () => {
       const { data, error } = await supabase.from('logs').select('*').eq('run_id', activeRunId).order('created_at', { ascending: true });
       if (data && data.length > 0) {
         const historyLogs: any[] = [];
+        // accumulate historical tokens and capture the latest latency reported
+        let historyTokens = 0;
+        let lastLatency: number | null = null;
+
         data.forEach((row: any) => {
           if (row.log_type === 'ui_update') {
             const msgData = row.metadata || {};
             if (msgData.systemHealth) {
-              setSystemHealth(prev => ({
-                latency: msgData.systemHealth.latency || prev.latency,
-                tokensUsed: prev.tokensUsed + (msgData.systemHealth.tokensUsed || 0)
-              }));
+              // sum tokens from history only; do not increment existing UI state repeatedly
+              historyTokens += msgData.systemHealth.tokensUsed || 0;
+              if (msgData.systemHealth.latency) lastLatency = msgData.systemHealth.latency;
             }
             if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
             if (msgData.pipeline) {
@@ -145,6 +150,15 @@ export default function Home() {
             });
           }
         });
+
+        // If history reported any tokens, set the systemHealth.tokensUsed to the summed value
+        if (historyTokens > 0 || lastLatency !== null) {
+          setSystemHealth((prev) => ({
+            latency: lastLatency ?? prev.latency,
+            tokensUsed: historyTokens
+          }));
+        }
+
         if (historyLogs.length > 0) {
           setLogs(prev => [...prev, ...historyLogs]);
         }
@@ -158,6 +172,12 @@ export default function Home() {
         const row = payload.new as any;
         if (row.log_type === 'ui_update') {
           const msgData = row.metadata || {};
+          if (msgData.systemHealth) {
+            setSystemHealth((prev) => ({
+              latency: msgData.systemHealth.latency || prev.latency,
+              tokensUsed: prev.tokensUsed + (msgData.systemHealth.tokensUsed || 0)
+            }));
+          }
           if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
           if (msgData.pipeline) {
             setPipeline((prev) => {
