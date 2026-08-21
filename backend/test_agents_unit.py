@@ -140,6 +140,22 @@ def test_workspace_helpers(tmp_path, monkeypatch):
     with pytest.raises(HTTPException):
         get_safe_target_path(repo_dir, "../../../secret.txt")
 
+    # Test symlink escape attempt
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    outside_file = outside_dir / "secret.txt"
+    outside_file.write_text("classified", encoding="utf-8")
+
+    symlink_dir = repo_dir / "symlink_dir"
+    try:
+        symlink_dir.symlink_to(outside_dir, target_is_directory=True)
+        with pytest.raises(HTTPException):
+            get_safe_target_path(repo_dir, "symlink_dir/secret.txt")
+    except OSError:
+        # On Windows without developer mode, symlink creation may raise OSError
+        pass
+
 
 @pytest.mark.asyncio
 async def test_start_and_stop_concurrency(monkeypatch):
