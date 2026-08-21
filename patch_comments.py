@@ -3,9 +3,9 @@ import requests
 
 token = os.getenv("GITHUB_TOKEN")
 headers = {
-    'Authorization': f'Bearer {token}',
-    'Accept': 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28'
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
 }
 
 body_13 = """@kehansama Thank you for the excellent technical feedback on the CLI architecture.
@@ -19,5 +19,10 @@ This aligns perfectly with your feedback on the broader ecosystem roadmap. The a
 
 We are actively evaluating the architecture for this persistence layer. AgentRelay presents a compelling model for solving this cross-session amnesia. We will update the RFC to include the Context & Memory Persistence requirements. Thank you for contributing these insights to the design phase!"""
 
-res = requests.patch('https://api.github.com/repos/PxA-Labs/AutoMaintainer/issues/comments/4633057460', json={'body': body_13}, headers=headers)
+res = requests.patch(
+    "https://api.github.com/repos/PxA-Labs/AutoMaintainer/issues/comments/4633057460",
+    json={"body": body_13},
+    headers=headers,
+    timeout=10,
+)
 print("13 patched:", res.status_code)

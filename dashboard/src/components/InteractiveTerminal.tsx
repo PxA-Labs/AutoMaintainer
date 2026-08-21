@@ -41,15 +41,15 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
     terminalInstance.current = term;
     fitAddon.current = fit;
 
-    // Build the WebSocket URL
     let backendUrl = "http://localhost:8000";
     if (process.env.NEXT_PUBLIC_BACKEND_URL) {
       backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "");
     } else if (typeof window !== "undefined") {
       const port = window.location.port;
       const hostname = window.location.hostname;
-      if (port === "3000") {
-        backendUrl = `${window.location.protocol}//${hostname}:8000`;
+      if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") && port !== "8000") {
+        const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
+        backendUrl = `${window.location.protocol}//${formattedHost}:8000`;
       } else {
         backendUrl = `${window.location.protocol}//${window.location.host}`;
       }

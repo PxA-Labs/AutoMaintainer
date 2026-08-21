@@ -32,9 +32,10 @@ function getBackendUrl(): string {
   if (typeof window !== "undefined") {
     const port = window.location.port;
     const hostname = window.location.hostname;
-    // If frontend is on the standard Next.js dev port, point to the FastAPI port
-    if (port === "3000") {
-      return `${window.location.protocol}//${hostname}:8000`;
+    // In local dev (Next.js can run on 3000, 3001, etc. but FastAPI runs on 8000)
+    if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") && port !== "8000") {
+      const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
+      return `${window.location.protocol}//${formattedHost}:8000`;
     }
     // Otherwise (production / Docker), same host serves both
     return `${window.location.protocol}//${window.location.host}`;
@@ -63,6 +64,8 @@ export default function Home() {
     Implementer: 'idle',
     Maintainer: 'idle',
   });
+  const [isSupabaseUnreachable, setIsSupabaseUnreachable] = useState(false);
+
 
   const handleStartStop = async () => {
     if (!isRunning) {
@@ -183,6 +186,67 @@ export default function Home() {
     return () => { supabase.removeChannel(channel); };
   }, [activeRunId]);
 
+  useEffect(() => {
+    let active = true;
+    let timeoutId: NodeJS.Timeout | null = null;
+    let currentController: AbortController | null = null;
+
+    const checkSupabaseHealth = async () => {
+      if (!active) return;
+
+      if (currentController) {
+        currentController.abort();
+      }
+
+      const controller = new AbortController();
+      currentController = controller;
+
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Request timeout"));
+        }, 8000);
+      });
+
+      try {
+        const backendUrl = getBackendUrl();
+        const fetchPromise = fetch(`${backendUrl}/healthz/supabase`, {
+          signal: controller.signal
+        });
+
+        const res = await Promise.race([fetchPromise, timeoutPromise]) as Response;
+        clearTimeout(timeoutId!);
+
+        if (!res.ok) {
+          setIsSupabaseUnreachable(true);
+        } else {
+          setIsSupabaseUnreachable(false);
+        }
+      } catch (err: any) {
+        if (err.name !== "AbortError") {
+          console.error("Failed to check Supabase health:", err);
+          setIsSupabaseUnreachable(true);
+        }
+      } finally {
+        if (active) {
+          timeoutId = setTimeout(checkSupabaseHealth, 15000);
+        }
+      }
+    };
+
+    checkSupabaseHealth();
+
+    return () => {
+      active = false;
+      if (currentController) {
+        currentController.abort();
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, []);
+
   return (
     <div className="flex h-screen w-full bg-[#0a0a0a] text-zinc-100 font-sans overflow-hidden">
       {/* Sidebar Panel */}
@@ -292,6 +356,15 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden relative bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-zinc-900/40 via-[#0a0a0a] to-[#0a0a0a]">
+        {isSupabaseUnreachable && (
+          <div role="alert" className="bg-red-500/10 border-b border-red-500/20 px-8 py-3 flex items-center gap-3 text-red-400 text-sm font-medium transition-all shrink-0">
+            <span className="flex h-2 w-2 relative shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+            </span>
+            <span>Supabase Database is unreachable or paused. Historical logs and persistence are currently disabled.</span>
+          </div>
+        )}
         
         {/* Top Header */}
         <header className="h-16 border-b border-zinc-800/50 flex items-center justify-between px-8 backdrop-blur-sm">

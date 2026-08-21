@@ -1,7 +1,7 @@
 name: PR Size Labeler
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Add PR Size Label
-        uses: pascalgn/size-label-action@v0.5.1
+        uses: pascalgn/size-label-action@v0.5.7
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         with:

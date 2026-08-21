@@ -69,8 +69,9 @@ async def broadcast_log(message: dict):
 
 def get_all_groq_keys():
     keys = []
-    if GROQ_API_KEY:
-        keys.append(GROQ_API_KEY)
+    primary = os.getenv("GROQ_API_KEY")
+    if primary:
+        keys.append(primary)
     for i in range(1, 10):
         k = os.getenv(f"GROQ_API_KEY_{i}")
         if k:
@@ -988,25 +989,45 @@ async def run_agent_loop(
     )
 
     last_idx = 0
-    async for state in app.astream(initial_state, stream_mode="values"):
+    try:
+        async for state in app.astream(initial_state, stream_mode="values"):
 
-        new_msgs = state["log_messages"][last_idx:]
-        for msg in new_msgs:
-            await broadcast_log(msg)
-            await asyncio.sleep(0.5)
+            new_msgs = state["log_messages"][last_idx:]
+            for msg in new_msgs:
+                await broadcast_log(msg)
+                await asyncio.sleep(0.5)
 
-        last_idx = len(state["log_messages"])
+            last_idx = len(state["log_messages"])
 
-    await broadcast_log(
-        {"agent": "System", "msg": "Agent loop complete.", "color": "text-zinc-500"}
-    )
-    if supabase:
-        try:
-            await asyncio.to_thread(
-                lambda: supabase.table("runs")
-                .update({"status": "completed"})
-                .eq("id", run_id)
-                .execute()
-            )
-        except Exception as e:
-            print(f"Failed to update run status in Supabase: {e}")
+        await broadcast_log(
+            {"agent": "System", "msg": "Agent loop complete.", "color": "text-zinc-500"}
+        )
+        if supabase:
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("runs")
+                    .update({"status": "completed"})
+                    .eq("id", run_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Failed to update run status in Supabase: {e}")
+    except asyncio.CancelledError:
+        await broadcast_log(
+            {
+                "agent": "System",
+                "msg": "Agent loop cancelled by user.",
+                "color": "text-red-500",
+            }
+        )
+        if supabase:
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.table("runs")
+                    .update({"status": "failed"})
+                    .eq("id", run_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Failed to update run status in Supabase: {e}")
+        raise

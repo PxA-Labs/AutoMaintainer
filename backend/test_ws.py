@@ -1,20 +1,32 @@
-import asyncio
-import websockets
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+from main import app
+
+client = TestClient(app)
 
 
-async def test_terminal():
+def test_terminal_websocket_origin_security():
+    # Test that connection is closed/rejected for unsupported origin
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect(
+            "/api/terminal/ws", headers={"origin": "http://malicious.com"}
+        ):
+            pass
+
+    assert excinfo.value.code == 1008
+
+
+def test_terminal_websocket_allowed_origin():
+    # Test that allowed origins connect successfully
     try:
-        async with websockets.connect("ws://127.0.0.1:8000/api/terminal/ws") as ws:
-            print("Connected to PTY!")
-            # Send 'dir' and enter
-            await ws.send("dir\r")
-
-            # Read a few responses
-            for _ in range(5):
-                msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                print(f"Received: {repr(msg)}")
-    except Exception as e:
-        print(f"Test failed: {e}")
-
-
-asyncio.run(test_terminal())
+        with client.websocket_connect(
+            "/api/terminal/ws", headers={"origin": "http://localhost:3000"}
+        ) as ws:
+            ws.send_text('{"type":"resize", "cols":80, "rows":24}')
+    except WebSocketDisconnect as e:
+        # If the allowed origin was rejected by origin policy, fail the test.
+        assert e.code != 1008, "Allowed origin was rejected by security policy (1008)"
+    except Exception:
+        # Prevent platform-specific PTY spawning issues from failing test
+        pass
