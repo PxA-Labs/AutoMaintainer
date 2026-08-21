@@ -310,18 +310,13 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 
     cwd = None
     if repo_url:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(repo_url)
-        path_str = parsed.path.strip("/")
-        if path_str.endswith(".git"):
-            path_str = path_str[:-4]
-
-        parts = [p for p in path_str.split("/") if p]
-        if len(parts) >= 2:
-            r_owner = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[-2])
-            r_repo = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[-1])
-            repo_name = f"{r_owner}/{r_repo}"
+        match = re.search(
+            r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?$",
+            repo_url,
+        )
+        if match:
+            owner, repo = match.group(1), match.group(2)
+            repo_name = f"{owner}/{repo}"
             try:
                 repo_dir = get_safe_repo_dir(repo_name)
                 if repo_dir.exists():
