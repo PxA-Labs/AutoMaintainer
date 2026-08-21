@@ -1,0 +1,58 @@
+name: Security & Vulnerability Audit
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - 'dashboard/**'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - 'dashboard/**'
+
+permissions:
+  contents: read
+
+jobs:
+  python-security:
+    name: Python Bandit & Pip-Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install audit tools
+        run: |
+          pip install bandit pip-audit
+
+      - name: Run Bandit AST Security Scan
+        run: |
+          bandit -r backend/ -ll -ii || true
+
+      - name: Run Pip-Audit Dependency Scan
+        run: |
+          if [ -f backend/requirements.txt ]; then
+            pip-audit -r backend/requirements.txt || true
+          fi
+
+  node-security:
+    name: Node NPM Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+
+      - name: Run NPM Audit
+        working-directory: ./dashboard
+        run: |
+          npm audit --audit-level=high || true

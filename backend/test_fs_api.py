@@ -1,17 +1,18 @@
-import json
 import os
 import shutil
+import pytest
 from fastapi.testclient import TestClient
-from main import app
+from main import app, get_safe_repo_dir
 
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
 def setup_dummy_repo():
     repo_name = "PxA-Labs/AutoMaintainer"
-    repo_dir = f"/tmp/{repo_name.replace('/', '_')}"
+    repo_dir = get_safe_repo_dir(repo_name)
 
-    if os.path.exists(repo_dir):
+    if repo_dir.exists():
         shutil.rmtree(repo_dir)
 
     os.makedirs(os.path.join(repo_dir, "src"), exist_ok=True)
@@ -23,23 +24,29 @@ def setup_dummy_repo():
     with open(os.path.join(repo_dir, "README.md"), "w") as f:
         f.write("# AutoMaintainer")
 
-    return repo_name
+    yield repo_name
+
+    if repo_dir.exists():
+        shutil.rmtree(repo_dir)
 
 
-if __name__ == "__main__":
-    repo_name = setup_dummy_repo()
-
-    print("--- Testing /tree Endpoint ---")
+def test_tree_endpoint(setup_dummy_repo):
+    repo_name = setup_dummy_repo
     response = client.get(f"/repo/{repo_name}/tree")
-    print(f"Status: {response.status_code}")
-    print(json.dumps(response.json(), indent=2))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == repo_name
+    assert "children" in data
 
-    print("\n--- Testing /file Endpoint (Valid File) ---")
-    response2 = client.get(f"/repo/{repo_name}/file?file_path=src/index.py")
-    print(f"Status: {response2.status_code}")
-    print(response2.json())
 
-    print("\n--- Testing /file Endpoint (Path Traversal Attack) ---")
-    response3 = client.get(f"/repo/{repo_name}/file?file_path=../../../../etc/passwd")
-    print(f"Status: {response3.status_code}")
-    print(response3.json())
+def test_file_endpoint_valid(setup_dummy_repo):
+    repo_name = setup_dummy_repo
+    response = client.get(f"/repo/{repo_name}/file?file_path=src/index.py")
+    assert response.status_code == 200
+    assert response.json() == {"content": "print('hello world')"}
+
+
+def test_file_endpoint_path_traversal(setup_dummy_repo):
+    repo_name = setup_dummy_repo
+    response = client.get(f"/repo/{repo_name}/file?file_path=../../../../etc/passwd")
+    assert response.status_code in [400, 403, 404]
