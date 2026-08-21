@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive terminal with xterm.js
 
 ### Fixed
+- fix: resolve concurrency, token leakage, file descriptor race, and Windows compatibility ([#137](https://github.com/PxA-Labs/AutoMaintainer/pull/137)) - @purvanshjoshi
 - Auto-changelog workflow to preserve existing content (#69)
 - CI lint-and-check failures on Black formatting (#58)
 - Supabase database inactivity issues (#57)
