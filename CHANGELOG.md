@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- feat(ci): configure OpenSSF Scorecard on-demand dispatch and security status badges ([#144](https://github.com/PxA-Labs/AutoMaintainer/pull/144)) - @purvanshjoshi
 - feat(ci): add OpenSSF Scorecard, Gitleaks, Security Audit, and Multi-OS Pytest Matrix ([#136](https://github.com/PxA-Labs/AutoMaintainer/pull/136)) - @purvanshjoshi
 - Auto-updating changelog workflow for merged PRs (#68)
 - Security issue documentation for exposed API keys (#60)
