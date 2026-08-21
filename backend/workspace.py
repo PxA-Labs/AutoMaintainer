@@ -69,10 +69,10 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
     if not target_full_str.startswith(repo_base_str + os.path.sep):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    resolved_root = Path(repo_base_str).resolve()
-    target_path = Path(target_full_str).resolve()
+    real_repo = os.path.realpath(repo_base_str)
+    real_target = os.path.realpath(target_full_str)
 
-    if target_path == resolved_root or not target_path.is_relative_to(resolved_root):
+    if not real_target.startswith(real_repo + os.path.sep):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    return target_path
+    return Path(real_target)
