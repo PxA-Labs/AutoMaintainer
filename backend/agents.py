@@ -315,29 +315,38 @@ async def architect_node(state: AgentState):
     # Clone the repo locally and analyze it with GitNexus so the MCP server has data
     import subprocess
     import shutil
+    import base64
+    from workspace import get_safe_repo_dir
 
-    repo_dir = os.path.abspath(
-        os.path.join("/tmp", repo.replace("/", "_").replace("\\", "_"))
-    )
-    repo_url = (
-        f"https://x-access-token:{GITHUB_TOKEN}@github.com/{repo}.git"
-        if GITHUB_TOKEN
-        else f"https://github.com/{repo}.git"
-    )
+    repo_dir = str(get_safe_repo_dir(repo))
     safe_repo_url = f"https://github.com/{repo}.git"
+
+    auth_header = (
+        f"AUTHORIZATION: basic {base64.b64encode(f'x-access-token:{GITHUB_TOKEN}'.encode()).decode()}"
+        if GITHUB_TOKEN
+        else None
+    )
 
     if not os.path.exists(repo_dir):
         try:
+            cmd = ["git", "clone"]
+            if auth_header:
+                cmd.extend(["-c", f"http.extraheader={auth_header}"])
+            cmd.extend([safe_repo_url, repo_dir])
             clone_proc = await asyncio.create_subprocess_exec(
-                "git", "clone", repo_url, repo_dir
+                *cmd, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
             )
             await clone_proc.communicate()
         except Exception as e:
             print(f"Failed to clone repo {safe_repo_url}: {e}")
     else:
         try:
+            cmd = ["git"]
+            if auth_header:
+                cmd.extend(["-c", f"http.extraheader={auth_header}"])
+            cmd.extend(["pull", "--ff-only"])
             pull_proc = await asyncio.create_subprocess_exec(
-                "git", "pull", "--ff-only", cwd=repo_dir
+                *cmd, cwd=repo_dir, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
             )
             await pull_proc.communicate()
         except Exception as e:
@@ -789,11 +798,9 @@ async def implementer_node(state: AgentState):
                 )
 
             # Local sync to update the workspace clone on disk
-            repo_dir = os.path.abspath(
-                os.path.join(
-                    "/tmp", state["repo_name"].replace("/", "_").replace("\\", "_")
-                )
-            )
+            from workspace import get_safe_repo_dir
+
+            repo_dir = str(get_safe_repo_dir(state["repo_name"]))
             if os.path.exists(repo_dir):
                 local_path = os.path.join(repo_dir, path)
                 try:

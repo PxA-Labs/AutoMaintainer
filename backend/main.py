@@ -10,8 +10,9 @@ from github import Github
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from typing import Optional
+from typing import Optional, Dict
 from agents import run_agent_loop
+from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
 import json
 import uuid
@@ -22,33 +23,10 @@ import platform
 import subprocess
 import re
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
-
-from pathlib import Path
-
-
-def get_safe_repo_dir(repo_name: str) -> Path:
-    base_tmp = Path("/tmp").resolve()
-    clean_name = repo_name.replace("/", "_").replace("\\", "_")
-    if ".." in clean_name:
-        raise HTTPException(status_code=400, detail="Invalid repository name")
-    repo_dir = (base_tmp / clean_name).resolve()
-    if not repo_dir.is_relative_to(base_tmp) or repo_dir == base_tmp:
-        raise HTTPException(status_code=400, detail="Invalid repository name")
-    return repo_dir
-
-
-def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
-    clean_path = file_path.lstrip("/").lstrip("\\")
-    if ".." in clean_path.replace("\\", "/").split("/"):
-        raise HTTPException(status_code=400, detail="Path traversal not allowed")
-    target_path = (repo_dir / clean_path).resolve()
-    if not target_path.is_relative_to(repo_dir):
-        raise HTTPException(status_code=403, detail="Invalid file path")
-    return target_path
-
 
 gitnexus_process = None
 
@@ -58,8 +36,6 @@ async def lifespan(app: FastAPI):
     global gitnexus_process
     # Start the GitNexus MCP server in the background
     try:
-        import platform
-
         cmd = (
             ["gitnexus.cmd", "serve"]
             if platform.system() == "Windows"
@@ -79,8 +55,11 @@ async def lifespan(app: FastAPI):
 
     if supabase:
         try:
-            await asyncio.to_thread(
-                lambda: supabase.table("runs").select("id").limit(1).execute()
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: supabase.table("runs").select("id").limit(1).execute()
+                ),
+                timeout=3.0,
             )
             print("Supabase connection established successfully.")
         except Exception as e:
@@ -138,6 +117,10 @@ class StartRequest(BaseModel):
     target_issue: Optional[int] = None
 
 
+class StopRequest(BaseModel):
+    run_id: Optional[str] = None
+
+
 class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
@@ -151,19 +134,55 @@ class FileCreateRequest(BaseModel):
     commit_message: Optional[str] = None
 
 
-active_task: Optional[asyncio.Task] = None
+active_tasks: Dict[str, asyncio.Task] = {}
+tasks_lock = asyncio.Lock()
 
 
 @app.post("/start")
 async def start_agents(req: StartRequest):
-    global active_task
-    if active_task and not active_task.done():
-        return {"status": "already_running"}
     run_id = str(uuid.uuid4())
-    active_task = asyncio.create_task(
-        run_agent_loop(req.repo_name, req.target_issue, run_id)
-    )
+    task = asyncio.create_task(run_agent_loop(req.repo_name, req.target_issue, run_id))
+
+    async with tasks_lock:
+        active_tasks[run_id] = task
+
+    def on_task_done(t):
+        async def remove_task():
+            async with tasks_lock:
+                active_tasks.pop(run_id, None)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(remove_task())
+        except RuntimeError:
+            pass
+
+    task.add_done_callback(on_task_done)
     return {"status": "started", "run_id": run_id}
+
+
+@app.post("/stop")
+async def stop_agents(req: Optional[StopRequest] = None):
+    async with tasks_lock:
+        if req and req.run_id:
+            task = active_tasks.get(req.run_id)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                active_tasks.pop(req.run_id, None)
+                return {"status": "stopped", "run_id": req.run_id}
+            return {"status": "not_running", "run_id": req.run_id}
+        else:
+            stopped_any = False
+            for r_id, task in list(active_tasks.items()):
+                if not task.done():
+                    task.cancel()
+                    stopped_any = True
+            active_tasks.clear()
+            return {"status": "stopped" if stopped_any else "not_running"}
 
 
 @app.post("/repo/{repo_name:path}/file")
@@ -276,20 +295,6 @@ async def delete_repo_file(repo_name: str, file_path: str):
     return {"status": "deleted", "message": message}
 
 
-@app.post("/stop")
-async def stop_agents():
-    global active_task
-    if active_task and not active_task.done():
-        active_task.cancel()
-        try:
-            await active_task
-        except asyncio.CancelledError:
-            pass
-        active_task = None
-        return {"status": "stopped"}
-    return {"status": "not_running"}
-
-
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     origin = websocket.headers.get("origin")
@@ -316,19 +321,16 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         if len(parts) >= 2:
             repo_name = f"{parts[-2]}/{parts[-1]}"
 
-        clean_name = repo_name.replace("/", "_").replace("\\", "_")
-        base_tmp = os.path.abspath("/tmp")
-        repo_dir = os.path.abspath(os.path.join(base_tmp, clean_name))
-
-        if repo_dir.startswith(base_tmp + os.sep) and os.path.exists(repo_dir):
-            cwd = repo_dir
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
+            cwd = str(repo_dir)
 
     if sys.platform == "win32":
         import pywinpty
 
         cols, rows = 80, 24
         pty = pywinpty.PTY(cols, rows)
-        pty.spawn(pywinpty.winpty.get_default_cmd(), cwd=cwd)
+        pid = pty.spawn(pywinpty.winpty.get_default_cmd(), cwd=cwd)
 
         async def read_from_pty():
             while True:
@@ -355,6 +357,17 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
             pass
         finally:
             read_task.cancel()
+            try:
+                pty.close()
+            except Exception:
+                pass
+            if pid:
+                try:
+                    import signal
+
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
             try:
                 del pty
             except Exception:
@@ -458,7 +471,7 @@ def get_repo_tree(repo_name: str):
                 tree.append(node)
         except (OSError, PermissionError) as e:
             logger.warning(f"Error accessing path {path}: {e}")
-            raise HTTPException(status_code=500, detail=f"Error accessing file system")
+            raise HTTPException(status_code=500, detail="Error accessing file system")
 
         # Sort directories first, then files
         tree.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
@@ -538,7 +551,8 @@ def get_repo_file(repo_name: str, file_path: str):
         if not stat.S_ISREG(st.st_mode):
             raise HTTPException(status_code=404, detail="File not found")
 
-        with os.fdopen(fd, "r", encoding="utf-8") as f:
+        # Pass closefd=False so the finally block retains exclusive ownership of closing fd
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
             content = f.read()
         return {"content": content}
     except UnicodeDecodeError:
