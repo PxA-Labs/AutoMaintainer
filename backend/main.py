@@ -319,8 +319,15 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
             repo_name = f"{owner}/{repo}"
             try:
                 repo_dir = get_safe_repo_dir(repo_name)
-                if repo_dir.exists():
-                    cwd = str(repo_dir)
+                base_dir = get_base_workspace_dir()
+                real_dir = os.path.realpath(str(repo_dir))
+                real_base = os.path.realpath(str(base_dir))
+                if (
+                    real_dir.startswith(real_base + os.path.sep)
+                    and os.path.exists(real_dir)
+                    and os.path.isdir(real_dir)
+                ):
+                    cwd = real_dir
             except HTTPException:
                 pass
 
