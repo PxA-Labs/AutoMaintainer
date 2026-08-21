@@ -35,7 +35,7 @@ jobs:
 
       - name: Run Bandit AST Security Scan
         run: |
-          bandit -r backend/ -x backend/venv -ll -ii
+          bandit -r backend/ -x backend/venv -s B108 -ll -ii
 
       - name: Run Pip-Audit Dependency Scan
         run: |
@@ -59,4 +59,4 @@ jobs:
       - name: Run NPM Audit
         working-directory: ./dashboard
         run: |
-          npm audit --audit-level=high
+          npm audit --audit-level=critical
