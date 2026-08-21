@@ -13,7 +13,7 @@ def setup_dummy_repo():
     repo_dir = get_safe_repo_dir(repo_name)
 
     if repo_dir.exists():
-        shutil.rmtree(repo_dir)
+        shutil.rmtree(repo_dir, ignore_errors=True)
 
     os.makedirs(os.path.join(repo_dir, "src"), exist_ok=True)
     os.makedirs(os.path.join(repo_dir, ".git"), exist_ok=True)
@@ -27,7 +27,7 @@ def setup_dummy_repo():
     yield repo_name
 
     if repo_dir.exists():
-        shutil.rmtree(repo_dir)
+        shutil.rmtree(repo_dir, ignore_errors=True)
 
 
 def test_tree_endpoint(setup_dummy_repo):
@@ -41,12 +41,14 @@ def test_tree_endpoint(setup_dummy_repo):
 
 def test_file_endpoint_valid(setup_dummy_repo):
     repo_name = setup_dummy_repo
-    response = client.get(f"/repo/{repo_name}/file?file_path=src/index.py")
+    url = f"/repo/{repo_name}/file?file_path=src/index.py"
+    response = client.get(url)
     assert response.status_code == 200
     assert response.json() == {"content": "print('hello world')"}
 
 
 def test_file_endpoint_path_traversal(setup_dummy_repo):
     repo_name = setup_dummy_repo
-    response = client.get(f"/repo/{repo_name}/file?file_path=../../../../etc/passwd")
+    url = f"/repo/{repo_name}/file?file_path=../../../../etc/passwd"
+    response = client.get(url)
     assert response.status_code in [400, 403, 404]

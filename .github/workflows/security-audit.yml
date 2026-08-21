@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,12 +35,12 @@ jobs:
 
       - name: Run Bandit AST Security Scan
         run: |
-          bandit -r backend/ -ll -ii || true
+          bandit -r backend/ -x backend/venv -ll -ii
 
       - name: Run Pip-Audit Dependency Scan
         run: |
           if [ -f backend/requirements.txt ]; then
-            pip-audit -r backend/requirements.txt || true
+            pip-audit -r backend/requirements.txt
           fi
 
   node-security:
@@ -46,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -55,4 +59,4 @@ jobs:
       - name: Run NPM Audit
         working-directory: ./dashboard
         run: |
-          npm audit --audit-level=high || true
+          npm audit --audit-level=high
