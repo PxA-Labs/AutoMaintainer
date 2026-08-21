@@ -313,17 +313,21 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         from urllib.parse import urlparse
 
         parsed = urlparse(repo_url)
-        repo_name = parsed.path.strip("/")
-        if repo_name.endswith(".git"):
-            repo_name = repo_name[:-4]
+        path_str = parsed.path.strip("/")
+        if path_str.endswith(".git"):
+            path_str = path_str[:-4]
 
-        parts = [p for p in repo_name.split("/") if p]
+        parts = [p for p in path_str.split("/") if p]
         if len(parts) >= 2:
-            repo_name = f"{parts[-2]}/{parts[-1]}"
-
-        repo_dir = get_safe_repo_dir(repo_name)
-        if repo_dir.exists():
-            cwd = str(repo_dir)
+            r_owner = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[-2])
+            r_repo = re.sub(r"[^a-zA-Z0-9_.-]", "", parts[-1])
+            repo_name = f"{r_owner}/{r_repo}"
+            try:
+                repo_dir = get_safe_repo_dir(repo_name)
+                if repo_dir.exists():
+                    cwd = str(repo_dir)
+            except HTTPException:
+                pass
 
     if sys.platform == "win32":
         import pywinpty
