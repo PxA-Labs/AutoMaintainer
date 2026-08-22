@@ -1,12 +1,3 @@
----
-title: AutoMaintainer
-emoji: 🚀
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-pinned: false
----
-
 <div align="center">
   
 # AutoMaintainer
@@ -17,9 +8,8 @@ pinned: false
 [![CI Backend](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/ci-backend.yml/badge.svg)](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/ci-backend.yml)
 [![CodeQL](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
-[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-yellow)](https://huggingface.co/spaces/purvansh01/AutoMaintainer)
 
 </div>
 
@@ -29,7 +19,7 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 
 > [!IMPORTANT]
 > **Supabase Real-time Architecture Required!**
-> This repository was recently upgraded from a legacy WebSocket architecture to a high-performance **Supabase Real-time Pub/Sub** ecosystem. For this early access / open-source version, you **must** create a free Supabase project and provide the URL and API Keys in your `.env` files for the UI to receive logs from the AI agents. See the [Database & Environment Setup](#2-database--environment-setup) section below for exact instructions!
+> This repository uses a high-performance **Supabase Real-time Pub/Sub** ecosystem. For this early access / open-source version, you **must** create a free Supabase project and provide the URL and API Keys in your `.env` files for the UI to receive logs from the AI agents. See the [Database & Environment Setup](#2-database--environment-setup) section below for exact instructions!
 > 
 > *(Note: In the upcoming official ecosystem launch, this will be handled automatically via a central cloud and users will simply run `automaintainer login` without needing to configure their own database!)*
 
@@ -41,9 +31,9 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 - **Zero-Server Code Intelligence**: Powered by **GitNexus MCP**, allowing agents to semantically navigate your repository and build Code Graphs without sending your code to a third-party server.
 - **Web IDE & Interactive Terminal**: A fully integrated, VS Code-style Web IDE in the browser featuring an interactive PTY terminal connecting directly to the backend.
 - **Self-Correcting Iteration Loop**: If the Maintainer AI rejects a PR, the Implementer AI reads the feedback and pushes a new commit to fix the bug!
-- **Real-time Observability UI**: A sleek, dark-mode React dashboard connected via WebSockets allows you to monitor the AI Crew as they work in real-time.
+- **Real-time Observability UI**: A sleek, dark-mode React dashboard connected via WebSockets/SSE allows you to monitor the AI Crew as they work in real-time.
 - **Blazing Fast**: Powered by Groq's LPU inference, the entire cycle from Architecture to Merged PR can happen in under 20 seconds.
-- **Cloud Ready**: Natively compatible with Hugging Face Spaces Docker deployments.
+- **Cloud Ready**: Production-ready deployment configurations for Vercel, Render, and Docker.
 
 ---
 
@@ -79,7 +69,7 @@ cd AutoMaintainer
 ```
 
 **Supabase Setup:**
-Because AutoMaintainer now uses a high-performance Supabase Realtime architecture to stream logs to the UI:
+Because AutoMaintainer uses a high-performance Supabase Realtime architecture to stream logs to the UI:
 1. Create a new [Supabase Project](https://database.new)
 2. Go to your Supabase SQL Editor and run the provided `supabase_schema.sql` file located in the root of this repository. This creates the required `runs` and `logs` tables.
 3. Grab your API keys from **Project Settings -> API**.
@@ -115,6 +105,15 @@ npm install
 npm run dev
 ```
 *Note: In local development, the Next.js frontend runs on port 3000 and automatically proxies API traffic to the FastAPI backend running on port 8000. You can override this using the `NEXT_PUBLIC_BACKEND_URL` environment variable.*
+
+---
+
+## Deployment (Production SaaS)
+
+AutoMaintainer is configured for modern distributed cloud deployment:
+
+* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with root directory set to `dashboard/`. Uses [`dashboard/vercel.json`](./dashboard/vercel.json) for enterprise security headers.
+* **Backend (Render):** Deploy using the included 1-click [`render.yaml`](./render.yaml) blueprint to launch the FastAPI control plane with automated health checks (`/healthz`).
 
 ---
 
