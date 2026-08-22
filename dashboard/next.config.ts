@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* Next.js standard config for Vercel */
+  output: 'export',
 };
 
 export default nextConfig;
