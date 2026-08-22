@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployment guide
 
 ### Maintenance
+- chore(deps): bump actions/setup-node from 4 to 7 ([#153](https://github.com/PxA-Labs/AutoMaintainer/pull/153)) - @dependabot[bot]
 - chore(deps): bump framer-motion from 12.42.2 to 13.1.0 in /dashboard ([#126](https://github.com/PxA-Labs/AutoMaintainer/pull/126)) - @dependabot[bot]
 - chore(deps-dev): bump @types/node from 26.1.2 to 26.2.0 in /dashboard ([#127](https://github.com/PxA-Labs/AutoMaintainer/pull/127)) - @dependabot[bot]
 - chore(deps): bump lucide-react from 1.28.0 to 1.31.0 in /dashboard ([#125](https://github.com/PxA-Labs/AutoMaintainer/pull/125)) - @dependabot[bot]
