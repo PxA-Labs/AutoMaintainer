@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WebSocket log streaming issues (#40)
 
 ### Documentation
+- docs: remove Hugging Face frontmatter and add Vercel/Render deployment guide ([#161](https://github.com/PxA-Labs/AutoMaintainer/pull/161)) - @purvanshjoshi
 - Contributing guidelines and code standards (#67)
 - Architecture documentation
 - API documentation
