@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the **AutoMaintainer** autonomous AI software engineering platform will be documented in this file.
+All notable changes to the AutoMaintainer autonomous AI software engineering platform will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### 🚀 Architecture & Core Agent Platform
+### Architecture & Core Agent Platform
 
 - feat: Phase 4 - Integrate Native AST Mapping ([#25](https://github.com/PxA-Labs/AutoMaintainer/pull/25)) - @purvanshjoshi
 - feat: Phase 3 - Build Split-Pane Web IDE Interface ([#24](https://github.com/PxA-Labs/AutoMaintainer/pull/24)) - @purvanshjoshi
@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: Phase 1 Native AST Codebase Analyzer ([#22](https://github.com/PxA-Labs/AutoMaintainer/pull/22)) - @purvanshjoshi
 - feat: Implement Targeted Issue Mode ([#7](https://github.com/PxA-Labs/AutoMaintainer/pull/7)) - @purvanshjoshi
 
-### ✨ Web IDE & Interactive Developer Experience
+### Web IDE & Developer Experience
 
 - fix: Resolve hardcoded websocket url in terminal ([#46](https://github.com/PxA-Labs/AutoMaintainer/pull/46)) - @purvanshjoshi
 - feat: Terminal Context Awareness & Polish (Part 4) ([#45](https://github.com/PxA-Labs/AutoMaintainer/pull/45)) - @purvanshjoshi
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: Upgrade WebIDE to Monaco VS Code Engine ([#41](https://github.com/PxA-Labs/AutoMaintainer/pull/41)) - @purvanshjoshi
 - feat: Integrate GitNexus Code Intelligence ([#9](https://github.com/PxA-Labs/AutoMaintainer/pull/9)) - @purvanshjoshi
 
-### 🛡️ Security, Governance & OpenSSF Hardening
+### Security & Governance
 
 - security(openssf): pin GitHub Action commit SHAs and enforce least-privilege permissions ([#165](https://github.com/PxA-Labs/AutoMaintainer/pull/165)) - @purvanshjoshi
 - chore(deps): bump ossf/scorecard-action from 2.4.0 to 2.4.4 ([#154](https://github.com/PxA-Labs/AutoMaintainer/pull/154)) - @dependabot[bot]
@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Resolved Identified Bugs, Security Vulnerabilities, and Cross-Platform Issues ([#56](https://github.com/PxA-Labs/AutoMaintainer/pull/56)) - @purvanshjoshi
 - fix(security): Resolve CodeQL path traversal vulnerabilities ([#47](https://github.com/PxA-Labs/AutoMaintainer/pull/47)) - @purvanshjoshi
 
-### 🐛 Bug Fixes & System Stability
+### Bug Fixes & System Stability
 
 - fix(deploy): configure static export out directory for Docker and Vercel ([#164](https://github.com/PxA-Labs/AutoMaintainer/pull/164)) - @purvanshjoshi
 - fix(vercel): add root package.json and vercel.json for monorepo auto-detection ([#163](https://github.com/PxA-Labs/AutoMaintainer/pull/163)) - @purvanshjoshi
@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix: Resolve infinite LangGraph state duplication bug ([#49](https://github.com/PxA-Labs/AutoMaintainer/pull/49)) - @purvanshjoshi
 - fix: resolve critical agent race conditions, task cancellation, and local WebIDE port mismatch ([#39](https://github.com/PxA-Labs/AutoMaintainer/pull/39)) - @archittmittal
 
-### ⚙️ CI/CD, Containerization & Cloud Deployments
+### CI/CD, Infrastructure & Deployment
 
 - feat(deploy): add Vercel and Render deployment configs ([#160](https://github.com/PxA-Labs/AutoMaintainer/pull/160)) - @purvanshjoshi
 - chore(deps): bump actions/checkout from 4 to 7 ([#156](https://github.com/PxA-Labs/AutoMaintainer/pull/156)) - @dependabot[bot]
@@ -79,12 +79,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat(ci): add auto-updating changelog workflow ([#68](https://github.com/PxA-Labs/AutoMaintainer/pull/68)) - @purvanshjoshi
 - ci: Automate GHCR Docker Image Publishing ([#50](https://github.com/PxA-Labs/AutoMaintainer/pull/50)) - @purvanshjoshi
 
-### 📚 Documentation & Architectural Blueprints
+### Documentation & Blueprints
 
 - docs: remove Hugging Face frontmatter and add Vercel/Render deployment guide ([#161](https://github.com/PxA-Labs/AutoMaintainer/pull/161)) - @purvanshjoshi
 - docs: Update README with recent architectural features ([#48](https://github.com/PxA-Labs/AutoMaintainer/pull/48)) - @purvanshjoshi
 
-### 📦 Dependency Updates & Ecosystem Maintenance
+### Dependency Updates & Maintenance
 
 - chore(deps-dev): bump eslint-config-next from 16.3.0 to 16.3.1 in /dashboard ([#155](https://github.com/PxA-Labs/AutoMaintainer/pull/155)) - @dependabot[bot]
 - chore(deps): bump next from 16.3.0 to 16.3.1 in /dashboard ([#150](https://github.com/PxA-Labs/AutoMaintainer/pull/150)) - @dependabot[bot]
@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-06-20 - Initial Open Source Release
 
-### 🚀 Autonomous Multi-Agent Architecture
+### Autonomous Multi-Agent Architecture
 - **5-Agent Hierarchical Team**: Fully integrated Architect, Visionary, Reviewer, Implementer, and Maintainer agents.
 - **LangGraph State Orchestration**: Cyclic state machine managing issue triage, branch generation, code synthesis, iterative verification, and automated PR submission.
 - **Llama 3.3-70B Engine via Groq**: Low-latency, high-accuracy inference pipeline for code generation and review.
