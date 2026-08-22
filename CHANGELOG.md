@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Interactive terminal with xterm.js
 
 ### Fixed
+- fix(deploy): configure static export out directory for Docker and Vercel ([#164](https://github.com/PxA-Labs/AutoMaintainer/pull/164)) - @purvanshjoshi
 - fix(vercel): add root package.json and vercel.json for monorepo auto-detection ([#163](https://github.com/PxA-Labs/AutoMaintainer/pull/163)) - @purvanshjoshi
 - fix(vercel): standardize next.config.ts and vercel.json for Vercel deployment ([#162](https://github.com/PxA-Labs/AutoMaintainer/pull/162)) - @purvanshjoshi
 - fix(docs): update OpenSSF Scorecard badge and viewer URL ([#145](https://github.com/PxA-Labs/AutoMaintainer/pull/145)) - @purvanshjoshi
