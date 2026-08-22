@@ -48,28 +48,36 @@ jobs:
               print("Missing PR information, skipping.")
               sys.exit(0)
 
-          # Classify category
-          title_lower = pr_title.lower()
-          if title_lower.startswith("feat"):
-              category = "Added"
-          elif title_lower.startswith("fix"):
-              category = "Fixed"
-          elif title_lower.startswith("docs"):
-              category = "Documentation"
-          elif title_lower.startswith("security"):
-              category = "Security"
-          elif title_lower.startswith("refactor"):
-              category = "Changed"
-          elif title_lower.startswith("test"):
-              category = "Tests"
+          # Clean up bot username
+          if pr_author == "app/dependabot":
+              pr_author = "dependabot[bot]"
+
+          # Classify category to match CHANGELOG.md exact sections
+          t = pr_title.lower()
+          if t.startswith("docs") or "readme" in t or "contributing" in t or "guide" in t or "pitch" in t or "frontmatter" in t:
+              category = "Documentation & Blueprints"
+          elif "openssf" in t or "scorecard" in t or "gitleaks" in t or "bandit" in t or "pip-audit" in t or "vulnerability" in t or "security" in t:
+              category = "Security & Governance"
+          elif "bump actions" in t or "bump docker" in t or "bump github" in t or "bump ossf" in t or "bump release-drafter" in t or "bump pascalgn" in t:
+              category = "CI/CD, Infrastructure & Deployment"
+          elif "bump" in t or "chore(deps" in t:
+              category = "Dependency Updates & Maintenance"
+          elif "monaco" in t or "xterm" in t or "terminal" in t or "gitnexus" in t:
+              category = "Web IDE & Developer Experience"
+          elif t.startswith("fix") or "resolve" in t or "reset" in t or "prevent" in t or "collision" in t or "duplicate" in t or "leakage" in t:
+              category = "Bug Fixes & System Stability"
+          elif "deploy" in t or "docker" in t or "vercel" in t or "render" in t or "workflow" in t or "action" in t or "ci" in t:
+              category = "CI/CD, Infrastructure & Deployment"
+          elif t.startswith("feat") or "agent" in t or "langgraph" in t or "supabase" in t or "realtime" in t:
+              category = "Architecture & Core Agent Platform"
           else:
-              category = "Maintenance"
+              category = "Architecture & Core Agent Platform"
 
           entry = f"- {pr_title} ([#{pr_number}]({pr_url})) - @{pr_author}"
 
           changelog_path = "CHANGELOG.md"
           if not os.path.exists(changelog_path):
-              content = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n"
+              content = "# Changelog\n\nAll notable changes to the AutoMaintainer autonomous AI software engineering platform will be documented in this file.\n\n## [Unreleased]\n\n"
           else:
               with open(changelog_path, "r", encoding="utf-8") as f:
                   content = f.read()
@@ -91,7 +99,7 @@ jobs:
           header = parts[0] + "## [Unreleased]\n"
           rest = parts[1]
 
-          # Find next release heading (e.g. ## [0.9.0])
+          # Find next release heading (e.g. ## [0.9.0] or ## [1.0.0])
           next_heading = re.search(r"\n##\s+\[?[0-9v]", rest)
           if next_heading:
               unreleased_section = rest[:next_heading.start()]
@@ -108,11 +116,11 @@ jobs:
           cat_header = f"### {category}"
           if cat_header in unreleased_section:
               cat_parts = unreleased_section.split(cat_header, 1)
-              unreleased_section = cat_parts[0] + cat_header + "\n" + entry + "\n" + cat_parts[1].lstrip("\n")
+              unreleased_section = cat_parts[0] + cat_header + "\n\n" + entry + "\n" + cat_parts[1].lstrip("\n")
           else:
-              unreleased_section = "\n" + cat_header + "\n" + entry + "\n" + unreleased_section.lstrip("\n")
+              unreleased_section = "\n### " + category + "\n\n" + entry + "\n" + unreleased_section.lstrip("\n")
 
-          new_changelog = (header + unreleased_section + rest_section).strip() + "\n"
+          new_changelog = (header + "\n" + unreleased_section.strip() + "\n\n" + rest_section.strip()).strip() + "\n"
 
           with open(changelog_path, "w", encoding="utf-8") as f:
               f.write(new_changelog)
