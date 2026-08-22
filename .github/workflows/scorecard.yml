@@ -16,21 +16,23 @@ jobs:
     permissions:
       security-events: write
       id-token: write
+      contents: read
+      actions: read
 
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@v7
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
 
       - name: "Run analysis"
-        uses: ossf/scorecard-action@v2.4.4
+        uses: ossf/scorecard-action@62b2cac7ed8198b15735db800459828943888363 # v2.4.4
         with:
           results_file: results.sarif
           results_format: sarif
           publish_results: true
 
       - name: "Upload to code-scanning"
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v3.28.11
         with:
           sarif_file: results.sarif

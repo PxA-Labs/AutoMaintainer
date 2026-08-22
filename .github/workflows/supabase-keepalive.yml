@@ -6,9 +6,12 @@ on:
     - cron: '0 0 */3 * *'
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   ping-supabase:
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Ping Supabase REST API
         env:
