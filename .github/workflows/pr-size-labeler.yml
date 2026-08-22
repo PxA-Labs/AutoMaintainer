@@ -14,7 +14,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Add PR Size Label
-        uses: pascalgn/size-label-action@7943e03d08f61864d260a45a6642fe4885591c2f # v0.5.7
+        uses: pascalgn/size-label-action@56b489b027932ec0cf60438a1a5f1a19c8fc71ff # v0.5.7
         env:
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         with:
