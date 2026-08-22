@@ -114,6 +114,16 @@ export default function Home() {
 
     let isMounted = true;
     setSystemHealth({ latency: 0, tokensUsed: 0 });
+    setLogs([{ time: new Date().toLocaleTimeString(), agent: "System", msg: "Connecting...", color: "text-zinc-500" }]);
+    setPipeline([]);
+    setActivity([]);
+    setAgentStatus({
+      Architect: 'idle',
+      Visionary: 'idle',
+      Reviewer: 'idle',
+      Implementer: 'idle',
+      Maintainer: 'idle',
+    });
 
     let isReplaying = true;
     const realtimeBuffer: any[] = [];
