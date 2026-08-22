@@ -7,6 +7,10 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   update_release_draft:
     permissions:
@@ -14,6 +18,6 @@ jobs:
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - uses: release-drafter/release-drafter@v7.7.0
+      - uses: release-drafter/release-drafter@b1476f5e9cb113dbfb39fb5c6057ec9919f96f24 # v6.1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
