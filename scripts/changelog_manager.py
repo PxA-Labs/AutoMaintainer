@@ -57,6 +57,22 @@ SECTION_ORDER = [
 ]
 
 
+def is_changelog_sync_pr(title: str, head_ref: str = "") -> bool:
+    """
+    Returns True if the PR is an automated changelog synchronization PR
+    to prevent self-referential changelog updates and recursion.
+    """
+    t = title.strip().lower()
+    if (
+        t.startswith("chore(changelog)")
+        or "synchronize changelog" in t
+        or head_ref == "chore/changelog-sync"
+        or "update changelog for pr #" in t
+    ):
+        return True
+    return False
+
+
 def parse_conventional_pr(
     title: str,
     number: str | int,

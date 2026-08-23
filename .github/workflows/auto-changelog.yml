@@ -60,7 +60,12 @@ jobs:
           import sys
           import json
           import subprocess
-          from scripts.changelog_manager import parse_conventional_pr, add_entry_to_changelog, update_compare_links
+          from scripts.changelog_manager import (
+              parse_conventional_pr,
+              add_entry_to_changelog,
+              update_compare_links,
+              is_changelog_sync_pr,
+          )
 
           pr_num = os.environ.get("EVENT_PR_NUMBER") or os.environ.get("INPUT_PR_NUMBER")
           pr_title = os.environ.get("EVENT_PR_TITLE") or ""
@@ -89,6 +94,10 @@ jobs:
 
           if not pr_num or not pr_title:
               print("No merged PR found to process.")
+              sys.exit(0)
+
+          if is_changelog_sync_pr(pr_title) and not force:
+              print(f"PR #{pr_num} ({pr_title}) is an automated changelog synchronization PR itself. Skipping to prevent self-referential updates.")
               sys.exit(0)
 
           category, entry, is_breaking = parse_conventional_pr(
