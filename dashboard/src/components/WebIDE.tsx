@@ -10,6 +10,7 @@ import {
   GitPullRequest, GitBranch, Diff, CheckCircle, AlertCircle,
   ArrowUpRight, RefreshCw, Copy, ExternalLink
 } from "lucide-react";
+import { motion } from "framer-motion";
 import Editor from "@monaco-editor/react";
 
 interface TreeNode {
@@ -925,7 +926,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
             <div className="h-8 flex items-center justify-between px-4 text-xs text-[#cccccc] shrink-0 bg-[#1e1e1e] border-b border-zinc-800">
               <div className="flex items-center">
                 <span className="opacity-70">{repoUrl}</span>
-                <span className="mx-1 opacity-50">></span>
+                <span className="mx-1 opacity-50">&gt;</span>
                 <span className="opacity-70">{activeTab?.split("/").join(" > ")}</span>
               </div>
               <div className="flex items-center gap-2">

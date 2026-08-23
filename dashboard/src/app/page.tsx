@@ -889,6 +889,7 @@ function DashboardContent() {
               </div>
             </main>
           )}
+        </div>
       </div>
     );
 }

@@ -8,12 +8,7 @@ import {
   BarChart3, Server, GitBranch, Terminal, Settings
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { createClient } from '@supabase/supabase-js';
-import { useAuth } from '@/lib/auth';
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
-const supabase = createClient(supabaseUrl, supabaseKey);
+import { useAuth, AuthProvider } from '@/lib/auth';
 
 interface AdminMetrics {
   orgs: {
@@ -26,6 +21,7 @@ interface AdminMetrics {
     running: number;
     completed: number;
     failed: number;
+    cancelled?: number;
     last24h: number;
   };
   usage: {
@@ -45,6 +41,27 @@ interface AdminMetrics {
     queueDepth: number;
   };
 }
+
+const formatNumber = (num: number) => {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return num.toString();
+};
+
+const formatCost = (cents: number) => {
+  return '$' + (cents / 100).toFixed(2);
+};
+
+const statusBadge = (status: string) => {
+  const styles: Record<string, string> = {
+    running: 'bg-emerald-500/20 text-emerald-400',
+    completed: 'bg-blue-500/20 text-blue-400',
+    failed: 'bg-red-500/20 text-red-400',
+    cancelled: 'bg-amber-500/20 text-amber-400',
+    queued: 'bg-zinc-500/20 text-zinc-400',
+  };
+  return <span className={`px-2 py-0.5 rounded text-xs font-medium ${styles[status] || styles.queued}`}>{status}</span>;
+};
 
 function AdminDashboard() {
   const { user, session, loading: authLoading } = useAuth();
@@ -100,7 +117,10 @@ function AdminDashboard() {
   }, [session]);
 
   useEffect(() => {
-    fetchMetrics();
+    const loadMetrics = async () => {
+      await fetchMetrics();
+    };
+    loadMetrics();
   }, [fetchMetrics]);
 
   // Auto-refresh every 30 seconds
@@ -169,27 +189,6 @@ function AdminDashboard() {
       </div>
     );
   }
-
-  const formatNumber = (num: number) => {
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-    return num.toString();
-  };
-
-  const formatCost = (cents: number) => {
-    return '$' + (cents / 100).toFixed(2);
-  };
-
-  const statusBadge = (status: string) => {
-    const styles: Record<string, string> = {
-      running: 'bg-emerald-500/20 text-emerald-400',
-      completed: 'bg-blue-500/20 text-blue-400',
-      failed: 'bg-red-500/20 text-red-400',
-      cancelled: 'bg-amber-500/20 text-amber-400',
-      queued: 'bg-zinc-500/20 text-zinc-400',
-    };
-    return <span className={`px-2 py-0.5 rounded text-xs font-medium ${styles[status] || styles.queued}`}>{status}</span>;
-  };
 
   return (
     <div className="flex h-screen w-full bg-[#0a0a0a] text-zinc-100 font-sans overflow-hidden">
@@ -837,4 +836,10 @@ function AlertItem({ severity, message, time }: {
   );
 }
 
-export default AdminDashboard;
+export default function AdminPage() {
+  return (
+    <AuthProvider>
+      <AdminDashboard />
+    </AuthProvider>
+  );
+}

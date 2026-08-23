@@ -14,13 +14,12 @@ from celery.exceptions import SoftTimeLimitExceeded
 from supabase import create_client, Client
 
 from agents import run_agent_loop, broadcast_log
-from main import supabase as main_supabase
 
 logger = logging.getLogger(__name__)
 
 # Supabase client for tasks (service role)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
 
 task_supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
@@ -28,11 +27,15 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
 
 
 def get_supabase() -> Client:
-    """Get Supabase client, preferring task-specific one."""
+    """Get Supabase client, initializing if needed."""
+    global task_supabase
     if task_supabase:
         return task_supabase
-    if main_supabase:
-        return main_supabase
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+    if url and key:
+        task_supabase = create_client(url, key)
+        return task_supabase
     raise RuntimeError("No Supabase client available")
 
 
