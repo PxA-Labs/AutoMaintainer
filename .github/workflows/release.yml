@@ -1,0 +1,62 @@
+name: "Publish GitHub Release"
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: "Create GitHub Release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.11'
+
+      - name: Extract Release Notes
+        id: notes
+        run: |
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          echo "RELEASE_TAG=${TAG}" >> $GITHUB_ENV
+          
+          python scripts/changelog_manager.py extract-notes --tag "${TAG}" > release_notes.md
+          
+          if [ ! -s release_notes.md ]; then
+            echo "No specific notes found for tag ${TAG} in CHANGELOG.md; generating standard fallback notes."
+            echo "AutoMaintainer release ${TAG}" > release_notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if release already exists
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists. Updating notes."
+            gh release edit "${RELEASE_TAG}" --notes-file release_notes.md
+          else
+            gh release create "${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
+              --notes-file release_notes.md \
+              --draft=false \
+              --prerelease=false
+            echo "Release ${RELEASE_TAG} published successfully."
+          fi

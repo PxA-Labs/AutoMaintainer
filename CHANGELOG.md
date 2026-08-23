@@ -12,7 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Architecture & Core Agent Platform
 
 - revert: Web-first SaaS architecture changes ([#166](https://github.com/PxA-Labs/AutoMaintainer/pull/166)) - @purvanshjoshi
-- revert: Web-first SaaS architecture changes ([#166](https://github.com/PxA-Labs/AutoMaintainer/pull/166)) - @purvanshjoshi
 - feat: Phase 4 - Integrate Native AST Mapping ([#25](https://github.com/PxA-Labs/AutoMaintainer/pull/25)) - @purvanshjoshi
 - feat: Phase 3 - Build Split-Pane Web IDE Interface ([#24](https://github.com/PxA-Labs/AutoMaintainer/pull/24)) - @purvanshjoshi
 - feat: Phase 2 File System Tree API ([#23](https://github.com/PxA-Labs/AutoMaintainer/pull/23)) - @purvanshjoshi
@@ -127,3 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
+
+[Unreleased]: https://github.com/PxA-Labs/AutoMaintainer/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/PxA-Labs/AutoMaintainer/releases/tag/v1.0.0
