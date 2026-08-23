@@ -15,6 +15,7 @@ import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from supabase import create_client, Client
+import operator
 
 load_dotenv()
 current_run_id = ContextVar("current_run_id")
@@ -77,9 +78,6 @@ def get_all_groq_keys():
         if k:
             keys.append(k)
     return keys
-
-
-import operator
 
 
 class AgentState(TypedDict):
