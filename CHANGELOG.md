@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- docs(changelog): update CHANGELOG.md for PR #166 ([#168](https://github.com/PxA-Labs/AutoMaintainer/pull/168)) - @github-actions[bot]
 - docs: remove Hugging Face frontmatter and add Vercel/Render deployment guide ([#161](https://github.com/PxA-Labs/AutoMaintainer/pull/161)) - @purvanshjoshi
 - docs: Update README with recent architectural features ([#48](https://github.com/PxA-Labs/AutoMaintainer/pull/48)) - @purvanshjoshi
 
