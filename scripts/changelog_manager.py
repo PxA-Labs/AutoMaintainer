@@ -227,7 +227,7 @@ def add_entry_to_changelog(
 def update_compare_links(
     changelog_path: str,
     repo_slug: str = "PxA-Labs/AutoMaintainer",
-    latest_tag: str = "v0.9.0",
+    latest_tag: str = "v1.0.0",
 ):
     """
     Appends or updates Keep a Changelog semantic comparison links at the bottom.

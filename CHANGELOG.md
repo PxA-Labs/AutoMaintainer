@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+- **ci**: Implement industry-standard changelog sync, PR title linter, and release automation ([#176](https://github.com/PxA-Labs/AutoMaintainer/pull/176)) (closes [#158](https://github.com/PxA-Labs/AutoMaintainer/issues/158)) - @purvanshjoshi
 ### Architecture & Core Agent Platform
 
 - revert: Web-first SaaS architecture changes ([#166](https://github.com/PxA-Labs/AutoMaintainer/pull/166)) - @purvanshjoshi
