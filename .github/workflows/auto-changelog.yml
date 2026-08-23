@@ -4,6 +4,17 @@ on:
   pull_request_target:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to sync into CHANGELOG.md (e.g. 166)'
+        required: false
+        default: '166'
+      force:
+        description: 'Force create PR test'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -11,7 +22,7 @@ permissions:
 
 jobs:
   update-changelog-pr:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,26 +43,49 @@ jobs:
 
       - name: Update CHANGELOG.md
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_FORCE: ${{ inputs.force }}
         run: |
           python - << 'EOF'
           import os
           import sys
           import re
+          import json
+          import subprocess
 
-          pr_number = os.environ.get("PR_NUMBER", "")
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
           pr_title = os.environ.get("PR_TITLE", "").strip()
-          pr_url = os.environ.get("PR_URL", "")
-          pr_author = os.environ.get("PR_AUTHOR", "")
+          pr_url = os.environ.get("PR_URL", "").strip()
+          pr_author = os.environ.get("PR_AUTHOR", "").strip()
+          input_pr = os.environ.get("INPUT_PR_NUMBER", "").strip()
+          input_force = os.environ.get("INPUT_FORCE", "").lower() == "true"
 
           if not pr_number or not pr_title:
-              print("Missing PR information, skipping.")
+              target_pr = input_pr if input_pr else ""
+              if target_pr:
+                  res = subprocess.run(["gh", "pr", "view", target_pr, "--json", "number,title,url,author"], capture_output=True, text=True)
+              else:
+                  res = subprocess.run(["gh", "pr", "list", "--state", "merged", "--limit", "1", "--json", "number,title,url,author"], capture_output=True, text=True)
+              
+              if res.returncode == 0 and res.stdout.strip():
+                  data = json.loads(res.stdout.strip())
+                  if isinstance(data, list) and len(data) > 0:
+                      data = data[0]
+                  if isinstance(data, dict):
+                      pr_number = str(data.get("number", ""))
+                      pr_title = data.get("title", "")
+                      pr_url = data.get("url", "")
+                      pr_author = data.get("author", {}).get("login", "")
+
+          if not pr_number or not pr_title:
+              print("No PR information found, skipping.")
               sys.exit(0)
 
-          # Clean up bot username
           if pr_author == "app/dependabot":
               pr_author = "dependabot[bot]"
 
@@ -111,9 +145,13 @@ jobs:
               unreleased_section = rest
               rest_section = ""
 
-          # Avoid duplicate entry
-          if f"[#{pr_number}]" in unreleased_section:
+          # Avoid duplicate entry unless forced
+          if f"[#{pr_number}]" in unreleased_section and not input_force:
               print(f"PR #{pr_number} already in CHANGELOG.md.")
+              # Export to GITHUB_ENV anyway
+              if "GITHUB_ENV" in os.environ:
+                  with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+                      env_file.write(f"SYNC_PR_NUMBER={pr_number}\nSYNC_PR_TITLE={pr_title}\n")
               sys.exit(0)
 
           cat_header = f"### {category}"
@@ -128,14 +166,16 @@ jobs:
           with open(changelog_path, "w", encoding="utf-8") as f:
               f.write(new_changelog)
 
-          print(f"Successfully added PR #{pr_number} to {category} in CHANGELOG.md")
+          if "GITHUB_ENV" in os.environ:
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+                  env_file.write(f"SYNC_PR_NUMBER={pr_number}\nSYNC_PR_TITLE={pr_title}\n")
+
+          print(f"Successfully processed PR #{pr_number} ({pr_title}) for {category} in CHANGELOG.md")
           EOF
 
       - name: Create branch, commit, and open PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
@@ -145,11 +185,11 @@ jobs:
             exit 0
           fi
 
-          BRANCH_NAME="chore/update-changelog-pr-${PR_NUMBER}"
+          BRANCH_NAME="chore/update-changelog-pr-${SYNC_PR_NUMBER}"
           
           git checkout -b "${BRANCH_NAME}"
           git add CHANGELOG.md
-          git commit -m "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}"
+          git commit -m "docs(changelog): update CHANGELOG.md for PR #${SYNC_PR_NUMBER}"
           git push -u origin "${BRANCH_NAME}" --force
           
           # Check if PR already exists
@@ -158,8 +198,8 @@ jobs:
             echo "Pull request #${EXISTING_PR} already exists for branch ${BRANCH_NAME}."
           else
             gh pr create \
-              --title "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}" \
-              --body "Automated changelog update following the merge of PR #${PR_NUMBER} (${PR_TITLE})." \
+              --title "docs(changelog): update CHANGELOG.md for PR #${SYNC_PR_NUMBER}" \
+              --body "Automated changelog update following the merge of PR #${SYNC_PR_NUMBER} (${SYNC_PR_TITLE})." \
               --head "${BRANCH_NAME}" \
               --base "main"
             echo "Pull request created successfully."
