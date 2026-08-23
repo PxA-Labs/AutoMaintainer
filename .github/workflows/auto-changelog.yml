@@ -7,19 +7,22 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  update-changelog:
+  update-changelog-pr:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
           fetch-depth: 0
 
       - name: Set up Python
@@ -52,7 +55,7 @@ jobs:
           if pr_author == "app/dependabot":
               pr_author = "dependabot[bot]"
 
-          # Classify category to match CHANGELOG.md exact sections
+          # Classify category to match CHANGELOG.md exact sections (no emojis)
           t = pr_title.lower()
           if t.startswith("docs") or "readme" in t or "contributing" in t or "guide" in t or "pitch" in t or "frontmatter" in t:
               category = "Documentation & Blueprints"
@@ -128,17 +131,36 @@ jobs:
           print(f"Successfully added PR #{pr_number} to {category} in CHANGELOG.md")
           EOF
 
-      - name: Commit and push changes
+      - name: Create branch, commit, and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          git add CHANGELOG.md
+          if git diff --quiet CHANGELOG.md; then
+            echo "No changes detected in CHANGELOG.md, skipping PR creation."
+            exit 0
+          fi
+
+          BRANCH_NAME="chore/update-changelog-pr-${PR_NUMBER}"
           
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
+          git checkout -b "${BRANCH_NAME}"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}"
+          git push -u origin "${BRANCH_NAME}" --force
+          
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "${BRANCH_NAME}" --json number --jq '.[0].number')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Pull request #${EXISTING_PR} already exists for branch ${BRANCH_NAME}."
           else
-            git commit -m "docs: update CHANGELOG.md with PR #${{ github.event.pull_request.number }} [skip ci]"
-            git push
-            echo "Changelog updated and pushed successfully"
+            gh pr create \
+              --title "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}" \
+              --body "Automated changelog update following the merge of PR #${PR_NUMBER} (${PR_TITLE})." \
+              --head "${BRANCH_NAME}" \
+              --base "main"
+            echo "Pull request created successfully."
           fi
