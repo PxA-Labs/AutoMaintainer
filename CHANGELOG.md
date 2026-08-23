@@ -85,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **readme**: Add release and changelog section ([#177](https://github.com/PxA-Labs/AutoMaintainer/pull/177)) - @purvanshjoshi
 - docs(changelog): update CHANGELOG.md for PR #172 ([#173](https://github.com/PxA-Labs/AutoMaintainer/pull/173)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #171 ([#172](https://github.com/PxA-Labs/AutoMaintainer/pull/172)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #170 ([#171](https://github.com/PxA-Labs/AutoMaintainer/pull/171)) - @github-actions[bot]
@@ -129,6 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
 
 ---
 
