@@ -145,5 +145,10 @@ Want to add a new Agent or improve the dashboard? Check out our [Contributing Gu
 
 ---
 
+## Release & Changelog
+AutoMaintainer maintains a living changelog and automated release notes adhering to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Conventional Commits](https://www.conventionalcommits.org/). Review all historical and unreleased updates in our [CHANGELOG.md](./CHANGELOG.md).
+
+---
+
 ## License
 This project is licensed under the [MIT License](./LICENSE).
