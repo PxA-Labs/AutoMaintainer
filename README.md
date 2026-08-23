@@ -20,15 +20,38 @@
 
 </div>
 
-AutoMaintainer is a revolutionary proof-of-concept that demonstrates an entirely autonomous, multi-agent software engineering team working natively inside your GitHub repositories.
+AutoMaintainer is an autonomous, multi-agent AI software engineering platform operating natively inside your GitHub repositories.
 
-Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (via Groq)**, this system doesn't just print code to a terminal—it brainstorms ideas, creates real GitHub Issues, writes code, submits Pull Requests, reviews the PRs, fixes its own bugs, and merges the code into your `main` branch.
+Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (via Groq)**, the system coordinates specialized AI agents to discover issues, design architecture, implement code changes, open Pull Requests, review diffs, self-correct bugs, and merge verified code.
+
+---
+
+> [!WARNING]
+> ### 🚧 Active Architecture Migration Notice (System Unstable)
+> **AutoMaintainer is currently undergoing a massive architectural transformation from a local prototype to an enterprise-grade Web-First SaaS Platform.**
+>
+> During this major migration phase:
+> * **The platform is currently unstable and active workflows may be temporarily non-operational or experience breaking changes.**
+> * Core systems being actively overhauled include:
+>   - **Multi-Tenant SaaS Control Plane:** Migrating from single-user local state to organization-scoped data isolation and Row Level Security (RLS).
+>   - **Durable Task Queue:** Replacing in-memory asyncio task execution with Celery + Redis distributed workers and retry mechanisms.
+>   - **GitHub App Authentication:** Transitioning from personal access tokens (PAT) to GitHub App installation tokens with automated webhook dispatching.
+>   - **Ephemeral Sandbox Architecture:** Decoupling execution runners for containerized code execution.
+>   - **Pro Monaco WebIDE:** Integrating full diff inspection and inline AI assistance.
+>
+> Please follow our [GitHub Discussions](https://github.com/PxA-Labs/AutoMaintainer/discussions) and [Pinned Epics](https://github.com/PxA-Labs/AutoMaintainer/issues) for real-time progress updates.
+
+---
 
 > [!IMPORTANT]
-> **Supabase Real-time Architecture Required!**
-> This repository uses a high-performance **Supabase Real-time Pub/Sub** ecosystem. For this early access / open-source version, you **must** create a free Supabase project and provide the URL and API Keys in your `.env` files for the UI to receive logs from the AI agents. See the [Database & Environment Setup](#2-database--environment-setup) section below for exact instructions!
-> 
-> *(Note: In the upcoming official ecosystem launch, this will be handled automatically via a central cloud and users will simply run `automaintainer login` without needing to configure their own database!)*
+> ### 🗄️ Critical Supabase & Database Configuration Note
+> AutoMaintainer relies on **Supabase** (PostgreSQL + Realtime Pub/Sub + Auth) for telemetry, run orchestration, and live agent log streaming.
+>
+> 1. **Public/Demo Database Status:** If the free-tier demo Supabase instance is paused or unreachable, historical run tracking and real-time streaming to the Web UI will be disabled. The UI will show a warning banner indicating that persistence is offline.
+> 2. **Self-Hosted / Developer Database Setup:** If you are running or contributing to AutoMaintainer, you **must provision your own Supabase project**:
+>    * Create a project at [supabase.com](https://supabase.com).
+>    * Run the complete schema migration script [`supabase_schema.sql`](./supabase_schema.sql) in your **Supabase SQL Editor** to create the required tables (`organizations`, `users`, `repositories`, `runs`, `logs`, `usage_events`, `ide_sessions`).
+>    * Supply your own credentials in `.env` (backend) and `.env.local` (dashboard).
 
 ---
 
@@ -44,93 +67,71 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 
 ---
 
-## Quick Start
+## Development & Local Setup
 
-### Option 1: Run via Docker (Recommended)
-The fastest way to get started is by pulling the pre-built Docker image from the GitHub Container Registry. This includes both the Next.js frontend and FastAPI backend in a single container.
-
-```bash
-docker run -p 7860:7860 \
-  -e GROQ_API_KEY="your_groq_api_key_here" \
-  -e GITHUB_TOKEN="your_github_token_here" \
-  ghcr.io/pxa-labs/automaintainer:latest
-```
-Open your browser to `http://localhost:7860`.
-
----
-
-### Option 2: Manual Setup
-
-**1. Prerequisites**
-- [Node.js](https://nodejs.org/en/) (v18+)
-- [Python](https://www.python.org/) (3.10+)
+### 1. Prerequisites
+- [Node.js](https://nodejs.org/en/) (v20+)
+- [Python](https://www.python.org/) (3.11+)
 - A [Groq API Key](https://console.groq.com/keys)
-- A [GitHub Personal Access Token](https://github.com/settings/tokens) (with `repo` permissions)
-- A [Supabase Project](https://supabase.com/) (Free Tier is fine)
+- A [GitHub Token](https://github.com/settings/tokens) or GitHub App credentials
+- A [Supabase Project](https://supabase.com/) (Free Tier supported)
+- [Redis](https://redis.io/) (optional, required for Celery task workers)
 
-### 2. Database & Environment Setup
+### 2. Environment Configuration
+
 Clone the repository:
 ```bash
 git clone https://github.com/PxA-Labs/AutoMaintainer.git
 cd AutoMaintainer
 ```
 
-**Supabase Setup:**
-Because AutoMaintainer uses a high-performance Supabase Realtime architecture to stream logs to the UI:
-1. Create a new [Supabase Project](https://database.new)
-2. Go to your Supabase SQL Editor and run the provided `supabase_schema.sql` file located in the root of this repository. This creates the required `runs` and `logs` tables.
-3. Grab your API keys from **Project Settings -> API**.
+**Database Migration:**
+1. Open your [Supabase SQL Editor](https://database.new).
+2. Execute the entire contents of [`supabase_schema.sql`](./supabase_schema.sql).
 
-Create a `.env` file in the `backend/` directory:
+**Backend Environment (`backend/.env`):**
 ```bash
-GROQ_API_KEY=your_groq_api_key_here
-GITHUB_TOKEN=your_github_token_here
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_KEY=your_secret_service_role_key
+GROQ_API_KEY="your_groq_api_key_here"
+GITHUB_TOKEN="your_github_token_here"
+SUPABASE_URL="https://your-project.supabase.co"
+SUPABASE_SERVICE_KEY="your_supabase_service_role_key"
+REDIS_URL="redis://localhost:6379/0"
 ```
 
-Create a `.env.local` file in the `dashboard/` directory:
+**Frontend Environment (`dashboard/.env.local`):**
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_public_anon_key
-NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+NEXT_PUBLIC_SUPABASE_URL="https://your-project.supabase.co"
+NEXT_PUBLIC_SUPABASE_ANON_KEY="your_supabase_anon_key"
+NEXT_PUBLIC_BACKEND_URL="http://localhost:8000"
 ```
 
-### 3. Run the Backend (FastAPI + LangGraph)
-Open a terminal and navigate to the backend directory:
+### 3. Run Backend (FastAPI)
 ```bash
 cd backend
 pip install -r requirements.txt
 fastapi dev main.py
 ```
 
-### 4. Run the Frontend (Next.js)
-Open a new terminal and navigate to the dashboard directory:
+### 4. Run Frontend (Next.js)
 ```bash
 cd dashboard
-npm install
+npm ci
 npm run dev
 ```
-*Note: In local development, the Next.js frontend runs on port 3000 and automatically proxies API traffic to the FastAPI backend running on port 8000. You can override this using the `NEXT_PUBLIC_BACKEND_URL` environment variable.*
+Open `http://localhost:3000` in your browser.
 
 ---
 
 ## Deployment (Production SaaS)
 
-AutoMaintainer is configured for modern distributed cloud deployment:
+AutoMaintainer is configured for distributed cloud deployment:
 
-* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with root directory set to `dashboard/`. Uses [`dashboard/vercel.json`](./dashboard/vercel.json) for enterprise security headers.
-* **Backend (Render):** Deploy using the included 1-click [`render.yaml`](./render.yaml) blueprint to launch the FastAPI control plane with automated health checks (`/healthz`).
-
----
-
-## Usage
-
-1. Open `http://localhost:3000` in your browser.
-2. In the sidebar under **Configuration**, click on the **Target Repository** and enter a repository you own (e.g., `your-username/your-repo`).
-   - *Note: Your GitHub Token must have push access to this repository!*
-3. Click **Start Agents**.
-4. Watch the dashboard UI light up as the Architect scans your repo. Open your target repository on GitHub in another tab to watch the Issues and Pull Requests appear in real-time!
+* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with root directory set to `dashboard/`. Uses [`dashboard/vercel.json`](./dashboard/vercel.json) for static export and security headers.
+* **Backend & Workers (Render):** Deploy using the included [`render.yaml`](./render.yaml) blueprint to launch the FastAPI control plane, Redis broker, and Celery background workers.
+* **Containerized Deployment (Docker / GHCR):** Pull the pre-built multi-arch image:
+  ```bash
+  docker pull ghcr.io/pxa-labs/automaintainer:latest
+  ```
 
 ---
 
