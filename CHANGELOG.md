@@ -83,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- docs(changelog): update CHANGELOG.md for PR #172 ([#173](https://github.com/PxA-Labs/AutoMaintainer/pull/173)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #171 ([#172](https://github.com/PxA-Labs/AutoMaintainer/pull/172)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #170 ([#171](https://github.com/PxA-Labs/AutoMaintainer/pull/171)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #169 ([#170](https://github.com/PxA-Labs/AutoMaintainer/pull/170)) - @github-actions[bot]
