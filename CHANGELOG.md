@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- docs(changelog): update CHANGELOG.md for PR #172 ([#173](https://github.com/PxA-Labs/AutoMaintainer/pull/173)) - @github-actions[bot]
+- docs(changelog): update CHANGELOG.md for PR #171 ([#172](https://github.com/PxA-Labs/AutoMaintainer/pull/172)) - @github-actions[bot]
+- docs(changelog): update CHANGELOG.md for PR #170 ([#171](https://github.com/PxA-Labs/AutoMaintainer/pull/171)) - @github-actions[bot]
+- docs(changelog): update CHANGELOG.md for PR #169 ([#170](https://github.com/PxA-Labs/AutoMaintainer/pull/170)) - @github-actions[bot]
+- docs(changelog): update CHANGELOG.md for PR #168 ([#169](https://github.com/PxA-Labs/AutoMaintainer/pull/169)) - @github-actions[bot]
+- docs(changelog): update CHANGELOG.md for PR #166 ([#168](https://github.com/PxA-Labs/AutoMaintainer/pull/168)) - @github-actions[bot]
 - docs: remove Hugging Face frontmatter and add Vercel/Render deployment guide ([#161](https://github.com/PxA-Labs/AutoMaintainer/pull/161)) - @purvanshjoshi
 - docs: Update README with recent architectural features ([#48](https://github.com/PxA-Labs/AutoMaintainer/pull/48)) - @purvanshjoshi
 
@@ -120,3 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
+
+[Unreleased]: https://github.com/PxA-Labs/AutoMaintainer/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/PxA-Labs/AutoMaintainer/releases/tag/v1.0.0

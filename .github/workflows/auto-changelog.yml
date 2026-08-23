@@ -4,6 +4,17 @@ on:
   pull_request_target:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to sync into CHANGELOG.md (e.g. 167)'
+        required: false
+        default: ''
+      force:
+        description: 'Force add even if duplicate'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -11,7 +22,7 @@ permissions:
 
 jobs:
   update-changelog-pr:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,137 +41,122 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Update CHANGELOG.md
+      - name: Sync Changelog Entry
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_PR_TITLE: ${{ github.event.pull_request.title }}
+          EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
+          EVENT_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EVENT_PR_BODY: ${{ github.event.pull_request.body }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_FORCE: ${{ inputs.force }}
         run: |
           python - << 'EOF'
           import os
           import sys
-          import re
+          import json
+          import subprocess
+          from scripts.changelog_manager import parse_conventional_pr, add_entry_to_changelog, update_compare_links
 
-          pr_number = os.environ.get("PR_NUMBER", "")
-          pr_title = os.environ.get("PR_TITLE", "").strip()
-          pr_url = os.environ.get("PR_URL", "")
-          pr_author = os.environ.get("PR_AUTHOR", "")
+          pr_num = os.environ.get("EVENT_PR_NUMBER") or os.environ.get("INPUT_PR_NUMBER")
+          pr_title = os.environ.get("EVENT_PR_TITLE") or ""
+          pr_url = os.environ.get("EVENT_PR_URL") or ""
+          pr_author = os.environ.get("EVENT_PR_AUTHOR") or ""
+          pr_body = os.environ.get("EVENT_PR_BODY") or ""
+          force = os.environ.get("INPUT_FORCE", "").lower() == "true"
 
-          if not pr_number or not pr_title:
-              print("Missing PR information, skipping.")
+          if not pr_num or not pr_title:
+              target = pr_num if pr_num else ""
+              if target:
+                  cmd = ["gh", "pr", "view", str(target), "--json", "number,title,url,author,body"]
+              else:
+                  cmd = ["gh", "pr", "list", "--state", "merged", "--limit", "1", "--json", "number,title,url,author,body"]
+              res = subprocess.run(cmd, capture_output=True, text=True)
+              if res.returncode == 0 and res.stdout.strip():
+                  data = json.loads(res.stdout.strip())
+                  if isinstance(data, list) and len(data) > 0:
+                      data = data[0]
+                  if isinstance(data, dict):
+                      pr_num = str(data.get("number", ""))
+                      pr_title = data.get("title", "")
+                      pr_url = data.get("url", "")
+                      pr_author = data.get("author", {}).get("login", "")
+                      pr_body = data.get("body", "") or ""
+
+          if not pr_num or not pr_title:
+              print("No merged PR found to process.")
               sys.exit(0)
 
-          # Clean up bot username
-          if pr_author == "app/dependabot":
-              pr_author = "dependabot[bot]"
+          category, entry, is_breaking = parse_conventional_pr(
+              title=pr_title,
+              number=pr_num,
+              url=pr_url,
+              author=pr_author,
+              body=pr_body,
+          )
 
-          # Classify category to match CHANGELOG.md exact sections (no emojis)
-          t = pr_title.lower()
-          if t.startswith("docs") or "readme" in t or "contributing" in t or "guide" in t or "pitch" in t or "frontmatter" in t:
-              category = "Documentation & Blueprints"
-          elif "openssf" in t or "scorecard" in t or "gitleaks" in t or "bandit" in t or "pip-audit" in t or "vulnerability" in t or "security" in t:
-              category = "Security & Governance"
-          elif "bump actions" in t or "bump docker" in t or "bump github" in t or "bump ossf" in t or "bump release-drafter" in t or "bump pascalgn" in t:
-              category = "CI/CD, Infrastructure & Deployment"
-          elif "bump" in t or "chore(deps" in t:
-              category = "Dependency Updates & Maintenance"
-          elif "monaco" in t or "xterm" in t or "terminal" in t or "gitnexus" in t:
-              category = "Web IDE & Developer Experience"
-          elif t.startswith("fix") or "resolve" in t or "reset" in t or "prevent" in t or "collision" in t or "duplicate" in t or "leakage" in t:
-              category = "Bug Fixes & System Stability"
-          elif "deploy" in t or "docker" in t or "vercel" in t or "render" in t or "workflow" in t or "action" in t or "ci" in t:
-              category = "CI/CD, Infrastructure & Deployment"
-          elif t.startswith("feat") or "agent" in t or "langgraph" in t or "supabase" in t or "realtime" in t:
-              category = "Architecture & Core Agent Platform"
+          changed = add_entry_to_changelog(
+              changelog_path="CHANGELOG.md",
+              category=category,
+              entry=entry,
+              pr_number=pr_num,
+              force=force,
+          )
+
+          if changed:
+              update_compare_links("CHANGELOG.md")
+              print(f"Successfully added PR #{pr_num} to category '{category}'.")
           else:
-              category = "Architecture & Core Agent Platform"
+              print(f"PR #{pr_num} already in CHANGELOG.md.")
 
-          entry = f"- {pr_title} ([#{pr_number}]({pr_url})) - @{pr_author}"
-
-          changelog_path = "CHANGELOG.md"
-          if not os.path.exists(changelog_path):
-              content = "# Changelog\n\nAll notable changes to the AutoMaintainer autonomous AI software engineering platform will be documented in this file.\n\n## [Unreleased]\n\n"
-          else:
-              with open(changelog_path, "r", encoding="utf-8") as f:
-                  content = f.read()
-
-          if "## [Unreleased]" not in content:
-              lines = content.splitlines()
-              new_lines = []
-              inserted = False
-              for line in lines:
-                  new_lines.append(line)
-                  if line.startswith("# ") and not inserted:
-                      new_lines.append("")
-                      new_lines.append("## [Unreleased]")
-                      inserted = True
-              content = "\n".join(new_lines) + "\n"
-
-          # Split around ## [Unreleased]
-          parts = content.split("## [Unreleased]", 1)
-          header = parts[0] + "## [Unreleased]\n"
-          rest = parts[1]
-
-          # Find next release heading (e.g. ## [0.9.0] or ## [1.0.0])
-          next_heading = re.search(r"\n##\s+\[?[0-9v]", rest)
-          if next_heading:
-              unreleased_section = rest[:next_heading.start()]
-              rest_section = rest[next_heading.start():]
-          else:
-              unreleased_section = rest
-              rest_section = ""
-
-          # Avoid duplicate entry
-          if f"[#{pr_number}]" in unreleased_section:
-              print(f"PR #{pr_number} already in CHANGELOG.md.")
-              sys.exit(0)
-
-          cat_header = f"### {category}"
-          if cat_header in unreleased_section:
-              cat_parts = unreleased_section.split(cat_header, 1)
-              unreleased_section = cat_parts[0] + cat_header + "\n\n" + entry + "\n" + cat_parts[1].lstrip("\n")
-          else:
-              unreleased_section = "\n### " + category + "\n\n" + entry + "\n" + unreleased_section.lstrip("\n")
-
-          new_changelog = (header + "\n" + unreleased_section.strip() + "\n\n" + rest_section.strip()).strip() + "\n"
-
-          with open(changelog_path, "w", encoding="utf-8") as f:
-              f.write(new_changelog)
-
-          print(f"Successfully added PR #{pr_number} to {category} in CHANGELOG.md")
+          if "GITHUB_ENV" in os.environ:
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+                  f.write(f"SYNC_PR_NUM={pr_num}\nSYNC_PR_TITLE={pr_title}\n")
           EOF
 
-      - name: Create branch, commit, and open PR
+      - name: Synchronize Persistent Living Release PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
           if git diff --quiet CHANGELOG.md; then
-            echo "No changes detected in CHANGELOG.md, skipping PR creation."
+            echo "No changelog updates needed."
             exit 0
           fi
 
-          BRANCH_NAME="chore/update-changelog-pr-${PR_NUMBER}"
+          BRANCH_NAME="chore/changelog-sync"
           
-          git checkout -b "${BRANCH_NAME}"
+          # Fetch existing sync branch if present
+          git fetch origin "${BRANCH_NAME}:${BRANCH_NAME}" || true
+          git checkout -B "${BRANCH_NAME}"
+          
           git add CHANGELOG.md
-          git commit -m "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}"
+          git commit -m "docs(changelog): update CHANGELOG.md [skip ci]"
           git push -u origin "${BRANCH_NAME}" --force
           
-          # Check if PR already exists
           EXISTING_PR=$(gh pr list --head "${BRANCH_NAME}" --json number --jq '.[0].number')
+          
+          PR_BODY="### 📋 Automated Changelog & Release Synchronization
+
+This pull request was automatically generated by the [Auto Update Changelog](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/auto-changelog.yml) workflow to keep \`CHANGELOG.md\` synchronized with newly merged Pull Requests.
+
+#### 📦 Latest Change Processed:
+- **PR:** #${SYNC_PR_NUM} (${SYNC_PR_TITLE})
+
+---
+*When maintainers are ready to cut a new release, merge this pull request into \`main\` and push the corresponding version tag.*"
+
           if [ -n "$EXISTING_PR" ]; then
-            echo "Pull request #${EXISTING_PR} already exists for branch ${BRANCH_NAME}."
+            echo "Updating existing PR #${EXISTING_PR}..."
+            gh pr edit "${EXISTING_PR}" --title "chore(changelog): synchronize changelog for unreleased changes" --body "${PR_BODY}"
           else
+            echo "Creating new living Release PR..."
             gh pr create \
-              --title "docs(changelog): update CHANGELOG.md for PR #${PR_NUMBER}" \
-              --body "Automated changelog update following the merge of PR #${PR_NUMBER} (${PR_TITLE})." \
+              --title "chore(changelog): synchronize changelog for unreleased changes" \
+              --body "${PR_BODY}" \
               --head "${BRANCH_NAME}" \
               --base "main"
-            echo "Pull request created successfully."
           fi
