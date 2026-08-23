@@ -1,3 +1,4 @@
+import operator
 import os
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -77,9 +78,6 @@ def get_all_groq_keys():
         if k:
             keys.append(k)
     return keys
-
-
-import operator
 
 
 class AgentState(TypedDict):
