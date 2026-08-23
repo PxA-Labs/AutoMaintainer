@@ -7,7 +7,7 @@
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/PxA-Labs/AutoMaintainer/badge)](https://securityscorecards.dev/viewer/?uri=github.com/PxA-Labs/AutoMaintainer)
 [![CI Backend](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/ci-backend.yml/badge.svg)](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/ci-backend.yml)
 [![CodeQL](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
 [![Vercel](https://img.shields.io/badge/Vercel-Deployed-black?logo=vercel)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPxA-Labs%2FAutoMaintainer&root-directory=dashboard)
