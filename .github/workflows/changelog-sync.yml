@@ -1,21 +1,10 @@
-name: Auto Update Changelog
+name: "Changelog Sync"
 
 on:
   pull_request_target:
     types: [closed]
     branches: [main]
   workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to sync into CHANGELOG.md (e.g. 176)'
-        required: false
-        type: string
-        default: ''
-      force:
-        description: 'Force add even if duplicate'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
