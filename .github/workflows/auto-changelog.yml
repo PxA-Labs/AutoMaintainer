@@ -7,8 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to sync into CHANGELOG.md (e.g. 167)'
+        description: 'PR number to sync into CHANGELOG.md (e.g. 176)'
         required: false
+        type: string
         default: ''
       force:
         description: 'Force add even if duplicate'
