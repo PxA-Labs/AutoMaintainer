@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Architecture & Core Agent Platform
 
 - revert: Web-first SaaS architecture changes ([#166](https://github.com/PxA-Labs/AutoMaintainer/pull/166)) - @purvanshjoshi
+- revert: Web-first SaaS architecture changes ([#166](https://github.com/PxA-Labs/AutoMaintainer/pull/166)) - @purvanshjoshi
 - feat: Phase 4 - Integrate Native AST Mapping ([#25](https://github.com/PxA-Labs/AutoMaintainer/pull/25)) - @purvanshjoshi
 - feat: Phase 3 - Build Split-Pane Web IDE Interface ([#24](https://github.com/PxA-Labs/AutoMaintainer/pull/24)) - @purvanshjoshi
 - feat: Phase 2 File System Tree API ([#23](https://github.com/PxA-Labs/AutoMaintainer/pull/23)) - @purvanshjoshi
