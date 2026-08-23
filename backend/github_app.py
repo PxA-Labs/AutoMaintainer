@@ -2,11 +2,14 @@
 GitHub App Authentication for AutoMaintainer
 Replaces PAT-based authentication with GitHub App installation tokens.
 """
+
 import os
 import time
+import json
 import jwt
 import httpx
 from typing import Optional, Dict, Any
+import github
 from github import Github, GithubIntegration
 import logging
 
@@ -15,7 +18,9 @@ logger = logging.getLogger(__name__)
 # GitHub App configuration
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")  # PEM format
-GITHUB_APP_PRIVATE_KEY_PATH = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH")  # Path to PEM file
+GITHUB_APP_PRIVATE_KEY_PATH = os.getenv(
+    "GITHUB_APP_PRIVATE_KEY_PATH"
+)  # Path to PEM file
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
 
 # Cache for installation tokens (installation_id -> (token, expires_at))
@@ -39,13 +44,10 @@ def get_github_integration() -> GithubIntegration:
     """Get authenticated GitHub Integration client."""
     if not GITHUB_APP_ID:
         raise ValueError("GITHUB_APP_ID not configured")
-    
+
     private_key = load_private_key()
     return GithubIntegration(
-        auth=github.Auth.AppAuth(
-            app_id=int(GITHUB_APP_ID),
-            private_key=private_key
-        )
+        auth=github.Auth.AppAuth(app_id=int(GITHUB_APP_ID), private_key=private_key)
     )
 
 
@@ -53,7 +55,7 @@ def generate_app_jwt() -> str:
     """Generate a JWT for GitHub App authentication."""
     if not GITHUB_APP_ID:
         raise ValueError("GITHUB_APP_ID not configured")
-    
+
     private_key = load_private_key()
     now = int(time.time())
     payload = {
@@ -74,14 +76,16 @@ async def get_installation_token(installation_id: int) -> str:
         token, expires_at = _installation_token_cache[installation_id]
         if time.time() < expires_at - 60:  # 60 second buffer
             return token
-    
+
     # Fetch new token
     integration = get_github_integration()
     try:
         auth = integration.get_installation_auth(installation_id)
         token = auth.token
-        expires_at = auth.expires_at.timestamp() if auth.expires_at else time.time() + 3600
-        
+        expires_at = (
+            auth.expires_at.timestamp() if auth.expires_at else time.time() + 3600
+        )
+
         _installation_token_cache[installation_id] = (token, expires_at)
         return token
     except Exception as e:
@@ -101,32 +105,32 @@ async def get_installation_repositories(installation_id: int) -> list[Dict[str, 
     try:
         repos = []
         for repo in client.get_installation_repos():
-            repos.append({
-                "id": repo.id,
-                "full_name": repo.full_name,
-                "name": repo.name,
-                "owner_login": repo.owner.login,
-                "owner_type": repo.owner.type,
-                "private": repo.private,
-                "default_branch": repo.default_branch,
-                "description": repo.description,
-                "language": repo.language,
-                "topics": repo.get_topics(),
-                "avatar_url": repo.owner.avatar_url,
-                "html_url": repo.html_url,
-                "archived": repo.archived,
-                "disabled": repo.disabled,
-                "pushed_at": repo.pushed_at.isoformat() if repo.pushed_at else None,
-            })
+            repos.append(
+                {
+                    "id": repo.id,
+                    "full_name": repo.full_name,
+                    "name": repo.name,
+                    "owner_login": repo.owner.login,
+                    "owner_type": repo.owner.type,
+                    "private": repo.private,
+                    "default_branch": repo.default_branch,
+                    "description": repo.description,
+                    "language": repo.language,
+                    "topics": repo.get_topics(),
+                    "avatar_url": repo.owner.avatar_url,
+                    "html_url": repo.html_url,
+                    "archived": repo.archived,
+                    "disabled": repo.disabled,
+                    "pushed_at": repo.pushed_at.isoformat() if repo.pushed_at else None,
+                }
+            )
         return repos
     finally:
         client.close()
 
 
 async def sync_installation_repositories(
-    supabase_client,
-    installation_id: int,
-    org_id: str
+    supabase_client, installation_id: int, org_id: str
 ) -> int:
     """
     Sync repositories from GitHub App installation to database.
@@ -134,43 +138,44 @@ async def sync_installation_repositories(
     """
     repos = await get_installation_repositories(installation_id)
     synced = 0
-    
+
     for repo_data in repos:
         if repo_data["archived"] or repo_data["disabled"]:
             continue
-            
+
         try:
-            await supabase_client.table("repositories").upsert({
-                "id": repo_data["id"],
-                "org_id": org_id,
-                "github_installation_id": installation_id,
-                "full_name": repo_data["full_name"],
-                "name": repo_data["name"],
-                "owner_login": repo_data["owner_login"],
-                "owner_type": repo_data["owner_type"],
-                "private": repo_data["private"],
-                "default_branch": repo_data["default_branch"],
-                "description": repo_data["description"],
-                "language": repo_data["language"],
-                "topics": repo_data["topics"],
-                "avatar_url": repo_data["avatar_url"],
-                "html_url": repo_data["html_url"],
-                "archived": repo_data["archived"],
-                "disabled": repo_data["disabled"],
-                "pushed_at": repo_data["pushed_at"],
-                "synced_at": time.time(),
-            }, on_conflict="id").execute()
+            await supabase_client.table("repositories").upsert(
+                {
+                    "id": repo_data["id"],
+                    "org_id": org_id,
+                    "github_installation_id": installation_id,
+                    "full_name": repo_data["full_name"],
+                    "name": repo_data["name"],
+                    "owner_login": repo_data["owner_login"],
+                    "owner_type": repo_data["owner_type"],
+                    "private": repo_data["private"],
+                    "default_branch": repo_data["default_branch"],
+                    "description": repo_data["description"],
+                    "language": repo_data["language"],
+                    "topics": repo_data["topics"],
+                    "avatar_url": repo_data["avatar_url"],
+                    "html_url": repo_data["html_url"],
+                    "archived": repo_data["archived"],
+                    "disabled": repo_data["disabled"],
+                    "pushed_at": repo_data["pushed_at"],
+                    "synced_at": time.time(),
+                },
+                on_conflict="id",
+            ).execute()
             synced += 1
         except Exception as e:
             logger.error(f"Failed to sync repo {repo_data['full_name']}: {e}")
-    
+
     return synced
 
 
 async def handle_github_webhook(
-    payload: Dict[str, Any],
-    headers: Dict[str, str],
-    supabase_client
+    payload: Dict[str, Any], headers: Dict[str, str], supabase_client
 ) -> Dict[str, Any]:
     """
     Process incoming GitHub webhook event.
@@ -181,27 +186,32 @@ async def handle_github_webhook(
         signature = headers.get("X-Hub-Signature-256", "")
         if not verify_webhook_signature(payload, signature):
             raise ValueError("Invalid webhook signature")
-    
+
     event_type = headers.get("X-GitHub-Event", "unknown")
     delivery_id = headers.get("X-GitHub-Delivery", "unknown")
-    
+
     # Extract installation ID from payload
     installation_id = payload.get("installation", {}).get("id")
     if not installation_id:
         return {"status": "ignored", "reason": "No installation ID in payload"}
-    
+
     # Get org_id from installation
-    result = await supabase_client.table("github_installations") \
-        .select("org_id") \
-        .eq("id", installation_id) \
-        .single() \
+    result = (
+        await supabase_client.table("github_installations")
+        .select("org_id")
+        .eq("id", installation_id)
+        .single()
         .execute()
-    
+    )
+
     if not result.data:
-        return {"status": "ignored", "reason": f"Installation {installation_id} not registered"}
-    
+        return {
+            "status": "ignored",
+            "reason": f"Installation {installation_id} not registered",
+        }
+
     org_id = result.data["org_id"]
-    
+
     # Store webhook event for async processing
     webhook_data = {
         "org_id": org_id,
@@ -212,9 +222,9 @@ async def handle_github_webhook(
         "payload": payload,
         "status": "pending",
     }
-    
+
     await supabase_client.table("webhook_events").insert(webhook_data).execute()
-    
+
     return {"status": "queued", "event_type": event_type, "delivery_id": delivery_id}
 
 
@@ -222,18 +232,16 @@ def verify_webhook_signature(payload: Dict[str, Any], signature_header: str) -> 
     """Verify GitHub webhook signature (HMAC SHA256)."""
     import hmac
     import hashlib
-    
+
     if not signature_header.startswith("sha256="):
         return False
-    
+
     expected_sig = signature_header[7:]  # Remove "sha256="
     payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
     computed_sig = hmac.new(
-        GITHUB_WEBHOOK_SECRET.encode(),
-        payload_bytes,
-        hashlib.sha256
+        GITHUB_WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
     ).hexdigest()
-    
+
     return hmac.compare_digest(computed_sig, expected_sig)
 
 

@@ -27,7 +27,7 @@ import re
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Celery integration
 from celery_app import celery_app
@@ -53,9 +53,12 @@ from observability import (
 logger = logging.getLogger(__name__)
 
 gitnexus_process = None
+active_tasks: Dict[str, asyncio.Task] = {}
+tasks_lock = asyncio.Lock()
 
 
 # --- Pydantic Models ---
+
 
 class StartRequest(BaseModel):
     repo_name: str
@@ -89,7 +92,7 @@ async def get_current_user(authorization: Annotated[str | None, Header()] = None
     return {
         "user_id": "dev-user-id",
         "org_id": "dev-org-id",
-        "email": "dev@example.com"
+        "email": "dev@example.com",
     }
 
 
@@ -103,10 +106,7 @@ async def get_user_id(user: dict = Depends(get_current_user)) -> str:
 
 # --- Repository validation helper ---
 async def validate_repo_access(
-    repo_name: str,
-    org_id: str,
-    user_id: str,
-    supabase_client
+    repo_name: str, org_id: str, user_id: str, supabase_client
 ) -> tuple[int, int]:
     """
     Validate user has access to repo and return (repository_id, github_installation_id).
@@ -114,26 +114,26 @@ async def validate_repo_access(
     # Check if repo exists in org's tracked repositories
     result = await asyncio.to_thread(
         lambda: supabase_client.table("repositories")
-            .select("id, github_installation_id")
-            .eq("org_id", org_id)
-            .eq("full_name", repo_name)
-            .single()
-            .execute()
+        .select("id, github_installation_id")
+        .eq("org_id", org_id)
+        .eq("full_name", repo_name)
+        .single()
+        .execute()
     )
-    
+
     if not result.data:
         raise HTTPException(
-            status_code=404, 
-            detail=f"Repository {repo_name} not found in organization. Please sync repositories first."
+            status_code=404,
+            detail=f"Repository {repo_name} not found in organization. Please sync repositories first.",
         )
-    
+
     return result.data["id"], result.data["github_installation_id"]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global gitnexus_process
-    
+
     # Initialize observability
     setup_structured_logging()
     init_observability(
@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
         enable_prometheus=True,
     )
     instrument_fastapi(app)
-    
+
     # Start the GitNexus MCP server in the background
     try:
         cmd = (
@@ -187,7 +187,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown observability
     shutdown_observability()
-    
+
     if gitnexus_process:
         gitnexus_process.terminate()
         print("GitNexus server stopped")
@@ -235,22 +235,23 @@ async def healthz_observability():
 
 # --- New Celery-based endpoints ---
 
+
 @app.post("/start")
 async def start_agents(
     req: StartRequest,
     org_id: str = Depends(get_org_id),
-    user_id: str = Depends(get_user_id)
+    user_id: str = Depends(get_user_id),
 ):
     """
     Start an agent run via Celery task queue.
     Returns immediately with run_id for polling.
     """
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
+
     # Validate repo access and get IDs
     try:
         repository_id, github_installation_id = await validate_repo_access(
@@ -259,11 +260,13 @@ async def start_agents(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Repository validation failed: {e}")
-    
+        raise HTTPException(
+            status_code=500, detail=f"Repository validation failed: {e}"
+        )
+
     # Create run record in database
     run_id = str(uuid.uuid4())
-    
+
     run_data = {
         "id": run_id,
         "org_id": org_id,
@@ -278,85 +281,97 @@ async def start_agents(
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
     }
-    
+
     try:
-        await asyncio.to_thread(
-            lambda: sb.table("runs").insert(run_data).execute()
-        )
+        await asyncio.to_thread(lambda: sb.table("runs").insert(run_data).execute())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create run record: {e}")
-    
+
     # Queue the Celery task
     try:
         task = run_agent_loop_task.apply_async(
-            args=[run_id, req.repo_name, org_id, user_id, repository_id, github_installation_id],
-            kwargs={
-                "target_issue_number": req.target_issue,
-                "mode": req.mode
-            },
-            queue="agent_runs"
+            args=[
+                run_id,
+                req.repo_name,
+                org_id,
+                user_id,
+                repository_id,
+                github_installation_id,
+            ],
+            kwargs={"target_issue_number": req.target_issue, "mode": req.mode},
+            queue="agent_runs",
         )
-        
+
         # Store Celery task ID for tracking
         await asyncio.to_thread(
-            lambda: sb.table("runs").update({"celery_task_id": task.id}).eq("id", run_id).execute()
+            lambda: sb.table("runs")
+            .update({"celery_task_id": task.id})
+            .eq("id", run_id)
+            .execute()
         )
-        
+
     except Exception as e:
+        err_msg = str(e)
         # Mark run as failed if queueing fails
         await asyncio.to_thread(
-            lambda: sb.table("runs").update({
-                "status": "failed",
-                "error_message": f"Failed to queue task: {e}",
-                "completed_at": datetime.utcnow().isoformat()
-            }).eq("id", run_id).execute()
+            lambda msg=err_msg: sb.table("runs")
+            .update(
+                {
+                    "status": "failed",
+                    "error_message": f"Failed to queue task: {msg}",
+                    "completed_at": datetime.utcnow().isoformat(),
+                }
+            )
+            .eq("id", run_id)
+            .execute()
         )
-        raise HTTPException(status_code=500, detail=f"Failed to queue agent run: {e}")
-    
+        raise HTTPException(
+            status_code=500, detail=f"Failed to queue agent run: {err_msg}"
+        )
+
     return {
         "status": "queued",
         "run_id": run_id,
         "celery_task_id": task.id,
-        "message": "Agent run queued. Poll /status/{run_id} for updates."
+        "message": "Agent run queued. Poll /status/{run_id} for updates.",
     }
 
 
 @app.get("/status/{run_id}")
-async def get_run_status(
-    run_id: str,
-    org_id: str = Depends(get_org_id)
-):
+async def get_run_status(run_id: str, org_id: str = Depends(get_org_id)):
     """Get current status of a run."""
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
+
     result = await asyncio.to_thread(
         lambda: sb.table("runs")
-            .select("*")
-            .eq("id", run_id)
-            .eq("org_id", org_id)
-            .single()
-            .execute()
+        .select("*")
+        .eq("id", run_id)
+        .eq("org_id", org_id)
+        .single()
+        .execute()
     )
-    
+
     if not result.data:
         raise HTTPException(status_code=404, detail="Run not found")
-    
+
     run = result.data
-    
+
     # If still queued/running, check Celery task status
     celery_task_id = run.get("celery_task_id")
     if celery_task_id and run["status"] in ("queued", "running"):
         try:
             celery_result = celery_app.AsyncResult(celery_task_id)
             run["celery_status"] = celery_result.status
-            run["celery_result"] = celery_result.result if celery_result.ready() else None
+            run["celery_result"] = (
+                celery_result.result if celery_result.ready() else None
+            )
         except Exception:
             pass
-    
+
     return run
 
 
@@ -365,106 +380,128 @@ async def list_runs(
     org_id: str = Depends(get_org_id),
     status: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
 ):
     """List runs for the current organization."""
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
-    query = sb.table("runs").select("*").eq("org_id", org_id).order("created_at", desc=True)
-    
+
+    query = (
+        sb.table("runs").select("*").eq("org_id", org_id).order("created_at", desc=True)
+    )
+
     if status:
         query = query.eq("status", status)
-    
+
     result = await asyncio.to_thread(
         lambda: query.range(offset, offset + limit - 1).execute()
     )
-    
+
     return {
         "runs": result.data or [],
         "total": len(result.data or []),
         "limit": limit,
-        "offset": offset
+        "offset": offset,
     }
 
 
 @app.post("/stop")
 async def stop_agents(
-    req: Optional[StopRequest] = None,
-    org_id: str = Depends(get_org_id)
+    req: Optional[StopRequest] = None, org_id: str = Depends(get_org_id)
 ):
     """Stop/cancel a running agent run."""
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
+
     if req and req.run_id:
         # Cancel specific run
         run_id = req.run_id
-        
+
         # Verify ownership
         result = await asyncio.to_thread(
-            lambda: sb.table("runs").select("id, status, celery_task_id").eq("id", run_id).eq("org_id", org_id).single().execute()
+            lambda: sb.table("runs")
+            .select("id, status, celery_task_id")
+            .eq("id", run_id)
+            .eq("org_id", org_id)
+            .single()
+            .execute()
         )
-        
+
         if not result.data:
             raise HTTPException(status_code=404, detail="Run not found")
-        
+
         run = result.data
-        
+
         if run["status"] not in ("queued", "running"):
-            return {"status": "not_running", "run_id": run_id, "current_status": run["status"]}
-        
+            return {
+                "status": "not_running",
+                "run_id": run_id,
+                "current_status": run["status"],
+            }
+
         # Revoke Celery task
         celery_task_id = run.get("celery_task_id")
         if celery_task_id:
             celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
-        
+
         # Update status
         await asyncio.to_thread(
-            lambda: sb.table("runs").update({
-                "status": "cancelled",
-                "error_message": "Cancelled by user",
-                "completed_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat()
-            }).eq("id", run_id).execute()
+            lambda: sb.table("runs")
+            .update(
+                {
+                    "status": "cancelled",
+                    "error_message": "Cancelled by user",
+                    "completed_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            )
+            .eq("id", run_id)
+            .execute()
         )
-        
+
         return {"status": "cancelled", "run_id": run_id}
-    
+
     else:
         # Cancel all running runs for org
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-                .select("id, celery_task_id")
-                .eq("org_id", org_id)
-                .in_("status", ["queued", "running"])
-                .execute()
+            .select("id, celery_task_id")
+            .eq("org_id", org_id)
+            .in_("status", ["queued", "running"])
+            .execute()
         )
-        
+
         runs = result.data or []
         cancelled_count = 0
-        
+
         for run in runs:
             celery_task_id = run.get("celery_task_id")
             if celery_task_id:
-                celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
-            
+                celery_app.control.revoke(
+                    celery_task_id, terminate=True, signal="SIGTERM"
+                )
+
             await asyncio.to_thread(
-                lambda r=run: sb.table("runs").update({
-                    "status": "cancelled",
-                    "error_message": "Cancelled by user (bulk)",
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat()
-                }).eq("id", r["id"]).execute()
+                lambda r=run: sb.table("runs")
+                .update(
+                    {
+                        "status": "cancelled",
+                        "error_message": "Cancelled by user (bulk)",
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                )
+                .eq("id", r["id"])
+                .execute()
             )
             cancelled_count += 1
-        
+
         return {"status": "cancelled", "count": cancelled_count}
 
 
@@ -519,6 +556,7 @@ async def stop_agents_legacy(req: Optional[StopRequest] = None):
 
 
 # --- File operations (unchanged) ---
+
 
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
@@ -629,7 +667,6 @@ async def delete_repo_file(repo_name: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
     return {"status": "deleted", "message": message}
 
-
     # --- Propose Changes Endpoint ---
     # Creates a PR with staged changes from WebIDE
 
@@ -638,13 +675,12 @@ async def delete_repo_file(repo_name: str, file_path: str):
         description: str
         changes: List[dict]  # [{path, content, status}]
 
-
     @app.post("/repo/{repo_name:path}/propose-changes")
     async def propose_changes(
         repo_name: str,
         payload: ProposeChangesRequest,
         org_id: str = Depends(get_org_id),
-        user_id: str = Depends(get_user_id)
+        user_id: str = Depends(get_user_id),
     ):
         """
         Create a new branch, commit changes, and open a Pull Request.
@@ -653,35 +689,37 @@ async def delete_repo_file(repo_name: str, file_path: str):
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             raise HTTPException(status_code=401, detail="GitHub token not configured")
-    
+
         gh = Github(token)
         try:
             repo = gh.get_repo(repo_name)
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
-    
+
         # Get default branch
         default_branch = repo.default_branch
-    
+
         # Create new branch name
-        safe_title = "".join(c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower())
+        safe_title = "".join(
+            c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower()
+        )
         safe_title = safe_title[:50].strip("-")
         branch_name = f"automaintainer/{safe_title}-{uuid.uuid4().hex[:8]}"
-    
+
         try:
             # Get base commit SHA
             base_ref = repo.get_git_ref(f"heads/{default_branch}")
             base_sha = base_ref.object.sha
-        
+
             # Create new branch
             repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
-        
+
             # Commit each change
             for change in payload.changes:
                 file_path = change["path"]
                 content = change["content"]
                 status = change.get("status", "modified")
-            
+
                 if status == "deleted":
                     # Delete file
                     try:
@@ -690,7 +728,7 @@ async def delete_repo_file(repo_name: str, file_path: str):
                             file.path,
                             f"Delete {file_path} via AutoMaintainer IDE",
                             file.sha,
-                            branch=branch_name
+                            branch=branch_name,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to delete {file_path}: {e}")
@@ -699,19 +737,24 @@ async def delete_repo_file(repo_name: str, file_path: str):
                     message = f"{'Create' if status == 'created' else 'Update'} {file_path} via AutoMaintainer IDE"
                     try:
                         file = repo.get_contents(file_path, ref=branch_name)
-                        repo.update_file(file.path, message, content, file.sha, branch=branch_name)
+                        repo.update_file(
+                            file.path, message, content, file.sha, branch=branch_name
+                        )
                     except Exception:
                         # File doesn't exist, create it
-                        repo.create_file(file_path, message, content, branch=branch_name)
-        
+                        repo.create_file(
+                            file_path, message, content, branch=branch_name
+                        )
+
             # Create Pull Request
             pr = repo.create_pull(
                 title=payload.title,
-                body=payload.description or "Changes proposed via AutoMaintainer WebIDE",
+                body=payload.description
+                or "Changes proposed via AutoMaintainer WebIDE",
                 head=branch_name,
-                base=default_branch
+                base=default_branch,
             )
-        
+
             # Write to local clone for IDE sync
             repo_dir = get_safe_repo_dir(repo_name)
             if repo_dir.exists():
@@ -720,14 +763,14 @@ async def delete_repo_file(repo_name: str, file_path: str):
                         target_path = get_safe_target_path(repo_dir, change["path"])
                         target_path.parent.mkdir(parents=True, exist_ok=True)
                         target_path.write_text(change["content"], encoding="utf-8")
-        
+
             return {
                 "branch_name": branch_name,
                 "pr_number": pr.number,
                 "pr_url": pr.html_url,
                 "base_branch": default_branch,
             }
-        
+
         except Exception as e:
             # Try to clean up branch on failure
             try:
@@ -735,10 +778,12 @@ async def delete_repo_file(repo_name: str, file_path: str):
                 ref.delete()
             except Exception:
                 pass
-            raise HTTPException(status_code=500, detail=f"Failed to propose changes: {e}")
-
+            raise HTTPException(
+                status_code=500, detail=f"Failed to propose changes: {e}"
+            )
 
     # --- Terminal WebSocket (unchanged) ---
+
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
@@ -880,6 +925,7 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 
 
 # --- Repository browsing endpoints (unchanged) ---
+
 
 @app.get("/repo/{repo_name:path}/tree")
 def get_repo_tree(repo_name: str):
@@ -1036,18 +1082,18 @@ elif os.path.exists("dashboard/out"):  # In docker container
 # --- Admin Endpoints ---
 # These require admin role (checked via RLS policies in Supabase)
 
+
 @app.get("/admin/metrics")
 async def get_admin_metrics(
-    org_id: str = Depends(get_org_id),
-    user_id: str = Depends(get_user_id)
+    org_id: str = Depends(get_org_id), user_id: str = Depends(get_user_id)
 ):
     """Get system-wide metrics for admin dashboard."""
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
+
     # Check if user is admin
     try:
         is_admin = await asyncio.to_thread(
@@ -1059,44 +1105,47 @@ async def get_admin_metrics(
         # Fallback: check via organization_members
         result = await asyncio.to_thread(
             lambda: sb.table("organization_members")
-                .select("role")
-                .eq("org_id", org_id)
-                .eq("user_id", user_id)
-                .single()
-                .execute()
+            .select("role")
+            .eq("org_id", org_id)
+            .eq("user_id", user_id)
+            .single()
+            .execute()
         )
         if not result.data or result.data["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Admin privileges required")
-    
+
     # Fetch metrics from database views
     try:
         # Org health overview
         org_health = await asyncio.to_thread(
             lambda: sb.table("org_health").select("*").execute()
         )
-        
+
         # Recent runs
         recent_runs = await asyncio.to_thread(
             lambda: sb.table("recent_runs_detailed")
-                .select("*")
-                .order("created_at", desc=True)
-                .limit(100)
-                .execute()
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(100)
+            .execute()
         )
-        
+
         # Usage summary (last 30 days)
         usage_summary = await asyncio.to_thread(
             lambda: sb.table("monthly_usage_summary")
-                .select("*")
-                .gte("month", (datetime.utcnow().replace(day=1) - timedelta(days=30)).isoformat())
-                .execute()
+            .select("*")
+            .gte(
+                "month",
+                (datetime.utcnow().replace(day=1) - timedelta(days=30)).isoformat(),
+            )
+            .execute()
         )
-        
+
         # Aggregate metrics
         orgs = org_health.data or []
         runs = recent_runs.data or []
         usage = usage_summary.data or []
-        
+
         # Calculate totals
         total_orgs = len(orgs)
         active_orgs = sum(1 for o in orgs if o.get("active_runs", 0) > 0)
@@ -1104,11 +1153,20 @@ async def get_admin_metrics(
         running_runs = sum(1 for r in runs if r.get("status") == "running")
         completed_runs = sum(1 for r in runs if r.get("status") == "completed")
         failed_runs = sum(1 for r in runs if r.get("status") == "failed")
-        runs_24h = sum(1 for r in runs if r.get("created_at", "") > (datetime.utcnow() - timedelta(days=1)).isoformat())
-        
-        total_tokens = sum(u.get("total_quantity", 0) for u in usage if u.get("event_type") == "llm_tokens_consumed")
+        runs_24h = sum(
+            1
+            for r in runs
+            if r.get("created_at", "")
+            > (datetime.utcnow() - timedelta(days=1)).isoformat()
+        )
+
+        total_tokens = sum(
+            u.get("total_quantity", 0)
+            for u in usage
+            if u.get("event_type") == "llm_tokens_consumed"
+        )
         total_cost = sum(u.get("total_estimated_cost_cents", 0) for u in usage)
-        
+
         # Usage by event type
         by_event = {}
         for u in usage:
@@ -1117,28 +1175,30 @@ async def get_admin_metrics(
                 by_event[et] = {"count": 0, "costCents": 0}
             by_event[et]["count"] += u.get("total_quantity", 0)
             by_event[et]["costCents"] += u.get("total_estimated_cost_cents", 0)
-        
+
         # Daily usage for last 30 days
         daily_usage = []
         for i in range(30):
             day = datetime.utcnow() - timedelta(days=i)
             day_str = day.strftime("%Y-%m-%d")
             day_data = [u for u in usage if u.get("month", "").startswith(day_str[:7])]
-            day_tokens = sum(u.get("total_quantity", 0) for u in day_data if u.get("event_type") == "llm_tokens_consumed")
+            day_tokens = sum(
+                u.get("total_quantity", 0)
+                for u in day_data
+                if u.get("event_type") == "llm_tokens_consumed"
+            )
             day_cost = sum(u.get("total_estimated_cost_cents", 0) for u in day_data)
-            daily_usage.append({
-                "date": day_str,
-                "tokens": day_tokens,
-                "costCents": day_cost
-            })
+            daily_usage.append(
+                {"date": day_str, "tokens": day_tokens, "costCents": day_cost}
+            )
         daily_usage.reverse()
-        
+
         # Plan distribution
         plan_dist = {}
         for o in orgs:
             plan = o.get("plan", "free")
             plan_dist[plan] = plan_dist.get(plan, 0) + 1
-        
+
         return {
             "orgs": {
                 "total": total_orgs,
@@ -1180,34 +1240,36 @@ async def get_admin_runs(
     user_id: str = Depends(get_user_id),
     status: Optional[str] = None,
     limit: int = 100,
-    offset: int = 0
+    offset: int = 0,
 ):
     """Get all runs across organization for admin."""
     from agents import supabase as agents_supabase
-    
+
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    
+
     # Check admin
     result = await asyncio.to_thread(
         lambda: sb.table("organization_members")
-            .select("role")
-            .eq("org_id", org_id)
-            .eq("user_id", user_id)
-            .single()
-            .execute()
+        .select("role")
+        .eq("org_id", org_id)
+        .eq("user_id", user_id)
+        .single()
+        .execute()
     )
     if not result.data or result.data["role"] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Admin privileges required")
-    
-    query = sb.table("runs").select("*").eq("org_id", org_id).order("created_at", desc=True)
-    
+
+    query = (
+        sb.table("runs").select("*").eq("org_id", org_id).order("created_at", desc=True)
+    )
+
     if status:
         query = query.eq("status", status)
-    
+
     result = await asyncio.to_thread(
         lambda: query.range(offset, offset + limit - 1).execute()
     )
-    
+
     return {"runs": result.data or []}

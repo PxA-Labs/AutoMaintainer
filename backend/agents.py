@@ -100,7 +100,9 @@ class AgentState(TypedDict):
     log_messages: Annotated[list, operator.add]
 
 
-async def run_llm(system_prompt: str, user_prompt: str, estimated_tokens: int = 2000) -> str:
+async def run_llm(
+    system_prompt: str, user_prompt: str, estimated_tokens: int = 2000
+) -> str:
     """
     Run LLM completion with automatic rate limit management.
     Uses the global RateLimitManager for multi-key rotation and token bucket limiting.
@@ -110,20 +112,24 @@ async def run_llm(system_prompt: str, user_prompt: str, estimated_tokens: int = 
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             model="llama-3.3-70b-versatile",
-            estimated_tokens=estimated_tokens
+            estimated_tokens=estimated_tokens,
         )
     except Exception as e:
         run_id = current_run_id.get(None)
         if run_id:
-            await broadcast_log({
-                "agent": "System",
-                "msg": f"[ERROR] LLM execution failed: {str(e)}",
-                "color": "text-red-500",
-            })
+            await broadcast_log(
+                {
+                    "agent": "System",
+                    "msg": f"[ERROR] LLM execution failed: {str(e)}",
+                    "color": "text-red-500",
+                }
+            )
         raise
 
 
-async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tokens: int = 3000):
+async def run_llm_with_tools(
+    system_prompt: str, user_prompt: str, estimated_tokens: int = 3000
+):
     """
     Run LLM with tools (MCP) with automatic rate limit management.
     """
@@ -144,7 +150,7 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tok
 
                 # Use rate-limited LLM for tool execution
                 manager = await get_rate_limit_manager()
-                
+
                 async def _call_with_tools(api_key: str):
                     llms = [
                         ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key)
@@ -160,17 +166,24 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tok
                     start_t = time.time()
 
                     async for chunk in agent.astream(
-                        {"messages": [("system", system_prompt), ("user", user_prompt)]},
+                        {
+                            "messages": [
+                                ("system", system_prompt),
+                                ("user", user_prompt),
+                            ]
+                        },
                         stream_mode="updates",
                     ):
                         run_id = current_run_id.get(None)
                         if "tools" in chunk and run_id:
                             for tm in chunk["tools"].get("messages", []):
-                                await broadcast_log({
-                                    "agent": "GitNexus",
-                                    "msg": f"🔍 Searched code graph using '{tm.name}'...",
-                                    "color": "text-purple-400",
-                                })
+                                await broadcast_log(
+                                    {
+                                        "agent": "GitNexus",
+                                        "msg": f"🔍 Searched code graph using '{tm.name}'...",
+                                        "color": "text-purple-400",
+                                    }
+                                )
                         if "agent" in chunk:
                             final_res = chunk["agent"]
                             if (
@@ -178,23 +191,27 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tok
                                 and len(chunk["agent"]["messages"]) > 0
                             ):
                                 msg = chunk["agent"]["messages"][-1]
-                                if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                                if (
+                                    hasattr(msg, "usage_metadata")
+                                    and msg.usage_metadata
+                                ):
                                     tokens = msg.usage_metadata.get("total_tokens", 0)
                                     latency_ms = int((time.time() - start_t) * 1000)
                                     if run_id:
-                                        await broadcast_log({
-                                            "type": "ui_update",
-                                            "systemHealth": {
-                                                "latency": latency_ms,
-                                                "tokensUsed": tokens,
-                                            },
-                                        })
+                                        await broadcast_log(
+                                            {
+                                                "type": "ui_update",
+                                                "systemHealth": {
+                                                    "latency": latency_ms,
+                                                    "tokensUsed": tokens,
+                                                },
+                                            }
+                                        )
 
                     return final_res["messages"][-1].content
 
                 return await manager.execute_with_retry(
-                    _call_with_tools,
-                    estimated_tokens=estimated_tokens
+                    _call_with_tools, estimated_tokens=estimated_tokens
                 )
     except Exception as e:
         err_str = str(e)
@@ -207,20 +224,24 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tok
 
             traceback.print_exc()
             print(f"MCP Tool execution fallback: {e}")
-        
+
         # Fallback to simple LLM with rate limiting
         try:
-            return await run_llm(system_prompt, user_prompt, estimated_tokens=estimated_tokens)
+            return await run_llm(
+                system_prompt, user_prompt, estimated_tokens=estimated_tokens
+            )
         except Exception as e2:
             print(f"LLM execution completely failed: {e2}")
             run_id = current_run_id.get(None)
             if run_id:
                 asyncio.create_task(
-                    broadcast_log({
-                        "agent": "System",
-                        "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
-                        "color": "text-red-500",
-                    })
+                    broadcast_log(
+                        {
+                            "agent": "System",
+                            "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
+                            "color": "text-red-500",
+                        }
+                    )
                 )
             return f"[ERROR] LLM execution failed: {e2}"
 
