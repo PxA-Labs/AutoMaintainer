@@ -16,6 +16,9 @@ from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from supabase import create_client, Client
 
+# Rate limiting
+from rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
+
 load_dotenv()
 current_run_id = ContextVar("current_run_id")
 
@@ -97,53 +100,33 @@ class AgentState(TypedDict):
     log_messages: Annotated[list, operator.add]
 
 
-async def run_llm(system_prompt: str, user_prompt: str) -> str:
-    keys = get_all_groq_keys()
-    if not keys:
+async def run_llm(system_prompt: str, user_prompt: str, estimated_tokens: int = 2000) -> str:
+    """
+    Run LLM completion with automatic rate limit management.
+    Uses the global RateLimitManager for multi-key rotation and token bucket limiting.
+    """
+    try:
+        return await run_llm_with_rate_limit(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model="llama-3.3-70b-versatile",
+            estimated_tokens=estimated_tokens
+        )
+    except Exception as e:
         run_id = current_run_id.get(None)
         if run_id:
-            await broadcast_log(
-                {
-                    "agent": "System",
-                    "msg": "[ERROR] No GROQ_API_KEY found in environment. Agents cannot run.",
-                    "color": "text-red-500",
-                }
-            )
-        raise ValueError("No GROQ_API_KEY found in environment")
-
-    llms = [ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys] + [
-        ChatGroq(model="llama-3.1-8b-instant", api_key=k) for k in keys
-    ]
-    if len(llms) > 1:
-        llm = llms[0].with_fallbacks(llms[1:])
-    else:
-        llm = llms[0]
-
-    start_t = time.time()
-    response = await llm.ainvoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
-    )
-    latency_ms = int((time.time() - start_t) * 1000)
-
-    tokens = 0
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        tokens = response.usage_metadata.get("total_tokens", 0)
-
-    run_id = current_run_id.get(None)
-    if run_id:
-        asyncio.create_task(
-            broadcast_log(
-                {
-                    "type": "ui_update",
-                    "systemHealth": {"latency": latency_ms, "tokensUsed": tokens},
-                }
-            )
-        )
-
-    return response.content
+            await broadcast_log({
+                "agent": "System",
+                "msg": f"[ERROR] LLM execution failed: {str(e)}",
+                "color": "text-red-500",
+            })
+        raise
 
 
-async def run_llm_with_tools(system_prompt: str, user_prompt: str):
+async def run_llm_with_tools(system_prompt: str, user_prompt: str, estimated_tokens: int = 3000):
+    """
+    Run LLM with tools (MCP) with automatic rate limit management.
+    """
     try:
         from mcp.client.stdio import stdio_client, StdioServerParameters
         from mcp.client.session import ClientSession
@@ -159,68 +142,60 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
                 await session.initialize()
                 tools = await load_mcp_tools(session)
 
-                keys = get_all_groq_keys()
-                if not keys:
-                    run_id = current_run_id.get(None)
-                    if run_id:
-                        await broadcast_log(
-                            {
-                                "agent": "System",
-                                "msg": "[ERROR] No GROQ_API_KEY found in environment. Agents cannot run.",
-                                "color": "text-red-500",
-                            }
-                        )
-                    raise ValueError("No GROQ_API_KEY found in environment")
+                # Use rate-limited LLM for tool execution
+                manager = await get_rate_limit_manager()
+                
+                async def _call_with_tools(api_key: str):
+                    llms = [
+                        ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key)
+                    ] + [ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)]
+                    if len(llms) > 1:
+                        llm = llms[0].with_fallbacks(llms[1:])
+                    else:
+                        llm = llms[0]
 
-                llms = [
-                    ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys
-                ] + [ChatGroq(model="llama-3.1-8b-instant", api_key=k) for k in keys]
-                if len(llms) > 1:
-                    llm = llms[0].with_fallbacks(llms[1:])
-                else:
-                    llm = llms[0]
+                    agent = create_react_agent(llm, tools=tools)
 
-                agent = create_react_agent(llm, tools=tools)
+                    final_res = None
+                    start_t = time.time()
 
-                final_res = None
-                start_t = time.time()
-
-                async for chunk in agent.astream(
-                    {"messages": [("system", system_prompt), ("user", user_prompt)]},
-                    stream_mode="updates",
-                ):
-                    run_id = current_run_id.get(None)
-                    if "tools" in chunk and run_id:
-                        for tm in chunk["tools"].get("messages", []):
-                            await broadcast_log(
-                                {
+                    async for chunk in agent.astream(
+                        {"messages": [("system", system_prompt), ("user", user_prompt)]},
+                        stream_mode="updates",
+                    ):
+                        run_id = current_run_id.get(None)
+                        if "tools" in chunk and run_id:
+                            for tm in chunk["tools"].get("messages", []):
+                                await broadcast_log({
                                     "agent": "GitNexus",
                                     "msg": f"🔍 Searched code graph using '{tm.name}'...",
                                     "color": "text-purple-400",
-                                }
-                            )
-                    if "agent" in chunk:
-                        final_res = chunk["agent"]
-                        if (
-                            "messages" in chunk["agent"]
-                            and len(chunk["agent"]["messages"]) > 0
-                        ):
-                            msg = chunk["agent"]["messages"][-1]
-                            if hasattr(msg, "usage_metadata") and msg.usage_metadata:
-                                tokens = msg.usage_metadata.get("total_tokens", 0)
-                                latency_ms = int((time.time() - start_t) * 1000)
-                                if run_id:
-                                    await broadcast_log(
-                                        {
+                                })
+                        if "agent" in chunk:
+                            final_res = chunk["agent"]
+                            if (
+                                "messages" in chunk["agent"]
+                                and len(chunk["agent"]["messages"]) > 0
+                            ):
+                                msg = chunk["agent"]["messages"][-1]
+                                if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                                    tokens = msg.usage_metadata.get("total_tokens", 0)
+                                    latency_ms = int((time.time() - start_t) * 1000)
+                                    if run_id:
+                                        await broadcast_log({
                                             "type": "ui_update",
                                             "systemHealth": {
                                                 "latency": latency_ms,
                                                 "tokensUsed": tokens,
                                             },
-                                        }
-                                    )
+                                        })
 
-                return final_res["messages"][-1].content
+                    return final_res["messages"][-1].content
+
+                return await manager.execute_with_retry(
+                    _call_with_tools,
+                    estimated_tokens=estimated_tokens
+                )
     except Exception as e:
         err_str = str(e)
         if "RateLimitError" in err_str or "429" in err_str:
@@ -232,20 +207,20 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
 
             traceback.print_exc()
             print(f"MCP Tool execution fallback: {e}")
+        
+        # Fallback to simple LLM with rate limiting
         try:
-            return await run_llm(system_prompt, user_prompt)
+            return await run_llm(system_prompt, user_prompt, estimated_tokens=estimated_tokens)
         except Exception as e2:
             print(f"LLM execution completely failed: {e2}")
             run_id = current_run_id.get(None)
             if run_id:
                 asyncio.create_task(
-                    broadcast_log(
-                        {
-                            "agent": "System",
-                            "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
-                            "color": "text-red-500",
-                        }
-                    )
+                    broadcast_log({
+                        "agent": "System",
+                        "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
+                        "color": "text-red-500",
+                    })
                 )
             return f"[ERROR] LLM execution failed: {e2}"
 
