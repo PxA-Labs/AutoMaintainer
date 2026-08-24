@@ -208,4 +208,3 @@ async def test_architect_node_target_issue_fetch_failure(monkeypatch):
         await agents.architect_node(state)
 
     assert "Architect failed to fetch target issue #142" in str(exc_info.value)
-
