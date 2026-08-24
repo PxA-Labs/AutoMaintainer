@@ -290,17 +290,17 @@ async def architect_node(state: AgentState):
                 "log_messages": new_logs,
             }  # ARCHITECT EARLY RETURN
         except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "Architect",
-                    "msg": f"Failed to fetch issue #{target_issue}: {str(e)}",
-                    "color": "text-red-500",
-                }
-            )
-            new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
+            err_log = {
+                "agent": "Architect",
+                "msg": f"Failed to fetch issue #{target_issue}: {e}",
+                "color": "text-red-500",
+            }
+            idle_ui = {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
+            await broadcast_log(err_log)
+            await broadcast_log(idle_ui)
             raise ValueError(
                 f"Architect failed to fetch target issue #{target_issue}: {e}"
-            )
+            ) from e
 
     if gh:
         try:
@@ -1042,21 +1042,3 @@ async def run_agent_loop(
             except Exception as e:
                 print(f"Failed to update run status in Supabase: {e}")
         raise
-    except Exception as e:
-        await broadcast_log(
-            {
-                "agent": "System",
-                "msg": f"Agent loop failed: {str(e)}",
-                "color": "text-red-500",
-            }
-        )
-        if supabase:
-            try:
-                await asyncio.to_thread(
-                    lambda: supabase.table("runs")
-                    .update({"status": "failed"})
-                    .eq("id", run_id)
-                    .execute()
-                )
-            except Exception as se:
-                print(f"Failed to update run status in Supabase: {se}")
