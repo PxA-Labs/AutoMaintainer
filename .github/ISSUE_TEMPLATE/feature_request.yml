@@ -1,0 +1,56 @@
+name: Feature Request
+description: Propose a new capability, architecture enhancement, or tool integration
+title: "feat: [Short summary of the feature]"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for proposing a new feature for AutoMaintainer. Please provide a structured design overview to facilitate review.
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a problem or limitation?
+      placeholder: A clear and concise description of what the problem is (e.g. I am frustrated when...).
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution & Architectural Design
+      description: Describe the solution you'd like to see implemented.
+      placeholder: Detailed technical description of components, interfaces, and state transitions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions, libraries, or approaches you have evaluated.
+      placeholder: Describe any alternative approaches considered.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Target Component
+      options:
+        - Core Agent Engine / LangGraph State Machine
+        - FastAPI Backend API / Control Plane
+        - Next.js Web Dashboard / WebIDE
+        - Celery Task Workers / Redis Queue
+        - GitNexus AST Indexer / Knowledge Graph
+        - SDK & CLI Harness
+        - CI/CD & Cloud Infrastructure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: willingness_to_contribute
+    attributes:
+      label: Implementation Contribution
+      options:
+        - label: I am willing to submit a pull request implementing this feature.

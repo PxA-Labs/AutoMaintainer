@@ -1,34 +1,147 @@
 # Contributing to AutoMaintainer
 
-First off, thank you for considering contributing to AutoMaintainer! It's people like you that make AutoMaintainer such a great tool.
+Thank you for your interest in contributing to AutoMaintainer! AutoMaintainer is an autonomous, always-on AI software engineering team and platform built with LangGraph, FastAPI, and Next.js.
 
-## Where do I go from here?
+To ensure high code quality, security, and architectural consistency across the project, all contributors must follow these guidelines.
 
-If you've noticed a bug or have a feature request, make sure to check if there's already an [issue](https://github.com/PxA-Labs/AutoMaintainer/issues) for it. If not, feel free to open a new one!
+---
 
-## Setting up your development environment
+## 1. Code of Conduct
 
-1. **Fork** the repo on GitHub.
-2. **Clone** the project to your own machine.
-3. Install dependencies for the backend and frontend:
-   - Backend: `pip install -r backend/requirements.txt`
-   - Frontend: `npm install` in the `dashboard/` directory.
+By participating in this project, you agree to abide by our [Code of Conduct](./CODE_OF_CONDUCT.md). Please report any violations or concerns to `maintainers@pxalabs.com`.
 
-## Architecture
+---
 
-Before making changes to the LangGraph agents, please read our [ARCHITECTURE.md](./ARCHITECTURE.md) to understand the state flow and interactions with the GitHub API.
+## 2. Getting Started & Development Setup
 
-## Submitting Changes
+### Prerequisites
+- **Python:** 3.11 or 3.12
+- **Node.js:** 18.x or 20.x
+- **Git:** 2.30+
+- **Groq API Key:** (for running local agent execution tests)
 
-1. Create a new branch: `git checkout -b my-feature-branch`.
-2. Make your changes.
-3. Test your changes to ensure you haven't broken existing functionality.
-4. Push your branch to your fork: `git push origin my-feature-branch`.
-5. Submit a pull request!
+### Local Environment Setup
 
-## Code Style
+1. **Fork and clone** the repository:
+   ```bash
+   git clone https://github.com/<your-username>/AutoMaintainer.git
+   cd AutoMaintainer
+   ```
 
-- We use standard Python conventions (PEP 8) for the backend.
-- We use Prettier/ESLint rules for the Next.js frontend.
+2. **Set up Python Backend:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: .\venv\Scripts\Activate.ps1
+   pip install -r backend/requirements.txt
+   pip install black flake8 pytest pytest-asyncio
+   ```
 
-We look forward to reviewing your contributions!
+3. **Set up Next.js Dashboard:**
+   ```bash
+   cd dashboard
+   npm install
+   cd ..
+   ```
+
+4. **Configure Environment Variables:**
+   Copy `.env.example` (or configure `backend/.env` and `dashboard/.env.local`):
+   ```ini
+   # backend/.env
+   GROQ_API_KEY="gsk_your_key"
+   GITHUB_TOKEN="ghp_your_token"
+   SUPABASE_URL="https://your-project.supabase.co"
+   SUPABASE_SERVICE_KEY="your_service_key"
+   ```
+
+---
+
+## 3. Contribution Workflow
+
+### Step 1: Pick or Propose an Issue
+- Browse existing open issues or check our pinned [Epics](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3Aarchitecture).
+- For significant changes or new features, please open an issue using the appropriate issue template before starting work.
+- Comment on the issue to request assignment.
+
+### Step 2: Create a Feature Branch
+Create a branch named according to the change type:
+- `feat/issue-number-short-description`
+- `fix/issue-number-short-description`
+- `docs/short-description`
+- `chore/short-description`
+
+Example:
+```bash
+git checkout -b feat/183-pydantic-config-schema
+```
+
+### Step 3: Implement & Test
+- Keep PRs focused, bite-sized, and single-purpose.
+- Ensure all new features include unit tests under `backend/test_*.py`.
+- Run tests locally before opening a PR:
+  ```bash
+  # Run backend unit tests
+  pytest backend/ -v
+
+  # Format code with Black
+  black backend/
+
+  # Check code style with Flake8
+  flake8 backend/ --max-line-length=120
+
+  # Verify Next.js build
+  cd dashboard && npm run build && cd ..
+  ```
+
+---
+
+## 4. Conventional Commits & PR Title Standards
+
+AutoMaintainer strictly enforces [Conventional Commits v1.0.0](https://www.conventionalcommits.org/). Our CI pipeline validates all PR titles automatically.
+
+PR titles must follow the format:
+```text
+<type>(<scope>): <short description>
+```
+
+### Allowed Types:
+- `feat`: A new feature or capability
+- `fix`: A bug fix or defect resolution
+- `docs`: Documentation, blueprints, or README updates
+- `refactor`: Code changes that neither fix a bug nor add a feature
+- `perf`: Performance optimizations
+- `test`: Adding or correcting tests
+- `ci`: Changes to CI/CD workflows and automation scripts
+- `chore`: Routine maintenance, dependencies, or tooling updates
+- `security`: Security patches and vulnerability fixes
+
+### Examples:
+- `feat(engine): implement instantiable AutoMaintainerEngine factory`
+- `fix(agents): handle git clone subprocess exit codes in architect_node`
+- `docs(readme): add detailed self-hosted Supabase setup instructions`
+- `ci(workflows): pin commit SHAs for OpenSSF Scorecard compliance`
+
+---
+
+## 5. AI-Assisted Contribution Policy
+
+We welcome the use of AI coding assistants (e.g. Gemini, ChatGPT, Claude, Copilot) to help write code, generate tests, and craft documentation. However, **contributors are 100% accountable for the integrity of their submissions**.
+
+### Strict Requirements:
+1. **Manual Verification:** You must manually inspect, understand, and locally test every line of code generated by an AI assistant before submitting a PR.
+2. **Zero Unverified Hallucinations:** Submissions containing hallucinated imports, invalid mock assertions, duplicated exception blocks, or broken syntax will be flagged with `ai-hallucinated` / `needs-rework` and rejected.
+3. **Checklist Confirmation:** Every PR must check the integrity confirmation box in the pull request template.
+
+---
+
+## 6. Submitting a Pull Request
+
+1. Push your branch to your fork:
+   ```bash
+   git push origin feat/183-pydantic-config-schema
+   ```
+2. Open a Pull Request targeting the `main` branch of `PxA-Labs/AutoMaintainer`.
+3. Fill out the [Pull Request Template](.github/pull_request_template.md) completely, referencing the related issue (`Closes #183`).
+4. Ensure all CI/CD checks (CodeQL, Gitleaks, Python Test Matrix, Lint, Vercel Build) pass green.
+5. Address maintainer feedback promptly. Once approved, maintainers will merge your contribution.
+
+Thank you for helping build the future of autonomous AI software engineering!

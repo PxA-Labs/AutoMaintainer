@@ -1,0 +1,73 @@
+name: Bug Report
+description: Report a reproducible software bug or system defect
+title: "fix: [Short summary of the issue]"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue with AutoMaintainer. Please provide sufficient details so maintainers can reproduce and resolve the problem.
+
+  - type: textarea
+    id: problem_description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened and why it is incorrect.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide clear, reproducible step-by-step instructions.
+      placeholder: |
+        1. Start backend server via '...'
+        2. Dispatch agent run with repository '...'
+        3. Observe failure at node '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe the expected correct behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: Error Logs & Tracebacks
+      description: Paste relevant logs, terminal output, or stack traces.
+      render: shell
+      placeholder: Paste console output or traceback here.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Subsystem
+      options:
+        - Core Agent Engine / LangGraph State Machine
+        - FastAPI Backend API / Control Plane
+        - Next.js Web Dashboard / WebIDE
+        - Celery Task Workers / Redis Queue
+        - GitNexus AST Indexer / Knowledge Graph
+        - CI/CD Pipelines / Release Automation
+        - Documentation & Blueprints
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Operating System, Python version, Node.js version, Groq model, etc.
+      placeholder: |
+        - OS: Ubuntu 22.04 / Windows 11 / macOS Sonoma
+        - Python Version: 3.11.8
+        - Node Version: 20.x
+        - LLM Provider: Groq (Llama-3.3-70B)
