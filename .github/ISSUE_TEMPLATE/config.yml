@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions
+    url: https://github.com/PxA-Labs/AutoMaintainer/discussions
+    about: Ask architectural questions, share ideas, and connect with fellow contributors.
+  - name: Security Vulnerability Reporting
+    url: https://github.com/PxA-Labs/AutoMaintainer/security/advisories/new
+    about: Privately report a security vulnerability in AutoMaintainer.

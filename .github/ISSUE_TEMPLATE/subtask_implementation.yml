@@ -1,0 +1,51 @@
+name: Sub-Task Implementation
+description: Propose or track a granular sub-task derived from a parent Epic
+title: "[Sub-Task] [Component]: [Brief Title]"
+labels: ["architecture"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for focused technical tasks and sub-components linked to overarching Epics.
+
+  - type: input
+    id: parent_epic
+    attributes:
+      label: Parent Epic Reference
+      description: The issue number of the parent Epic (e.g. #157, #158, #159).
+      placeholder: "#157"
+    validations:
+      required: true
+
+  - type: textarea
+    id: task_context
+    attributes:
+      label: Context & Motivation
+      description: Explain the background and architectural rationale for this sub-task.
+      placeholder: Describe why this task is needed and what part of the parent epic it addresses.
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical_specification
+    attributes:
+      label: Micro-Technical Specifications
+      description: Detail the classes, methods, data schemas, or APIs to be created or modified.
+      placeholder: |
+        1. Class definitions & method signatures
+        2. Interface abstractions & data models
+        3. Endpoint schemas or state graph changes
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria & Quality Gates
+      description: Specific, measurable criteria required before this sub-task can be merged.
+      placeholder: |
+        - [ ] All unit tests pass with 100% green coverage
+        - [ ] Zero unhandled exceptions in LangGraph state loop
+        - [ ] Validated against PEP 8 and Black formatting
+    validations:
+      required: true
