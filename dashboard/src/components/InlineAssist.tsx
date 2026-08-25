@@ -48,21 +48,45 @@ export default function InlineAssist({
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const [explanation, setExplanation] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const abortActiveStream = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
+  const handleCancelAndClose = () => {
+    abortActiveStream();
+    onUpdatePreview?.(null);
+    onClose();
+  };
+
+  const handleRefinePrompt = () => {
+    abortActiveStream();
+    setIsLoading(false);
+    setSuggestion(null);
+    setExplanation(null);
+    onUpdatePreview?.(null);
+  };
 
   useEffect(() => {
     inputRef.current?.focus();
+    return () => {
+      abortActiveStream();
+    };
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      onUpdatePreview?.(null);
-      onClose();
+      handleCancelAndClose();
     } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      if (suggestion !== null) {
+      if (!isLoading && suggestion !== null && suggestion.trim().length > 0) {
         onAccept(suggestion);
-      } else if (prompt.trim()) {
+      } else if (!isLoading && prompt.trim()) {
         handleSubmit(prompt);
       }
     } else if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
@@ -77,6 +101,10 @@ export default function InlineAssist({
     const finalPrompt = customPrompt || prompt;
     if (!finalPrompt.trim() || isLoading) return;
 
+    abortActiveStream();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setIsLoading(true);
     setError(null);
     setSuggestion("");
@@ -87,6 +115,7 @@ export default function InlineAssist({
       const res = await fetch(`${backendUrl}/assist/inline`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           repo_name: repoUrl,
           file_path: filePath,
@@ -117,50 +146,68 @@ export default function InlineAssist({
       let buffer = "";
 
       while (true) {
+        if (controller.signal.aborted) break;
+
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done || controller.signal.aborted) break;
 
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split("\n\n");
         buffer = parts.pop() || "";
 
         for (const part of parts) {
+          if (controller.signal.aborted) break;
+
           const trimmed = part.trim();
           if (trimmed.startsWith("data: ")) {
             const dataStr = trimmed.slice(6);
             if (dataStr === "[DONE]") break;
+
+            let parsed: any;
             try {
-              const parsed = JSON.parse(dataStr);
-              if (parsed.error) {
-                throw new Error(parsed.error);
-              }
-              if (parsed.content) {
-                accumulated += parsed.content;
-                setSuggestion(accumulated);
-                onUpdatePreview?.(accumulated);
-              }
-            } catch (e: any) {
-              if (e.message && !e.message.includes("JSON")) {
-                throw e;
-              }
+              parsed = JSON.parse(dataStr);
+            } catch {
+              // Ignore malformed JSON frames from SSE split
+              continue;
+            }
+
+            if (parsed.error) {
+              throw new Error(parsed.error);
+            }
+
+            if (parsed.content && !controller.signal.aborted) {
+              accumulated += parsed.content;
+              setSuggestion(accumulated);
+              onUpdatePreview?.(accumulated);
             }
           }
         }
       }
 
-      let finalCode = accumulated;
-      if (finalCode.startsWith("```")) {
-        finalCode = finalCode.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "");
+      if (!controller.signal.aborted) {
+        let finalCode = accumulated;
+        if (finalCode.startsWith("```")) {
+          finalCode = finalCode.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "");
+        }
+        setSuggestion(finalCode);
+        onUpdatePreview?.(finalCode);
       }
-      setSuggestion(finalCode);
-      onUpdatePreview?.(finalCode);
     } catch (err: any) {
+      if (err.name === "AbortError" || controller.signal.aborted) {
+        // Silently ignore aborts
+        return;
+      }
       setError(err.message || "Failed to generate inline edit");
       onUpdatePreview?.(null);
     } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
       setIsLoading(false);
     }
   };
+
+  const isAcceptDisabled = isLoading || suggestion === null || suggestion.trim().length === 0;
 
   return (
     <div
@@ -185,7 +232,7 @@ export default function InlineAssist({
             Esc to cancel
           </span>
           <button
-            onClick={onClose}
+            onClick={handleCancelAndClose}
             className="text-zinc-400 hover:text-white p-1 rounded-md hover:bg-zinc-800 transition-colors"
           >
             <X className="w-3.5 h-3.5" />
@@ -263,7 +310,13 @@ export default function InlineAssist({
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
                 <span>Proposed Change Preview:</span>
-                <span className="text-emerald-400">Ready to Accept</span>
+                {isLoading ? (
+                  <span className="text-indigo-400 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Generating...
+                  </span>
+                ) : (
+                  <span className="text-emerald-400">Ready to Accept</span>
+                )}
               </div>
               <div className="max-h-48 overflow-y-auto bg-[#11111b] border border-zinc-800 rounded-lg p-3 font-mono text-xs text-emerald-300 leading-relaxed custom-scrollbar">
                 <pre className="whitespace-pre-wrap">{suggestion}</pre>
@@ -273,22 +326,23 @@ export default function InlineAssist({
             {/* Action Bar: Accept / Reject */}
             <div className="flex items-center justify-between pt-1">
               <button
-                onClick={() => setSuggestion(null)}
+                onClick={handleRefinePrompt}
                 className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
               >
                 ← Refine prompt
               </button>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={onClose}
+                  onClick={handleCancelAndClose}
                   className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
                 >
                   <X className="w-3.5 h-3.5" />
                   <span>Reject (Esc)</span>
                 </button>
                 <button
-                  onClick={() => onAccept(suggestion)}
-                  className="flex items-center gap-1 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20 transition-colors"
+                  onClick={() => !isAcceptDisabled && onAccept(suggestion)}
+                  disabled={isAcceptDisabled}
+                  className="flex items-center gap-1 px-3.5 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-white shadow-lg shadow-emerald-600/20 transition-colors cursor-pointer disabled:cursor-not-allowed"
                 >
                   <Check className="w-3.5 h-3.5" />
                   <span>Accept (⌘↵)</span>

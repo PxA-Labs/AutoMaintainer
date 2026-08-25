@@ -335,9 +335,18 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     fetchTree();
   }, [repoUrl]);
 
-  const openFile = async (path: string) => {
+  const clearInlineAssistState = () => {
     clearPreviewDecorations();
     setInlineAssist(null);
+  };
+
+  const switchTab = (path: string) => {
+    clearInlineAssistState();
+    setActiveTab(path);
+  };
+
+  const openFile = async (path: string) => {
+    clearInlineAssistState();
     if (!openTabs.includes(path)) {
       setOpenTabs([...openTabs, path]);
     }
@@ -362,8 +371,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const closeTab = (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
-    clearPreviewDecorations();
-    setInlineAssist(null);
+    clearInlineAssistState();
     const newTabs = openTabs.filter(t => t !== path);
     setOpenTabs(newTabs);
     
@@ -574,7 +582,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                 return (
                   <div 
                     key={tab}
-                    onClick={() => setActiveTab(tab)}
+                    onClick={() => switchTab(tab)}
                     className={`flex items-center gap-2 h-full px-3 text-sm cursor-pointer border-r border-[#1e1e1e] group ${
                       isTabActive ? "bg-[#1e1e1e] text-[#cccccc] border-t border-t-[#007acc]" : "bg-[#2d2d2d] text-[#888888] hover:bg-[#2b2b2b]"
                     }`}

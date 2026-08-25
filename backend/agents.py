@@ -1,5 +1,8 @@
 import os
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from litellm import completion
@@ -143,62 +146,6 @@ async def run_llm(system_prompt: str, user_prompt: str) -> str:
     return response.content
 
 
-async def run_inline_assist(
-    prompt: str,
-    selected_code: str,
-    prefix_code: str,
-    suffix_code: str,
-    file_path: str,
-) -> dict:
-    system_prompt = (
-        "You are an expert AI code editor assisting a developer inline inside a code editor.\n"
-        "Your task is to follow the user's prompt and produce targeted code modifications or answers for the selected code.\n"
-        "You must output ONLY valid JSON matching this schema:\n"
-        '{\n  "replacement_code": "<the modified code to replace selected_code>",\n'
-        '  "explanation": "<brief single sentence explanation of changes or answer>"\n}\n'
-        "Rules:\n"
-        "1. 'replacement_code' MUST contain ONLY the new/replacement code that will replace the selected code. Do not include markdown code block backticks inside replacement_code unless backticks are part of the actual code syntax.\n"
-        "2. Do not wrap the JSON in triple backticks.\n"
-        "3. Preserve proper indentation matching the surrounding code.\n"
-        "4. Do not include extraneous text outside the JSON object."
-    )
-
-    user_prompt = (
-        f"File: {file_path}\n\n"
-        f"--- Preceding Code Context (up to 50 lines before) ---\n{prefix_code}\n\n"
-        f"--- Selected Code (Target to Modify) ---\n{selected_code}\n\n"
-        f"--- Following Code Context (up to 50 lines after) ---\n{suffix_code}\n\n"
-        f"--- User Instruction ---\n{prompt}"
-    )
-
-    raw_response = await run_llm(system_prompt, user_prompt)
-    clean_resp = raw_response.strip()
-
-    if clean_resp.startswith("```json"):
-        clean_resp = clean_resp[7:]
-    elif clean_resp.startswith("```"):
-        clean_resp = clean_resp[3:]
-    if clean_resp.endswith("```"):
-        clean_resp = clean_resp[:-3]
-    clean_resp = clean_resp.strip()
-
-    try:
-        data = json.loads(clean_resp)
-        if isinstance(data, dict) and "replacement_code" in data:
-            return {
-                "replacement_code": str(data.get("replacement_code", "")),
-                "explanation": str(data.get("explanation", "")),
-            }
-    except Exception:
-        pass
-
-    # Fallback parsing if LLM didn't format exact JSON
-    return {
-        "replacement_code": clean_resp,
-        "explanation": "Generated inline code edit.",
-    }
-
-
 async def stream_inline_assist(
     prompt: str,
     selected_code: str,
@@ -208,7 +155,9 @@ async def stream_inline_assist(
 ):
     keys = get_all_groq_keys()
     if not keys:
-        yield f"data: {json.dumps({'error': 'No GROQ_API_KEY found'})}\n\n"
+        err_msg = "No GROQ_API_KEY found in environment"
+        logger.error(f"stream_inline_assist failed: {err_msg}")
+        yield f"data: {json.dumps({'error': err_msg})}\n\n"
         return
 
     llms = [ChatGroq(model="llama-3.3-70b-versatile", api_key=k) for k in keys] + [
@@ -238,6 +187,7 @@ async def stream_inline_assist(
                 yield f"data: {json.dumps({'content': chunk.content})}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:
+        logger.exception(f"Error during stream_inline_assist for {file_path}: {e}")
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
