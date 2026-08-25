@@ -78,7 +78,9 @@ class LocalRunner(BaseRunner):
         try:
             return target_path.read_text(encoding="utf-8")
         except UnicodeDecodeError as e:
-            raise RunnerError(f"Cannot read binary or non-utf-8 file: {rel_path}") from e
+            raise RunnerError(
+                f"Cannot read binary or non-utf-8 file: {rel_path}"
+            ) from e
         except Exception as e:
             raise RunnerError(f"Failed to read file {rel_path}: {e}") from e
 

@@ -3,7 +3,7 @@ SandboxRunner adapter for executing operations in an isolated sandbox or contain
 """
 
 from pathlib import Path
-from typing import Any, List, Optional, Protocol, Tuple, Union, runtime_checkable
+from typing import List, Optional, Protocol, Tuple, Union, runtime_checkable
 
 from .base import BaseRunner, RunnerError
 
@@ -15,28 +15,23 @@ class SandboxBackend(Protocol):
     and arbitrary sandbox providers (Docker, Firecracker, gVisor, cloud micro-VMs).
     """
 
-    async def read_file(self, rel_path: str) -> str:
-        ...
+    async def read_file(self, rel_path: str) -> str: ...
 
-    async def write_file(self, rel_path: str, content: str) -> None:
-        ...
+    async def write_file(self, rel_path: str, content: str) -> None: ...
 
-    async def delete_file(self, rel_path: str) -> None:
-        ...
+    async def delete_file(self, rel_path: str) -> None: ...
 
-    async def list_files(self, pattern: Optional[str] = None) -> List[str]:
-        ...
+    async def list_files(self, pattern: Optional[str] = None) -> List[str]: ...
 
     async def exec_command(
         self, cmd: Union[str, List[str]], timeout: int = 60
-    ) -> Tuple[int, str, str]:
-        ...
+    ) -> Tuple[int, str, str]: ...
 
-    async def get_git_diff(self) -> str:
-        ...
+    async def get_git_diff(self) -> str: ...
 
-    async def commit_and_push(self, branch: str, message: str, dry_run: bool) -> str:
-        ...
+    async def commit_and_push(
+        self, branch: str, message: str, dry_run: bool
+    ) -> str: ...
 
 
 class SandboxRunner(BaseRunner):

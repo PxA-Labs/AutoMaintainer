@@ -1,8 +1,5 @@
-import os
-import shutil
 import subprocess
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from runners import (
@@ -127,9 +124,7 @@ async def test_local_runner_exec_command_timeout(temp_workspace):
 
     # Command taking longer than 1s timeout
     with pytest.raises(CommandTimeoutError):
-        await runner.exec_command(
-            "python -c \"import time; time.sleep(3)\"", timeout=1
-        )
+        await runner.exec_command('python -c "import time; time.sleep(3)"', timeout=1)
 
 
 @pytest.mark.asyncio
