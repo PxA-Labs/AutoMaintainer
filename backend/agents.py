@@ -11,6 +11,7 @@ import asyncio
 from github import Github
 import uuid
 import json
+import re
 import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
@@ -67,6 +68,41 @@ async def broadcast_log(message: dict):
         print(f"Supabase insert failed: {e}")
 
 
+TARGET_REFERENCE_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+):(?P<start>\d+)-(?P<end>\d+)"
+)
+
+
+def extract_target_file(directive: str) -> str | None:
+    """Extract the first safe repository-relative file reference from a directive."""
+    for match in TARGET_REFERENCE_RE.finditer(directive or ""):
+        path = match.group("path")
+        if path.startswith((".", "/")) or ".." in path.split("/"):
+            continue
+        return path
+    return None
+
+
+def normalize_generated_code(raw_code: str) -> str:
+    """Remove optional Markdown fences and reject empty/error model output."""
+    if not isinstance(raw_code, str):
+        raise ValueError("Implementer returned a non-text response.")
+
+    code = raw_code.strip()
+    if code.startswith("[ERROR]"):
+        raise RuntimeError(code)
+    if code.startswith("```"):
+        lines = code.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        code = "\n".join(lines).strip()
+    if not code:
+        raise ValueError("Implementer returned empty code.")
+    return code
+
+
 def get_all_groq_keys():
     keys = []
     primary = os.getenv("GROQ_API_KEY")
@@ -93,6 +129,7 @@ class AgentState(TypedDict):
     issue_number: int
     pr_number: int
     branch_name: str
+    target_file_path: str
     iteration: int
     log_messages: Annotated[list, operator.add]
 
@@ -679,42 +716,63 @@ async def implementer_node(state: AgentState):
     idea = state["idea"]
     issue_number = state.get("issue_number")
     iteration = state.get("iteration", 0)
-    prev_code = state.get("code", "")
     review = state.get("review", "")
+    target_file = state.get("target_file_path") or extract_target_file(idea)
+    path = target_file or f"feature_issue_{issue_number}.py"
 
-    if iteration > 0:
-        system_prompt = "You are the Implementer Agent. Your previous code was rejected by the Maintainer. Fix it based on their feedback. Output ONLY the fixed Python script."
-        user_prompt = f"Previous Code:\n{prev_code}\n\nMaintainer Feedback:\n{review}"
+    if not gh or not issue_number:
+        raise RuntimeError("Implementer requires GitHub access and an issue number.")
+
+    gh_repo = gh.get_repo(state["repo_name"])
+    default_branch = gh_repo.default_branch
+    source_ref = state.get("branch_name") if iteration > 0 else default_branch
+    original_content = ""
+
+    if target_file:
+        file = gh_repo.get_contents(target_file, ref=source_ref)
+        if isinstance(file, list):
+            raise ValueError(
+                f"Implementer target is a directory, not a file: {target_file}"
+            )
+        original_content = file.decoded_content.decode("utf-8")
+        system_prompt = (
+            "You are the Implementer Agent. Modify the supplied repository file to satisfy "
+            "the task and Maintainer feedback. Preserve unrelated code and formatting. "
+            "Output ONLY the complete modified file contents, without Markdown fences."
+        )
+        user_prompt = (
+            f"Task:\n{idea}\n\nRepository file: {target_file}\n\n"
+            f"Current file contents:\n{original_content}\n\n"
+            f"Maintainer feedback:\n{review or 'No feedback; implement the task.'}"
+        )
     else:
-        system_prompt = "You are the Implementer Agent. Write a tiny python script that implements the core logic of the idea. Keep it very short. Output ONLY the Python script."
-        user_prompt = f"Write code for: {idea}"
+        system_prompt = (
+            "You are the Implementer Agent. Create the smallest useful source file for the "
+            "approved task. Output ONLY the complete file contents, without Markdown fences."
+        )
+        user_prompt = f"Task:\n{idea}\n\nCreate the new file: {path}"
 
-    code = await run_llm_with_tools(system_prompt, user_prompt)
-    state["code"] = code
-
+    code = normalize_generated_code(
+        await run_llm_with_tools(system_prompt, user_prompt)
+    )
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "active"}})
-
-    if iteration > 0:
-        new_logs.append(
-            {
-                "agent": "Implementer",
-                "msg": f"Fixed code based on feedback (Iteration {iteration}).",
-                "color": "text-blue-400",
-            }
-        )
-    else:
-        new_logs.append(
-            {
-                "agent": "Implementer",
-                "msg": "Generated initial code implementation.",
-                "color": "text-blue-400",
-            }
-        )
+    new_logs.append(
+        {
+            "agent": "Implementer",
+            "msg": (
+                f"Updated {path} based on the task (Iteration {iteration})."
+                if target_file
+                else f"Created new fallback file {path} (Iteration {iteration})."
+            ),
+            "color": "text-blue-400",
+        }
+    )
+    if iteration == 0:
         new_logs.append(
             {
                 "type": "ui_update",
                 "pipeline": {
-                    "id": f"#{issue_number}" if issue_number else "#NEW",
+                    "id": f"#{issue_number}",
                     "title": idea.replace("\n", " ")[:30] + "...",
                     "status": "implementing",
                     "agent": "Implementer",
@@ -722,115 +780,77 @@ async def implementer_node(state: AgentState):
             }
         )
 
-    if gh and issue_number:
-        try:
-            gh_repo = gh.get_repo(state["repo_name"])
-
-            code_to_commit = code
-            if "```python" in code:
-                code_to_commit = code.split("```python")[1].split("```")[0].strip()
-            elif "```" in code:
-                code_to_commit = code.split("```")[1].split("```")[0].strip()
-
-            path = f"feature_issue_{issue_number}.py"
-
-            if iteration == 0:
-                default_branch = gh_repo.default_branch
-                sb = gh_repo.get_branch(default_branch)
-                branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
-                state["branch_name"] = branch_name
-                gh_repo.create_git_ref(
-                    ref=f"refs/heads/{branch_name}", sha=sb.commit.sha
-                )
-
-                gh_repo.create_file(
-                    path=path,
-                    message=f"Implement Feature for Issue #{issue_number}",
-                    content=code_to_commit,
-                    branch=branch_name,
-                )
-
-                pr = gh_repo.create_pull(
-                    title=f"Implement Feature Request #{issue_number}",
-                    body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
-                    head=branch_name,
-                    base=default_branch,
-                )
-                state["pr_number"] = pr.number
-                new_logs.append(
-                    {
-                        "agent": "System",
-                        "msg": f"Created PR #{pr.number}: {pr.html_url}",
-                        "color": "text-emerald-500",
-                    }
-                )
-                new_logs.append(
-                    {
-                        "type": "ui_update",
-                        "activity": {
-                            "title": f"Opened PR #{pr.number}",
-                            "time": "Just now",
-                            "type": "merge",
-                        },
-                    }
-                )
-            else:
-                branch_name = state["branch_name"]
-                file = gh_repo.get_contents(path, ref=branch_name)
-                gh_repo.update_file(
-                    path=file.path,
-                    message=f"Fix: Address maintainer feedback (Iteration {iteration})",
-                    content=code_to_commit,
-                    sha=file.sha,
-                    branch=branch_name,
-                )
-                pr_number = state["pr_number"]
-                pr = gh_repo.get_pull(pr_number)
-                pr.create_issue_comment(
-                    f"I have pushed a new commit to address the feedback. (Iteration {iteration})"
-                )
-                new_logs.append(
-                    {
-                        "agent": "System",
-                        "msg": f"Pushed fix to PR #{pr_number}",
-                        "color": "text-emerald-500",
-                    }
-                )
-
-            # Local sync to update the workspace clone on disk
-            from workspace import get_safe_repo_dir
-
-            repo_dir = str(get_safe_repo_dir(state["repo_name"]))
-            if os.path.exists(repo_dir):
-                local_path = os.path.join(repo_dir, path)
-                try:
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    with open(local_path, "w", encoding="utf-8") as f:
-                        f.write(code_to_commit)
-                    new_logs.append(
-                        {
-                            "agent": "System",
-                            "msg": f"Synced generated code locally: {path}",
-                            "color": "text-zinc-500",
-                        }
-                    )
-                except Exception as local_err:
-                    print(f"Failed to sync code locally: {local_err}")
-
-        except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "System",
-                    "msg": f"Failed GitHub API Action: {str(e)}",
-                    "color": "text-red-500",
-                }
+    if iteration == 0:
+        sb = gh_repo.get_branch(default_branch)
+        branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
+        gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
+        if target_file:
+            gh_repo.update_file(
+                path=target_file,
+                message=f"Implement fix for Issue #{issue_number}",
+                content=code,
+                sha=file.sha,
+                branch=branch_name,
             )
+        else:
+            gh_repo.create_file(
+                path=path,
+                message=f"Implement Feature for Issue #{issue_number}",
+                content=code,
+                branch=branch_name,
+            )
+        pr = gh_repo.create_pull(
+            title=f"Implement Issue #{issue_number}",
+            body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
+            head=branch_name,
+            base=default_branch,
+        )
+        pr_number = pr.number
+        new_logs.append(
+            {
+                "agent": "System",
+                "msg": f"Created PR #{pr_number}: {pr.html_url}",
+                "color": "text-emerald-500",
+            }
+        )
+    else:
+        branch_name = state["branch_name"]
+        file = gh_repo.get_contents(path, ref=branch_name)
+        if isinstance(file, list):
+            raise ValueError(f"Implementer target is a directory, not a file: {path}")
+        gh_repo.update_file(
+            path=path,
+            message=f"Fix: Address maintainer feedback (Iteration {iteration})",
+            content=code,
+            sha=file.sha,
+            branch=branch_name,
+        )
+        pr_number = state["pr_number"]
+        gh_repo.get_pull(pr_number).create_issue_comment(
+            f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
+        )
+        new_logs.append(
+            {
+                "agent": "System",
+                "msg": f"Pushed fix to PR #{pr_number}",
+                "color": "text-emerald-500",
+            }
+        )
+
+    from workspace import get_safe_repo_dir
+
+    repo_dir = get_safe_repo_dir(state["repo_name"])
+    if repo_dir.exists():
+        local_path = repo_dir / path
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(code, encoding="utf-8")
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "idle"}})
     return {
         "code": code,
-        "branch_name": state.get("branch_name", ""),
-        "pr_number": state.get("pr_number", 0),
+        "branch_name": branch_name,
+        "target_file_path": path,
+        "pr_number": pr_number,
         "log_messages": new_logs,
     }
 
@@ -983,6 +1003,7 @@ async def run_agent_loop(
         "issue_number": 0,
         "pr_number": 0,
         "branch_name": "",
+        "target_file_path": "",
         "iteration": 0,
         "log_messages": [],
     }
