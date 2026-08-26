@@ -140,6 +140,26 @@ class AgentState(TypedDict):
     log_messages: Annotated[list, operator.add]
 
 
+class EmptyAgentStreamError(RuntimeError):
+    """Raised when an MCP agent stream contains no usable final response."""
+
+
+def extract_final_agent_content(final_res) -> str:
+    """Return the final streamed message or raise a descriptive protocol error."""
+    if not isinstance(final_res, dict):
+        raise EmptyAgentStreamError("MCP agent stream returned no agent result.")
+
+    messages = final_res.get("messages")
+    if not messages:
+        raise EmptyAgentStreamError("MCP agent stream returned no messages.")
+
+    content = getattr(messages[-1], "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise EmptyAgentStreamError("MCP agent stream returned an empty final message.")
+
+    return content
+
+
 async def run_llm(
     system_prompt: str, user_prompt: str, estimated_tokens: int = 2000
 ) -> str:
@@ -288,7 +308,7 @@ async def run_llm_with_tools(
                                             }
                                         )
 
-                    return final_res["messages"][-1].content
+                    return extract_final_agent_content(final_res)
 
                 return await manager.execute_with_retry(
                     _call_with_tools, estimated_tokens=estimated_tokens
