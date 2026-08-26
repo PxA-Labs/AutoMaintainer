@@ -10,6 +10,7 @@ from agents import (
     should_implement,
     should_iterate,
 )
+from main import parse_allowed_origins
 from workspace import get_base_workspace_dir, get_safe_repo_dir, get_safe_target_path
 from fastapi import HTTPException
 
@@ -114,6 +115,47 @@ async def test_implementer_creates_explicit_missing_target_file(monkeypatch):
     repo.create_file.assert_called_once()
     assert repo.create_file.call_args.kwargs["path"] == "backend/new_feature.py"
     assert result["target_file_path"] == "backend/new_feature.py"
+
+
+def test_parse_allowed_origins_includes_defaults_and_configured_values():
+    origins = parse_allowed_origins(
+        "https://dashboard.example.com, https://dashboard.example.com/"
+    )
+
+    assert origins == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://dashboard.example.com",
+    ]
+
+
+def test_parse_allowed_origins_rejects_wildcards_and_paths():
+    with pytest.raises(ValueError, match="without paths or wildcards"):
+        parse_allowed_origins("*")
+
+    with pytest.raises(ValueError, match="without paths or wildcards"):
+        parse_allowed_origins("https://dashboard.example.com/app")
+
+
+def test_cors_preflight_uses_exact_configured_origins():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+    request_headers = {
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    }
+    response = client.options("/start", headers=request_headers)
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+    request_headers["Origin"] = "http://localhost.evil.test"
+    rejected = client.options("/start", headers=request_headers)
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
 
 
 def test_get_all_groq_keys(monkeypatch):
