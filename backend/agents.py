@@ -742,6 +742,12 @@ async def implementer_node(state: AgentState):
                 gh_repo.create_git_ref(
                     ref=f"refs/heads/{branch_name}", sha=sb.commit.sha
                 )
+                new_logs.append(
+                    {
+                        "type": "ui_update",
+                        "branchName": branch_name,
+                    }
+                )
 
                 gh_repo.create_file(
                     path=path,

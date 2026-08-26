@@ -50,6 +50,7 @@ export default function Home() {
   const [targetIssue, setTargetIssue] = useState("");
   const [activeTab, setActiveTab] = useState("dashboard");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeBranchName, setActiveBranchName] = useState<string | null>(null);
   const [terminalMode, setTerminalMode] = useState<'logs' | 'pty'>('logs');
   const [logs, setLogs] = useState([
     { time: "00:00:00", agent: "System", msg: "Connecting to backend...", color: "text-zinc-500" }
@@ -114,6 +115,7 @@ export default function Home() {
 
     let isMounted = true;
     setSystemHealth({ latency: 0, tokensUsed: 0 });
+    setActiveBranchName(null);
     setLogs([{ time: new Date().toLocaleTimeString(), agent: "System", msg: "Connecting...", color: "text-zinc-500" }]);
     setPipeline([]);
     setActivity([]);
@@ -153,6 +155,7 @@ export default function Home() {
           }
         }
         if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
+        if (msgData.branchName) setActiveBranchName(msgData.branchName);
         if (msgData.pipeline) {
           setPipeline((prev) => {
             const exists = prev.find((p) => p.id === msgData.pipeline.id);
@@ -483,7 +486,7 @@ export default function Home() {
           {activeTab === 'ide' ? (
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
-                <WebIDE repoUrl={repoUrl} />
+                <WebIDE repoUrl={repoUrl} branchName={activeBranchName} />
               </div>
               <div className="h-48 border-t border-[#333333] bg-[#1e1e1e] flex flex-col shrink-0">
                   <div className="h-8 bg-[#252526] flex items-center px-4 gap-4 shrink-0 shadow-sm border-b border-[#333333]">

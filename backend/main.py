@@ -124,6 +124,7 @@ class StopRequest(BaseModel):
 class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
+    branch_name: str
     commit_message: Optional[str] = None
 
 
@@ -131,6 +132,7 @@ class FileCreateRequest(BaseModel):
     file_path: str
     content: str = ""
     is_dir: bool = False
+    branch_name: str
     commit_message: Optional[str] = None
 
 
@@ -195,15 +197,26 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
         repo = gh.get_repo(repo_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+    if payload.branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     try:
-        file = repo.get_contents(payload.file_path)
+        file = repo.get_contents(payload.file_path, ref=payload.branch_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
     message = (
         payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
     )
     try:
-        repo.update_file(file.path, message, payload.content, file.sha)
+        repo.update_file(
+            file.path,
+            message,
+            payload.content,
+            file.sha,
+            branch=payload.branch_name,
+        )
 
         # Write to local clone so the IDE doesn't show stale reads
         repo_dir = get_safe_repo_dir(repo_name)
@@ -228,6 +241,11 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
 
+    if payload.branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     message = (
         payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
     )
@@ -239,7 +257,12 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
         actual_content = ""
 
     try:
-        repo.create_file(actual_path, message, actual_content)
+        repo.create_file(
+            actual_path,
+            message,
+            actual_content,
+            branch=payload.branch_name,
+        )
 
         # Write to local clone
         repo_dir = get_safe_repo_dir(repo_name)
@@ -254,7 +277,12 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 
 
 @app.delete("/repo/{repo_name:path}/file")
-async def delete_repo_file(repo_name: str, file_path: str):
+async def delete_repo_file(
+    repo_name: str,
+    file_path: str,
+    branch_name: str,
+    commit_message: Optional[str] = None,
+):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -264,8 +292,13 @@ async def delete_repo_file(repo_name: str, file_path: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
 
+    if branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     try:
-        file = repo.get_contents(file_path)
+        file = repo.get_contents(file_path, ref=branch_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
 
@@ -275,9 +308,9 @@ async def delete_repo_file(repo_name: str, file_path: str):
             detail="Directories cannot be deleted directly via this endpoint.",
         )
 
-    message = f"Delete {file_path} via AutoMaintainer IDE"
+    message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
     try:
-        repo.delete_file(file.path, message, file.sha)
+        repo.delete_file(file.path, message, file.sha, branch=branch_name)
 
         # Local delete
         import shutil
