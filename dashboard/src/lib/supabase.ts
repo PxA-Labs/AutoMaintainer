@@ -24,20 +24,6 @@ export const createServerClient = () => {
   });
 };
 
-// Service role client (for admin operations)
-export const createServiceClient = () => {
-  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
-  if (!serviceKey) {
-    throw new Error('SUPABASE_SERVICE_KEY not configured');
-  }
-  return createClient(supabaseUrl, serviceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-};
-
 // Export singleton browser client
 let browserClient: ReturnType<typeof createBrowserClient> | null = null;
 

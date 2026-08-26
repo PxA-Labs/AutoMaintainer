@@ -84,16 +84,78 @@ class FileCreateRequest(BaseModel):
 
 
 # --- Dependency: Get current user/org from Supabase Auth ---
-# In production, this would validate JWT from Supabase
-async def get_current_user(authorization: Annotated[str | None, Header()] = None):
-    """Extract user info from Supabase JWT. Simplified for now."""
-    # TODO: Implement proper JWT validation with Supabase
-    # For now, return a mock user for development
-    return {
-        "user_id": "dev-user-id",
-        "org_id": "dev-org-id",
-        "email": "dev@example.com",
-    }
+async def get_current_user(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    """
+    Validate the Supabase access token from the Authorization header and
+    resolve the caller's identity and organization membership.
+
+    Every org-scoped endpoint depends on this, so an unauthenticated request
+    can never reach data belonging to another tenant.
+    """
+    from agents import supabase
+
+    if not supabase:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication backend (Supabase) is not configured",
+        )
+
+    # Explicit opt-in for local development only; never enabled by default.
+    if os.getenv("AUTH_DEV_BYPASS", "").strip().lower() == "true":
+        logger.warning("AUTH_DEV_BYPASS is enabled - all requests are trusted!")
+        return {
+            "user_id": os.getenv(
+                "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
+            ),
+            "org_id": os.getenv(
+                "AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"
+            ),
+            "email": "dev@localhost",
+        }
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or malformed Authorization header (expected 'Bearer <token>')",
+        )
+
+    access_token = authorization.split(" ", 1)[1].strip()
+
+    try:
+        user_response = await asyncio.to_thread(supabase.auth.get_user, access_token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+
+    user = getattr(user_response, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+
+    # Resolve the caller's primary organization membership.
+    org_id = None
+    try:
+        membership = await asyncio.to_thread(
+            lambda: supabase.table("organization_members")
+            .select("org_id")
+            .eq("user_id", user.id)
+            .order("joined_at")
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+        if membership and membership.data:
+            org_id = membership.data["org_id"]
+    except Exception as e:
+        logger.warning(f"Failed to resolve org membership for {user.id}: {e}")
+
+    if not org_id:
+        raise HTTPException(
+            status_code=403,
+            detail="No organization membership found. Complete onboarding first.",
+        )
+
+    return {"user_id": user.id, "org_id": org_id, "email": user.email}
 
 
 async def get_org_id(user: dict = Depends(get_current_user)) -> str:
@@ -203,6 +265,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/healthz")
+async def healthz():
+    """Process liveness probe - never touches external services."""
+    return {"status": "healthy"}
 
 
 @app.get("/healthz/supabase")
@@ -667,122 +735,122 @@ async def delete_repo_file(repo_name: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
     return {"status": "deleted", "message": message}
 
-    # --- Propose Changes Endpoint ---
-    # Creates a PR with staged changes from WebIDE
 
-    class ProposeChangesRequest(BaseModel):
-        title: str
-        description: str
-        changes: List[dict]  # [{path, content, status}]
+# --- Propose Changes Endpoint ---
+# Creates a PR with staged changes from WebIDE
 
-    @app.post("/repo/{repo_name:path}/propose-changes")
-    async def propose_changes(
-        repo_name: str,
-        payload: ProposeChangesRequest,
-        org_id: str = Depends(get_org_id),
-        user_id: str = Depends(get_user_id),
-    ):
-        """
-        Create a new branch, commit changes, and open a Pull Request.
-        Used by WebIDE for the preview→PR flow.
-        """
-        token = os.getenv("GITHUB_TOKEN")
-        if not token:
-            raise HTTPException(status_code=401, detail="GitHub token not configured")
 
-        gh = Github(token)
-        try:
-            repo = gh.get_repo(repo_name)
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+class ProposeChangesRequest(BaseModel):
+    title: str
+    description: str
+    changes: List[dict]  # [{path, content, status}]
 
-        # Get default branch
-        default_branch = repo.default_branch
 
-        # Create new branch name
-        safe_title = "".join(
-            c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower()
+@app.post("/repo/{repo_name:path}/propose-changes")
+async def propose_changes(
+    repo_name: str,
+    payload: ProposeChangesRequest,
+    org_id: str = Depends(get_org_id),
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Create a new branch, commit changes, and open a Pull Request.
+    Used by WebIDE for the preview→PR flow.
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=401, detail="GitHub token not configured")
+
+    gh = Github(token)
+    try:
+        repo = gh.get_repo(repo_name)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+
+    # Get default branch
+    default_branch = repo.default_branch
+
+    # Create new branch name
+    safe_title = "".join(
+        c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower()
+    )
+    safe_title = safe_title[:50].strip("-")
+    branch_name = f"automaintainer/{safe_title}-{uuid.uuid4().hex[:8]}"
+
+    try:
+        # Get base commit SHA
+        base_ref = repo.get_git_ref(f"heads/{default_branch}")
+        base_sha = base_ref.object.sha
+
+        # Create new branch
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
+
+        # Commit each change
+        for change in payload.changes:
+            file_path = change["path"]
+            content = change["content"]
+            status = change.get("status", "modified")
+
+            if status == "deleted":
+                # Delete file
+                try:
+                    file = repo.get_contents(file_path, ref=branch_name)
+                    repo.delete_file(
+                        file.path,
+                        f"Delete {file_path} via AutoMaintainer IDE",
+                        file.sha,
+                        branch=branch_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to delete {file_path}: {e}")
+            else:
+                # Create or update file
+                message = f"{'Create' if status == 'created' else 'Update'} {file_path} via AutoMaintainer IDE"
+                try:
+                    file = repo.get_contents(file_path, ref=branch_name)
+                    repo.update_file(
+                        file.path, message, content, file.sha, branch=branch_name
+                    )
+                except Exception:
+                    # File doesn't exist, create it
+                    repo.create_file(file_path, message, content, branch=branch_name)
+
+        # Create Pull Request
+        pr = repo.create_pull(
+            title=payload.title,
+            body=payload.description
+            or "Changes proposed via AutoMaintainer WebIDE",
+            head=branch_name,
+            base=default_branch,
         )
-        safe_title = safe_title[:50].strip("-")
-        branch_name = f"automaintainer/{safe_title}-{uuid.uuid4().hex[:8]}"
 
-        try:
-            # Get base commit SHA
-            base_ref = repo.get_git_ref(f"heads/{default_branch}")
-            base_sha = base_ref.object.sha
-
-            # Create new branch
-            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
-
-            # Commit each change
+        # Write to local clone for IDE sync
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
             for change in payload.changes:
-                file_path = change["path"]
-                content = change["content"]
-                status = change.get("status", "modified")
+                if change.get("status") != "deleted":
+                    target_path = get_safe_target_path(repo_dir, change["path"])
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(change["content"], encoding="utf-8")
 
-                if status == "deleted":
-                    # Delete file
-                    try:
-                        file = repo.get_contents(file_path, ref=branch_name)
-                        repo.delete_file(
-                            file.path,
-                            f"Delete {file_path} via AutoMaintainer IDE",
-                            file.sha,
-                            branch=branch_name,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to delete {file_path}: {e}")
-                else:
-                    # Create or update file
-                    message = f"{'Create' if status == 'created' else 'Update'} {file_path} via AutoMaintainer IDE"
-                    try:
-                        file = repo.get_contents(file_path, ref=branch_name)
-                        repo.update_file(
-                            file.path, message, content, file.sha, branch=branch_name
-                        )
-                    except Exception:
-                        # File doesn't exist, create it
-                        repo.create_file(
-                            file_path, message, content, branch=branch_name
-                        )
+        return {
+            "branch_name": branch_name,
+            "pr_number": pr.number,
+            "pr_url": pr.html_url,
+            "base_branch": default_branch,
+        }
 
-            # Create Pull Request
-            pr = repo.create_pull(
-                title=payload.title,
-                body=payload.description
-                or "Changes proposed via AutoMaintainer WebIDE",
-                head=branch_name,
-                base=default_branch,
-            )
+    except Exception as e:
+        # Try to clean up branch on failure
+        try:
+            ref = repo.get_git_ref(f"heads/{branch_name}")
+            ref.delete()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Failed to propose changes: {e}")
 
-            # Write to local clone for IDE sync
-            repo_dir = get_safe_repo_dir(repo_name)
-            if repo_dir.exists():
-                for change in payload.changes:
-                    if change.get("status") != "deleted":
-                        target_path = get_safe_target_path(repo_dir, change["path"])
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        target_path.write_text(change["content"], encoding="utf-8")
 
-            return {
-                "branch_name": branch_name,
-                "pr_number": pr.number,
-                "pr_url": pr.html_url,
-                "base_branch": default_branch,
-            }
-
-        except Exception as e:
-            # Try to clean up branch on failure
-            try:
-                ref = repo.get_git_ref(f"heads/{branch_name}")
-                ref.delete()
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=500, detail=f"Failed to propose changes: {e}"
-            )
-
-    # --- Terminal WebSocket (unchanged) ---
+# --- Terminal WebSocket (unchanged) ---
 
 
 @app.websocket("/api/terminal/ws")

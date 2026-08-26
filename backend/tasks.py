@@ -233,6 +233,13 @@ def run_agent_loop_task(
             )
         )
 
+        # Guard against legacy/None returns so status handling never crashes
+        if not isinstance(result, dict):
+            result = {
+                "status": "failed",
+                "error": f"Agent loop returned invalid result: {result!r}",
+            }
+
         # Update status based on result
         if result.get("status") == "completed":
             loop.run_until_complete(

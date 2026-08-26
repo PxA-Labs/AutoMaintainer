@@ -91,7 +91,7 @@ try:
     from opentelemetry.instrumentation.logging import LoggingInstrumentor
     from opentelemetry.trace import Status, StatusCode
     from opentelemetry.metrics import CallbackOptions, Observation
-    from opentelemetry.propagate import inject, extract
+    from opentelemetry.propagate import inject, extract, set_global_textmap
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator,
     )
@@ -207,7 +207,7 @@ def init_observability(
             RequestsInstrumentor().instrument()
             RedisInstrumentor().instrument()
             LoggingInstrumentor().instrument(set_logging_format=True)
-            trace.set_trace_context_propagator(TraceContextTextMapPropagator())
+            set_global_textmap(TraceContextTextMapPropagator())
         except Exception as e:
             logger.warning(f"Failed to apply some instrumentations: {e}")
 

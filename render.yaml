@@ -1,10 +1,13 @@
 services:
   # Redis for Celery task queue and caching
+  # noeviction is required: with allkeys-lru, memory pressure would silently
+  # evict queued tasks / broker state / locks. Cache use-cases needing eviction
+  # should get a separate Redis instance.
   - type: redis
     name: automaintainer-redis
     plan: starter
     region: oregon
-    maxmemoryPolicy: allkeys-lru
+    maxmemoryPolicy: noeviction
 
   # Backend API (FastAPI)
   - type: web
@@ -15,7 +18,9 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /healthz/supabase
+    # Liveness probe only - /healthz/supabase is a readiness/monitoring check
+    # and would flap deployments on transient database blips.
+    healthCheckPath: /healthz
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION

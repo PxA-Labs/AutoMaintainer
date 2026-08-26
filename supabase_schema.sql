@@ -121,6 +121,9 @@ CREATE TABLE runs (
     iteration INTEGER DEFAULT 0,
     max_iterations INTEGER DEFAULT 3,
     
+    -- Task queue tracking
+    celery_task_id TEXT,                          -- Celery task handling this run
+    
     -- GitHub artifacts created
     github_issue_number INTEGER,
     github_pr_number INTEGER,
@@ -213,7 +216,10 @@ CREATE INDEX usage_run_idx ON usage_events(run_id);
 CREATE INDEX usage_type_created_idx ON usage_events(event_type, created_at DESC);
 
 -- Monthly aggregation view for billing
-CREATE VIEW monthly_usage_summary AS
+-- security_invoker = true ensures the querying user's RLS policies
+-- are enforced on the underlying tables, not the view owner's.
+CREATE VIEW monthly_usage_summary
+WITH (security_invoker = true) AS
 SELECT 
     org_id,
     date_trunc('month', created_at) AS month,
@@ -301,8 +307,11 @@ ALTER TABLE webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ide_sessions ENABLE ROW LEVEL SECURITY;
 
 -- Helper function: current user's org membership
+-- SECURITY DEFINER so these helpers read organization_members directly
+-- without re-triggering its RLS policies (prevents SQLSTATE 42P17
+-- infinite-recursion errors on policy evaluation).
 CREATE OR REPLACE FUNCTION current_user_org_ids()
-RETURNS UUID[] LANGUAGE sql STABLE AS $$
+RETURNS UUID[] LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth AS $$
     SELECT array_agg(org_id) 
     FROM organization_members 
     WHERE user_id = auth.uid() AND joined_at IS NOT NULL;
@@ -310,7 +319,7 @@ $$;
 
 -- Helper function: user is org admin/owner
 CREATE OR REPLACE FUNCTION user_is_org_admin(org_uuid UUID)
-RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth AS $$
     SELECT EXISTS (
         SELECT 1 FROM organization_members 
         WHERE org_id = org_uuid 
@@ -495,7 +504,7 @@ DECLARE
 BEGIN
     -- Create personal org for user
     org_slug := 'personal-' || substr(NEW.id::text, 1, 8);
-    org_name := COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email, 'User') || '\'s Workspace';
+    org_name := COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email, 'User') || '''s Workspace';
     
     INSERT INTO organizations (name, slug, github_org_login)
     VALUES (org_name, org_slug, NEW.raw_user_meta_data->>'preferred_username')
@@ -507,6 +516,21 @@ $$;
 
 -- Note: This trigger would be on auth.users, which requires Supabase dashboard setup
 -- For now, org creation happens via API endpoint
+
+-- Helper: get a user's display name for a specific org (no email exposure).
+-- SECURITY DEFINER so it can read auth.users and organization_members
+-- directly, but only when the caller shares the org (enforced by
+-- WHERE clause using current_user_org_ids() which is itself SECURITY DEFINER).
+CREATE OR REPLACE FUNCTION org_member_display_name(p_user_id UUID, p_org_id UUID)
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth AS $$
+    SELECT COALESCE(u.raw_user_meta_data->>'full_name', u.email, 'User')
+    FROM auth.users u
+    JOIN organization_members om ON om.user_id = u.id
+    WHERE om.org_id = p_org_id
+      AND om.user_id = p_user_id
+      AND om.joined_at IS NOT NULL
+      AND p_org_id = ANY(current_user_org_ids());
+$$;
 
 -- ============================================================================
 -- 11. REALTIME PUBLICATION
@@ -522,7 +546,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE logs, runs, webhook_events, ide_se
 -- ============================================================================
 
 -- Org health overview
-CREATE VIEW org_health AS
+CREATE VIEW org_health
+WITH (security_invoker = true) AS
 SELECT 
     o.id AS org_id,
     o.name AS org_name,
@@ -542,17 +567,16 @@ LEFT JOIN runs ON runs.org_id = o.id
 LEFT JOIN usage_events ue ON ue.org_id = o.id
 GROUP BY o.id, o.name, o.slug, o.plan;
 
--- Recent runs with details
-CREATE VIEW recent_runs_detailed AS
-SELECT 
+-- Recent runs with details (no email exposure; display name via helper)
+CREATE VIEW recent_runs_detailed
+WITH (security_invoker = true) AS
+SELECT
     runs.*,
     repos.full_name AS repo_full_name,
     repos.private AS repo_private,
-    u.email AS user_email,
-    u.raw_user_meta_data->>'full_name' AS user_name
+    org_member_display_name(runs.user_id, runs.org_id) AS user_display_name
 FROM runs
 JOIN repositories repos ON repos.id = runs.repository_id
-JOIN auth.users u ON u.id = runs.user_id
 WHERE runs.created_at > now() - interval '7 days'
 ORDER BY runs.created_at DESC;
 

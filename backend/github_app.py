@@ -175,17 +175,22 @@ async def sync_installation_repositories(
 
 
 async def handle_github_webhook(
-    payload: Dict[str, Any], headers: Dict[str, str], supabase_client
+    raw_body: bytes, headers: Dict[str, str], supabase_client
 ) -> Dict[str, Any]:
     """
     Process incoming GitHub webhook event.
-    Validates signature and queues for processing.
+    Validates the signature against the raw request body and queues for processing.
     """
-    # Verify webhook signature
+    # Verify webhook signature over the exact bytes GitHub signed
     if GITHUB_WEBHOOK_SECRET:
         signature = headers.get("X-Hub-Signature-256", "")
-        if not verify_webhook_signature(payload, signature):
+        if not verify_webhook_signature(raw_body, signature):
             raise ValueError("Invalid webhook signature")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"Invalid webhook payload: {e}")
 
     event_type = headers.get("X-GitHub-Event", "unknown")
     delivery_id = headers.get("X-GitHub-Delivery", "unknown")
@@ -228,18 +233,27 @@ async def handle_github_webhook(
     return {"status": "queued", "event_type": event_type, "delivery_id": delivery_id}
 
 
-def verify_webhook_signature(payload: Dict[str, Any], signature_header: str) -> bool:
-    """Verify GitHub webhook signature (HMAC SHA256)."""
+def verify_webhook_signature(raw_body: bytes, signature_header: str) -> bool:
+    """
+    Verify GitHub webhook signature (HMAC SHA256).
+
+    GitHub computes X-Hub-Signature-256 over the exact bytes of the request
+    body, so verification must use those raw bytes - re-serializing a parsed
+    dict would produce a different byte stream (key order, unicode escaping,
+    float formatting) and fail or, worse, allow crafted duplicates.
+    """
     import hmac
     import hashlib
 
-    if not signature_header.startswith("sha256="):
+    if not raw_body or not signature_header.startswith("sha256="):
+        return False
+
+    if not GITHUB_WEBHOOK_SECRET:
         return False
 
     expected_sig = signature_header[7:]  # Remove "sha256="
-    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
     computed_sig = hmac.new(
-        GITHUB_WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
+        GITHUB_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
     ).hexdigest()
 
     return hmac.compare_digest(computed_sig, expected_sig)

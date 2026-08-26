@@ -260,6 +260,11 @@ class RateLimitManager:
     ) -> Any:
         """
         Execute a function with automatic rate limit handling and key rotation.
+
+        The acquired API key is ALWAYS injected as the ``api_key`` keyword
+        argument, so wrapped callables must accept it (e.g. ``def f(api_key: str)``).
+        This guarantees the key that was rate-limit-checked is exactly the key
+        used for the call.
         """
         last_error = None
 
@@ -267,12 +272,8 @@ class RateLimitManager:
             key = await self.acquire(estimated_tokens)
 
             try:
-                # Inject the API key into the call
-                if "api_key" in kwargs:
-                    kwargs["api_key"] = key.key
-                else:
-                    # Try to pass as first arg if it's a client constructor
-                    pass
+                # Always inject the acquired key into the call
+                kwargs["api_key"] = key.key
 
                 result = await func(*args, **kwargs)
                 key.record_success()

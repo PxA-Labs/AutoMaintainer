@@ -938,13 +938,14 @@ async def run_agent_loop(
         try:
             await asyncio.to_thread(
                 lambda: supabase.table("runs")
-                .insert(
+                .upsert(
                     {
                         "id": run_id,
                         "repo_name": repo_name,
-                        "target_issue": target_issue,
+                        "target_issue_number": target_issue,
                         "status": "running",
-                    }
+                    },
+                    on_conflict="id",
                 )
                 .execute()
             )
@@ -959,14 +960,15 @@ async def run_agent_loop(
             repo_name = parsed.path.strip("/")
 
     if not repo_name or repo_name == "owner/repo":
+        error_msg = "Invalid repository name. Please configure a valid Target Repository."
         await broadcast_log(
             {
                 "agent": "System",
-                "msg": "Invalid repository name. Please configure a valid Target Repository.",
+                "msg": error_msg,
                 "color": "text-red-500",
             }
         )
-        return
+        return {"status": "failed", "error": error_msg}
 
     initial_state = {
         "repo_name": repo_name,
@@ -992,6 +994,7 @@ async def run_agent_loop(
     )
 
     last_idx = 0
+    final_state: dict | None = None
     try:
         async for state in app.astream(initial_state, stream_mode="values"):
 
@@ -1001,6 +1004,7 @@ async def run_agent_loop(
                 await asyncio.sleep(0.5)
 
             last_idx = len(state["log_messages"])
+            final_state = dict(state)
 
         await broadcast_log(
             {"agent": "System", "msg": "Agent loop complete.", "color": "text-zinc-500"}
@@ -1015,6 +1019,14 @@ async def run_agent_loop(
                 )
             except Exception as e:
                 print(f"Failed to update run status in Supabase: {e}")
+
+        return {
+            "status": "completed",
+            "summary": (final_state or {}).get("review", ""),
+            "issue_number": (final_state or {}).get("issue_number") or 0,
+            "pr_number": (final_state or {}).get("pr_number") or 0,
+            "branch_name": (final_state or {}).get("branch_name") or "",
+        }
     except asyncio.CancelledError:
         await broadcast_log(
             {
