@@ -131,13 +131,11 @@ async def run_llm(system_prompt: str, user_prompt: str) -> str:
 
     run_id = current_run_id.get(None)
     if run_id:
-        asyncio.create_task(
-            broadcast_log(
-                {
-                    "type": "ui_update",
-                    "systemHealth": {"latency": latency_ms, "tokensUsed": tokens},
-                }
-            )
+        await broadcast_log(
+            {
+                "type": "ui_update",
+                "systemHealth": {"latency": latency_ms, "tokensUsed": tokens},
+            }
         )
 
     return response.content
@@ -238,14 +236,12 @@ async def run_llm_with_tools(system_prompt: str, user_prompt: str):
             print(f"LLM execution completely failed: {e2}")
             run_id = current_run_id.get(None)
             if run_id:
-                asyncio.create_task(
-                    broadcast_log(
-                        {
-                            "agent": "System",
-                            "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
-                            "color": "text-red-500",
-                        }
-                    )
+                await broadcast_log(
+                    {
+                        "agent": "System",
+                        "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
+                        "color": "text-red-500",
+                    }
                 )
             return f"[ERROR] LLM execution failed: {e2}"
 
