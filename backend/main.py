@@ -254,7 +254,12 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 
 
 @app.delete("/repo/{repo_name:path}/file")
-async def delete_repo_file(repo_name: str, file_path: str):
+async def delete_repo_file(
+    repo_name: str, file_path: str, commit_message: Optional[str] = None
+):
+    repo_dir = get_safe_repo_dir(repo_name)
+    target_path = get_safe_target_path(repo_dir, file_path)
+
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -275,21 +280,18 @@ async def delete_repo_file(repo_name: str, file_path: str):
             detail="Directories cannot be deleted directly via this endpoint.",
         )
 
-    message = f"Delete {file_path} via AutoMaintainer IDE"
+    message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
     try:
         repo.delete_file(file.path, message, file.sha)
 
         # Local delete
         import shutil
 
-        repo_dir = get_safe_repo_dir(repo_name)
-        if repo_dir.exists():
-            target_path = get_safe_target_path(repo_dir, file_path)
-            if target_path.exists():
-                if target_path.is_file():
-                    target_path.unlink()
-                elif target_path.is_dir():
-                    shutil.rmtree(target_path)
+        if repo_dir.exists() and target_path.exists():
+            if target_path.is_file():
+                target_path.unlink()
+            elif target_path.is_dir():
+                shutil.rmtree(target_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
     return {"status": "deleted", "message": message}
