@@ -8,7 +8,7 @@ from langgraph.prebuilt import create_react_agent
 import httpx
 from typing import TypedDict, Annotated
 import asyncio
-from github import Github
+from github import Github, GithubException
 import uuid
 import json
 import re
@@ -727,18 +727,30 @@ async def implementer_node(state: AgentState):
     default_branch = gh_repo.default_branch
     source_ref = state.get("branch_name") if iteration > 0 else default_branch
     original_content = ""
+    target_file_exists = False
 
     if target_file:
-        file = gh_repo.get_contents(target_file, ref=source_ref)
-        if isinstance(file, list):
-            raise ValueError(
-                f"Implementer target is a directory, not a file: {target_file}"
+        try:
+            file = gh_repo.get_contents(target_file, ref=source_ref)
+            if isinstance(file, list):
+                raise ValueError(
+                    f"Implementer target is a directory, not a file: {target_file}"
+                )
+            original_content = file.decoded_content.decode("utf-8")
+            target_file_exists = True
+        except GithubException as error:
+            if error.status != 404:
+                raise
+            original_content = (
+                "(This file does not exist yet; create it from the task.)"
             )
-        original_content = file.decoded_content.decode("utf-8")
+
         system_prompt = (
-            "You are the Implementer Agent. Modify the supplied repository file to satisfy "
-            "the task and Maintainer feedback. Preserve unrelated code and formatting. "
-            "Output ONLY the complete modified file contents, without Markdown fences."
+            "You are the Implementer Agent. "
+            f"{'Modify the supplied repository file' if target_file_exists else 'Create the referenced repository file'} "
+            "to satisfy the task and Maintainer feedback. "
+            "Preserve unrelated code and formatting. Output ONLY the complete file contents, "
+            "without Markdown fences."
         )
         user_prompt = (
             f"Task:\n{idea}\n\nRepository file: {target_file}\n\n"
@@ -761,8 +773,8 @@ async def implementer_node(state: AgentState):
             "agent": "Implementer",
             "msg": (
                 f"Updated {path} based on the task (Iteration {iteration})."
-                if target_file
-                else f"Created new fallback file {path} (Iteration {iteration})."
+                if target_file_exists
+                else f"Created new target file {path} (Iteration {iteration})."
             ),
             "color": "text-blue-400",
         }
@@ -784,7 +796,7 @@ async def implementer_node(state: AgentState):
         sb = gh_repo.get_branch(default_branch)
         branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
         gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
-        if target_file:
+        if target_file and target_file_exists:
             gh_repo.update_file(
                 path=target_file,
                 message=f"Implement fix for Issue #{issue_number}",
@@ -795,7 +807,11 @@ async def implementer_node(state: AgentState):
         else:
             gh_repo.create_file(
                 path=path,
-                message=f"Implement Feature for Issue #{issue_number}",
+                message=(
+                    f"Implement fix for Issue #{issue_number}"
+                    if target_file
+                    else f"Implement Feature for Issue #{issue_number}"
+                ),
                 content=code,
                 branch=branch_name,
             )

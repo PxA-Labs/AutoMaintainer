@@ -78,6 +78,44 @@ async def test_implementer_updates_target_file_instead_of_creating_dummy_file(
     assert "Current file contents" in prompts["user"]
 
 
+@pytest.mark.asyncio
+async def test_implementer_creates_explicit_missing_target_file(monkeypatch):
+    import agents
+    from github import GithubException
+
+    repo = MagicMock()
+    repo.default_branch = "main"
+    repo.get_branch.return_value.commit.sha = "base-sha"
+    repo.get_contents.side_effect = GithubException(404, "not found")
+    repo.create_pull.return_value.number = 43
+    repo.create_pull.return_value.html_url = "https://github.com/example/repo/pull/43"
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+
+    async def fake_llm(system_prompt, user_prompt):
+        assert "Create the referenced repository file" in system_prompt
+        assert "does not exist yet" in user_prompt
+        return "```python\nprint('new file')\n```"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", fake_llm)
+    state = {
+        "repo_name": "example/repo",
+        "idea": "Create backend/new_feature.py:1-4 for the missing feature.",
+        "issue_number": 13,
+        "iteration": 0,
+        "review": "",
+        "branch_name": "",
+        "target_file_path": "",
+        "pr_number": 0,
+    }
+
+    result = await agents.implementer_node(state)
+
+    repo.update_file.assert_not_called()
+    repo.create_file.assert_called_once()
+    assert repo.create_file.call_args.kwargs["path"] == "backend/new_feature.py"
+    assert result["target_file_path"] == "backend/new_feature.py"
+
+
 def test_get_all_groq_keys(monkeypatch):
     # Test with GROQ_API_KEY and additional numbered keys
     monkeypatch.setenv("GROQ_API_KEY", "primary-key")
