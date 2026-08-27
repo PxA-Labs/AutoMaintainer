@@ -155,6 +155,12 @@ def test_extract_final_agent_content_returns_content():
     )
 
 
+def test_extract_final_agent_content_rejects_malformed_truthy_messages():
+    for malformed in ({"unexpected": "shape"}, 1, "not-a-message-list"):
+        with pytest.raises(EmptyAgentStreamError, match="malformed messages"):
+            extract_final_agent_content({"messages": malformed})
+
+
 def test_should_implement():
     # PM Decision APPROVED -> implementer
     state_approved = {"pm_decision": "  APPROVED with fixes "}

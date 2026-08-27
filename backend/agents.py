@@ -122,6 +122,7 @@ def get_all_groq_keys():
 
 
 import operator
+from collections.abc import Sequence
 
 
 class AgentState(TypedDict):
@@ -152,6 +153,10 @@ def extract_final_agent_content(final_res) -> str:
     messages = final_res.get("messages")
     if not messages:
         raise EmptyAgentStreamError("MCP agent stream returned no messages.")
+    if isinstance(messages, (str, bytes, bytearray)) or not isinstance(
+        messages, Sequence
+    ):
+        raise EmptyAgentStreamError("MCP agent stream returned malformed messages.")
 
     content = getattr(messages[-1], "content", None)
     if not isinstance(content, str) or not content.strip():
@@ -286,11 +291,13 @@ async def run_llm_with_tools(
                                 )
                         if "agent" in chunk:
                             final_res = chunk["agent"]
+                            messages = chunk["agent"].get("messages")
                             if (
-                                "messages" in chunk["agent"]
-                                and len(chunk["agent"]["messages"]) > 0
+                                isinstance(messages, Sequence)
+                                and not isinstance(messages, (str, bytes, bytearray))
+                                and messages
                             ):
-                                msg = chunk["agent"]["messages"][-1]
+                                msg = messages[-1]
                                 if (
                                     hasattr(msg, "usage_metadata")
                                     and msg.usage_metadata
