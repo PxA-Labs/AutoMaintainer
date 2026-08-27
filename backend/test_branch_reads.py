@@ -31,16 +31,20 @@ class FakeBranchRepo:
     def get_contents(self, file_path, ref=None):
         self.requested_refs.append((file_path, ref))
         return SimpleNamespace(
-            decoded_content=b"print('feature branch')\n"
-            if file_path == "src/index.py"
-            else b"feature branch README\n"
+            decoded_content=(
+                b"print('feature branch')\n"
+                if file_path == "src/index.py"
+                else b"feature branch README\n"
+            )
         )
 
 
 def install_fake_github(monkeypatch):
     repo = FakeBranchRepo()
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setattr(main, "Github", lambda token: SimpleNamespace(get_repo=lambda name: repo))
+    monkeypatch.setattr(
+        main, "Github", lambda token: SimpleNamespace(get_repo=lambda name: repo)
+    )
     return repo
 
 

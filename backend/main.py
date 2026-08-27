@@ -605,12 +605,25 @@ def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
         for entry in tree.tree:
             if entry.type != "blob" or not entry.path:
                 continue
-            if any(part in {".git", "node_modules", "__pycache__", "venv", "env", "build", "dist", ".next"} for part in entry.path.split("/")):
+            if any(
+                part
+                in {
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    "venv",
+                    "env",
+                    "build",
+                    "dist",
+                    ".next",
+                }
+                for part in entry.path.split("/")
+            ):
                 continue
             try:
                 file = repo.get_contents(entry.path, ref=branch_name)
                 content = file.decoded_content.decode("utf-8")
-            except (UnicodeDecodeError, Exception):
+            except Exception:
                 continue
             for line_number, line in enumerate(content.splitlines(), start=1):
                 if q.lower() in line.lower():
@@ -629,12 +642,22 @@ def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
     if not repo_dir.exists():
         raise HTTPException(status_code=404, detail="Repo not found locally")
 
-    ignored_dirs = {".git", "node_modules", "__pycache__", "venv", "env", "build", "dist", ".next"}
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        "env",
+        "build",
+        "dist",
+        ".next",
+    }
     results = []
     try:
         for root, dirs, files in os.walk(repo_dir):
             dirs[:] = [
-                d for d in dirs
+                d
+                for d in dirs
                 if d not in ignored_dirs and not os.path.islink(os.path.join(root, d))
             ]
             for file in files:
@@ -647,7 +670,9 @@ def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
                             if q.lower() in line.lower():
                                 results.append(
                                     {
-                                        "file": Path(file_path).relative_to(repo_dir).as_posix(),
+                                        "file": Path(file_path)
+                                        .relative_to(repo_dir)
+                                        .as_posix(),
                                         "line_number": line_number,
                                         "snippet": line.strip()[:200],
                                     }
@@ -683,6 +708,7 @@ def get_repo_file(
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
     import os, stat
+
     try:
         fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
@@ -699,7 +725,9 @@ def get_repo_file(
         raise
     except Exception as e:
         logger.exception(f"Failed to read file {target_path}: {e}")
-        raise HTTPException(status_code=500, detail="An internal error occurred while reading the file")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred while reading the file"
+        )
     finally:
         try:
             os.close(fd)
