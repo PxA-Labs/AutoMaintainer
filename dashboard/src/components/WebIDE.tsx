@@ -169,7 +169,12 @@ export default function WebIDE({ repoUrl, branchName }: WebIDEProps) {
 
   const fetchTree = async () => {
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+      const branchQuery = branchName
+        ? `?branch_name=${encodeURIComponent(branchName)}`
+        : "";
+      const res = await fetch(
+        `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree${branchQuery}`
+      );
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
       setTree(data);
@@ -183,7 +188,7 @@ export default function WebIDE({ repoUrl, branchName }: WebIDEProps) {
   useEffect(() => {
     setLoadingTree(true);
     fetchTree();
-  }, [repoUrl]);
+  }, [repoUrl, branchName]);
 
   const openFile = async (path: string) => {
     if (!openTabs.includes(path)) {
@@ -194,7 +199,12 @@ export default function WebIDE({ repoUrl, branchName }: WebIDEProps) {
     if (fileContents[path] === undefined) {
       setLoadingFiles(prev => ({...prev, [path]: true}));
       try {
-        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
+        const branchQuery = branchName
+          ? `&branch_name=${encodeURIComponent(branchName)}`
+          : "";
+        const res = await fetch(
+          `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}${branchQuery}`
+        );
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
         setFileContents(prev => ({...prev, [path]: data.content}));
@@ -293,7 +303,12 @@ export default function WebIDE({ repoUrl, branchName }: WebIDEProps) {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`);
+      const branchQuery = branchName
+        ? `&branch_name=${encodeURIComponent(branchName)}`
+        : "";
+      const res = await fetch(
+        `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}${branchQuery}`
+      );
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setSearchResults(data.results);
