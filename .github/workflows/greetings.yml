@@ -1,11 +1,8 @@
 name: Greetings
-
 on: [pull_request_target, issues]
-
 permissions:
   issues: write
   pull-requests: write
-
 jobs:
   greeting:
     runs-on: ubuntu-latest
@@ -13,7 +10,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-    - uses: actions/first-interaction@cd932ac99f7f46471c7dd96292261f7473b52462 # v1.3.0
+    - uses: actions/first-interaction@753c925c8d1ac6fede23781875376600628d9b5d3 # v3.0.0
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
         issue_message: "Welcome to AutoMaintainer! 👋 Thank you for opening your first issue. A maintainer or our AI agent will review it shortly."
