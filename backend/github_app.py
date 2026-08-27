@@ -6,6 +6,7 @@ Replaces PAT-based authentication with GitHub App installation tokens.
 import os
 import time
 import json
+import asyncio
 import jwt
 import httpx
 from typing import Optional, Dict, Any
@@ -181,19 +182,22 @@ async def handle_github_webhook(
     Process incoming GitHub webhook event.
     Validates the signature against the raw request body and queues for processing.
     """
-    # Verify webhook signature over the exact bytes GitHub signed
-    if GITHUB_WEBHOOK_SECRET:
-        signature = headers.get("X-Hub-Signature-256", "")
-        if not verify_webhook_signature(raw_body, signature):
-            raise ValueError("Invalid webhook signature")
+    # Verify webhook signature over the exact bytes GitHub signed.
+    if not GITHUB_WEBHOOK_SECRET:
+        raise ValueError("GitHub webhook secret is not configured")
+    signature = headers.get("X-Hub-Signature-256", "")
+    if not verify_webhook_signature(raw_body, signature):
+        raise ValueError("Invalid webhook signature")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"Invalid webhook payload: {e}")
 
-    event_type = headers.get("X-GitHub-Event", "unknown")
-    delivery_id = headers.get("X-GitHub-Delivery", "unknown")
+    event_type = headers.get("X-GitHub-Event")
+    delivery_id = headers.get("X-GitHub-Delivery")
+    if not event_type or not delivery_id:
+        raise ValueError("Missing required GitHub webhook headers")
 
     # Extract installation ID from payload
     installation_id = payload.get("installation", {}).get("id")
@@ -201,8 +205,8 @@ async def handle_github_webhook(
         return {"status": "ignored", "reason": "No installation ID in payload"}
 
     # Get org_id from installation
-    result = (
-        await supabase_client.table("github_installations")
+    result = await asyncio.to_thread(
+        lambda: supabase_client.table("github_installations")
         .select("org_id")
         .eq("id", installation_id)
         .single()
@@ -217,6 +221,20 @@ async def handle_github_webhook(
 
     org_id = result.data["org_id"]
 
+    existing = await asyncio.to_thread(
+        lambda: supabase_client.table("webhook_events")
+        .select("id, status")
+        .eq("github_delivery_id", delivery_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return {
+            "status": "duplicate",
+            "event_type": event_type,
+            "delivery_id": delivery_id,
+        }
+
     # Store webhook event for async processing
     webhook_data = {
         "org_id": org_id,
@@ -228,7 +246,9 @@ async def handle_github_webhook(
         "status": "pending",
     }
 
-    await supabase_client.table("webhook_events").insert(webhook_data).execute()
+    await asyncio.to_thread(
+        lambda: supabase_client.table("webhook_events").insert(webhook_data).execute()
+    )
 
     return {"status": "queued", "event_type": event_type, "delivery_id": delivery_id}
 
