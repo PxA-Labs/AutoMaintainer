@@ -171,16 +171,16 @@ async def test_start_and_stop_concurrency(monkeypatch):
 
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        res_start = await client.post("/start", json={"repo_name": "test/repo"})
+        res_start = await client.post("/start-legacy", json={"repo_name": "test/repo"})
         assert res_start.status_code == 200
         run_id = res_start.json()["run_id"]
 
         assert run_id in main.active_tasks
 
-        res_stop = await client.post("/stop", json={"run_id": run_id})
+        res_stop = await client.post("/stop-legacy", json={"run_id": run_id})
         assert res_stop.status_code == 200
         assert res_stop.json()["status"] == "stopped"
 
-        res_stop_again = await client.post("/stop", json={"run_id": run_id})
+        res_stop_again = await client.post("/stop-legacy", json={"run_id": run_id})
         assert res_stop_again.status_code == 200
         assert res_stop_again.json()["status"] == "not_running"

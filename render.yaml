@@ -1,4 +1,15 @@
 services:
+  # Redis for Celery task queue and caching
+  # noeviction is required: with allkeys-lru, memory pressure would silently
+  # evict queued tasks / broker state / locks. Cache use-cases needing eviction
+  # should get a separate Redis instance.
+  - type: redis
+    name: automaintainer-redis
+    plan: starter
+    region: oregon
+    maxmemoryPolicy: noeviction
+
+  # Backend API (FastAPI)
   - type: web
     name: automaintainer-backend
     env: python
@@ -7,6 +18,8 @@ services:
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Liveness probe only - /healthz/supabase is a readiness/monitoring check
+    # and would flap deployments on transient database blips.
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
@@ -20,5 +33,153 @@ services:
         sync: false
       - key: GITHUB_TOKEN
         sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: automaintainer-redis
+          property: connectionURL
       - key: ALLOWED_ORIGINS
         sync: false
+      # Observability
+      - key: ENVIRONMENT
+        value: "production"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      # Supabase connection pooling (use Supabase's built-in pgbouncer)
+      - key: SUPABASE_POOLER_URL
+        sync: false
+      - key: SUPABASE_POOLER_KEY
+        sync: false
+    # Required for Celery worker scaling
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+
+  # Celery Worker for Agent Runs
+  - type: worker
+    name: automaintainer-celery-worker
+    env: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A celery_app worker -Q agent_runs -l info --concurrency=2
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: automaintainer-redis
+          property: connectionURL
+      # Observability
+      - key: ENVIRONMENT
+        value: "production"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      # Supabase connection pooling
+      - key: SUPABASE_POOLER_URL
+        sync: false
+      - key: SUPABASE_POOLER_KEY
+        sync: false
+    scaling:
+      minInstances: 1
+      maxInstances: 5
+
+  # Celery Worker for Maintenance Tasks
+  - type: worker
+    name: automaintainer-celery-maintenance
+    env: python
+    region: oregon
+    plan: starter
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A celery_app worker -Q maintenance,github_sync -l info --concurrency=1 -B
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: automaintainer-redis
+          property: connectionURL
+      # Observability
+      - key: ENVIRONMENT
+        value: "production"
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      # Supabase connection pooling
+      - key: SUPABASE_POOLER_URL
+        sync: false
+      - key: SUPABASE_POOLER_KEY
+        sync: false
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+
+  # Note: Supabase provides built-in connection pooling (pgbouncer) via:
+  # - Connection pooling endpoint: `aws-0-region.pooler.supabase.com:6543` (transaction mode)
+  # - Session pooler: `aws-0-region.pooler.supabase.com:5432` (session mode)
+  # 
+  # To enable:
+  # 1. Go to Supabase Dashboard > Settings > Database > Connection Pooling
+  # 2. Enable "Session Pooler" and/or "Transaction Pooler"
+  # 3. Add the pooler URL and credentials as SUPABASE_POOLER_URL and SUPABASE_POOLER_KEY
+  # 
+  # The application should use SUPABASE_POOLER_URL for high-concurrency scenarios
+  # and fall back to SUPABASE_URL for operations requiring session features.
+  #
+  # Celery Beat Scheduler (alternative: use -B flag on maintenance worker)
+  # - type: worker
+  #   name: automaintainer-celery-beat
+  #   env: python
+  #   region: oregon
+  #   plan: starter
+  #   rootDir: backend
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: celery -A celery_app beat -l info
+  #   autoDeploy: true
+  #   envVars:
+  #     - key: PYTHON_VERSION
+  #       value: "3.11.0"
+  #     - key: REDIS_URL
+  #       fromService:
+  #         type: redis
+  #         name: automaintainer-redis
+  #         property: connectionURL

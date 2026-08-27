@@ -6,15 +6,20 @@ from main import app
 
 client = TestClient(app)
 
+
 def test_inline_assist_endpoint_streaming():
-    async def mock_stream_generator(prompt, selected_code, prefix_code, suffix_code, file_path):
-        d1 = json.dumps({'content': "def hello():\n"})
-        d2 = json.dumps({'content': "    return 'world'\n"})
+    async def mock_stream_generator(
+        prompt, selected_code, prefix_code, suffix_code, file_path
+    ):
+        d1 = json.dumps({"content": "def hello():\n"})
+        d2 = json.dumps({"content": "    return 'world'\n"})
         yield f"data: {d1}\n\n"
         yield f"data: {d2}\n\n"
         yield "data: [DONE]\n\n"
 
-    with patch("agents.stream_inline_assist", side_effect=mock_stream_generator) as mock_assist:
+    with patch(
+        "agents.stream_inline_assist", side_effect=mock_stream_generator
+    ) as mock_assist:
         payload = {
             "repo_name": "owner/repo",
             "file_path": "src/hello.py",
@@ -26,10 +31,10 @@ def test_inline_assist_endpoint_streaming():
                 "startLine": 2,
                 "startColumn": 1,
                 "endLine": 2,
-                "endColumn": 18
-            }
+                "endColumn": 18,
+            },
         }
-        
+
         response = client.post("/assist/inline", json=payload)
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
@@ -42,5 +47,5 @@ def test_inline_assist_endpoint_streaming():
             selected_code="def hello(): pass",
             prefix_code="# Header\n",
             suffix_code="# Footer\n",
-            file_path="src/hello.py"
+            file_path="src/hello.py",
         )
