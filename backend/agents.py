@@ -960,7 +960,9 @@ async def run_agent_loop(
             repo_name = parsed.path.strip("/")
 
     if not repo_name or repo_name == "owner/repo":
-        error_msg = "Invalid repository name. Please configure a valid Target Repository."
+        error_msg = (
+            "Invalid repository name. Please configure a valid Target Repository."
+        )
         await broadcast_log(
             {
                 "agent": "System",

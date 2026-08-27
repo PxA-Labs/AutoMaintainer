@@ -818,8 +818,7 @@ async def propose_changes(
         # Create Pull Request
         pr = repo.create_pull(
             title=payload.title,
-            body=payload.description
-            or "Changes proposed via AutoMaintainer WebIDE",
+            body=payload.description or "Changes proposed via AutoMaintainer WebIDE",
             head=branch_name,
             base=default_branch,
         )
