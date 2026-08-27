@@ -628,6 +628,14 @@ async def stop_agents_legacy(req: Optional[StopRequest] = None):
 
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
+    if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+    if (
+        not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", payload.file_path)
+        or ".." in payload.file_path
+    ):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -660,6 +668,14 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
 
 @app.post("/repo/{repo_name:path}/file/create")
 async def create_repo_file(repo_name: str, payload: FileCreateRequest):
+    if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+    if (
+        not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", payload.file_path)
+        or ".." in payload.file_path
+    ):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -698,6 +714,11 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 async def delete_repo_file(
     repo_name: str, file_path: str, commit_message: Optional[str] = None
 ):
+    if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+    if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
     base_path = repo_dir.resolve()
@@ -763,10 +784,18 @@ async def propose_changes(
     Create a new branch, commit changes, and open a Pull Request.
     Used by WebIDE for the preview→PR flow.
     """
+    if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+        raise HTTPException(status_code=400, detail="Invalid repository name")
+
     repo_dir = get_safe_repo_dir(repo_name)
     # Validate all change paths upfront against path traversal
     for change in payload.changes:
-        if not change.get("path") or not isinstance(change["path"], str):
+        if (
+            not change.get("path")
+            or not isinstance(change["path"], str)
+            or not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", change["path"])
+            or ".." in change["path"]
+        ):
             raise HTTPException(
                 status_code=400, detail="Invalid change path in payload"
             )
