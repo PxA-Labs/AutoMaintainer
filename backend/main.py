@@ -719,13 +719,6 @@ async def delete_repo_file(
     if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
         raise HTTPException(status_code=400, detail="Invalid file path")
 
-    repo_dir = get_safe_repo_dir(repo_name)
-    target_path = get_safe_target_path(repo_dir, file_path)
-    base_path = repo_dir.resolve()
-    resolved_target = target_path.resolve()
-    if not resolved_target.is_relative_to(base_path) or resolved_target == base_path:
-        raise HTTPException(status_code=403, detail="Invalid file path")
-
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -749,15 +742,6 @@ async def delete_repo_file(
     message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
     try:
         repo.delete_file(file.path, message, file.sha)
-
-        # Local delete
-        import shutil
-
-        if repo_dir.exists() and resolved_target.exists():
-            if resolved_target.is_file():
-                resolved_target.unlink()
-            elif resolved_target.is_dir():
-                shutil.rmtree(resolved_target)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
     return {"status": "deleted", "message": message}
@@ -767,10 +751,16 @@ async def delete_repo_file(
 # Creates a PR with staged changes from WebIDE
 
 
+class ProposedChange(BaseModel):
+    path: str
+    content: str = ""
+    status: str = "modified"
+
+
 class ProposeChangesRequest(BaseModel):
     title: str
-    description: str
-    changes: List[dict]  # [{path, content, status}]
+    description: Optional[str] = None
+    changes: List[ProposedChange]
 
 
 @app.post("/repo/{repo_name:path}/propose-changes")
@@ -786,20 +776,6 @@ async def propose_changes(
     """
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
-
-    repo_dir = get_safe_repo_dir(repo_name)
-    # Validate all change paths upfront against path traversal
-    for change in payload.changes:
-        if (
-            not change.get("path")
-            or not isinstance(change["path"], str)
-            or not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", change["path"])
-            or ".." in change["path"]
-        ):
-            raise HTTPException(
-                status_code=400, detail="Invalid change path in payload"
-            )
-        get_safe_target_path(repo_dir, change["path"])
 
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -831,9 +807,12 @@ async def propose_changes(
 
         # Commit each change
         for change in payload.changes:
-            file_path = change["path"]
-            content = change["content"]
-            status = change.get("status", "modified")
+            file_path = change.path
+            content = change.content
+            status = change.status
+
+            if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
+                continue
 
             if status == "deleted":
                 # Delete file
@@ -866,22 +845,6 @@ async def propose_changes(
             head=branch_name,
             base=default_branch,
         )
-
-        # Write to local clone for IDE sync
-        repo_dir = get_safe_repo_dir(repo_name)
-        if repo_dir.exists():
-            base_path = repo_dir.resolve()
-            for change in payload.changes:
-                if change.get("status") != "deleted":
-                    target_path = get_safe_target_path(repo_dir, change["path"])
-                    resolved_target = target_path.resolve()
-                    if (
-                        not resolved_target.is_relative_to(base_path)
-                        or resolved_target == base_path
-                    ):
-                        continue
-                    resolved_target.parent.mkdir(parents=True, exist_ok=True)
-                    resolved_target.write_text(change["content"], encoding="utf-8")
 
         return {
             "branch_name": branch_name,

@@ -63,16 +63,16 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
     if norm_path.startswith("..") or os.path.isabs(norm_path):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
 
-    base = repo_dir.resolve()
-    target = (base / norm_path).resolve()
+    repo_base_str = os.path.abspath(str(repo_dir))
+    target_full_str = os.path.abspath(os.path.join(repo_base_str, norm_path))
 
-    try:
-        if not target.is_relative_to(base):
-            raise HTTPException(status_code=403, detail="Invalid file path")
-    except (ValueError, AttributeError):
+    if not target_full_str.startswith(repo_base_str + os.path.sep):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    if os.path.commonpath([str(target), str(base)]) != str(base):
+    real_repo = os.path.realpath(repo_base_str)
+    real_target = os.path.realpath(target_full_str)
+
+    if not real_target.startswith(real_repo + os.path.sep):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
-    return target
+    return Path(real_target)
