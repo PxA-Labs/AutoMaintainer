@@ -3,15 +3,16 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
-import React, { useState, useEffect, FormEvent } from "react";
+import React, { useState, useEffect, useRef, FormEvent } from "react";
 import { 
   ChevronRight, ChevronDown, File as FileIcon, FolderOpen, Folder, 
-  Save, Search, X, Plus, Trash2, FilePlus, FolderPlus,
+  Save, Search, X, Plus, Trash2, FilePlus, FolderPlus, Sparkles,
   GitPullRequest, GitBranch, Diff, CheckCircle, AlertCircle,
   ArrowUpRight, RefreshCw, Copy, ExternalLink
 } from "lucide-react";
 import { motion } from "framer-motion";
 import Editor from "@monaco-editor/react";
+import InlineAssist, { SelectionContext } from "./InlineAssist";
 
 interface TreeNode {
   name: string;
@@ -499,6 +500,156 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   // Track original content for diff
   const [originalContents, setOriginalContents] = useState<Record<string, string>>({});
 
+  // Monaco & Inline Assist State
+  const editorRef = useRef<any>(null);
+  const monacoRef = useRef<any>(null);
+  const editorContainerRef = useRef<HTMLDivElement>(null);
+  const previewDecorationsRef = useRef<string[]>([]);
+  const [inlineAssist, setInlineAssist] = useState<{
+    isOpen: boolean;
+    selectionContext: SelectionContext;
+    position: { top: number; left: number };
+  } | null>(null);
+
+  const clearPreviewDecorations = () => {
+    if (editorRef.current && previewDecorationsRef.current.length > 0) {
+      previewDecorationsRef.current = editorRef.current.deltaDecorations(previewDecorationsRef.current, []);
+    }
+  };
+
+  const handleUpdatePreviewDecorations = (previewText: string | null) => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco || !inlineAssist) return;
+
+    if (!previewText) {
+      clearPreviewDecorations();
+      return;
+    }
+
+    const { selectionContext } = inlineAssist;
+    const range = new monaco.Range(
+      selectionContext.startLine,
+      selectionContext.startColumn,
+      selectionContext.endLine,
+      selectionContext.endColumn
+    );
+
+    const decorations = [
+      {
+        range: range,
+        options: {
+          isWholeLine: true,
+          className: "bg-indigo-950/40 border-l-4 border-indigo-400 font-mono",
+          glyphMarginClassName: "bg-indigo-500",
+          hoverMessage: { value: "**AI Inline Assist Preview**\n\n```\n" + previewText + "\n```" },
+        },
+      },
+    ];
+
+    previewDecorationsRef.current = editor.deltaDecorations(previewDecorationsRef.current, decorations);
+  };
+
+  const triggerInlineAssist = (editorInstance?: any, monacoInstance?: any) => {
+    const editor = editorInstance || editorRef.current;
+    const monaco = monacoInstance || monacoRef.current;
+    if (!editor || !monaco || !activeTab) return;
+
+    clearPreviewDecorations();
+
+    const selection = editor.getSelection();
+    const model = editor.getModel();
+    if (!model) return;
+
+    let startLine = selection ? selection.startLineNumber : 1;
+    let endLine = selection ? selection.endLineNumber : startLine;
+    let startColumn = selection ? selection.startColumn : 1;
+    let endColumn = selection ? selection.endColumn : 1;
+
+    let selectedCode = selection ? model.getValueInRange(selection) : "";
+
+    if (!selectedCode && selection) {
+      const lineContent = model.getLineContent(startLine);
+      selectedCode = lineContent;
+      startColumn = 1;
+      endColumn = lineContent.length + 1;
+    }
+
+    const totalLines = model.getLineCount();
+    const prefixStartLine = Math.max(1, startLine - 50);
+    const prefixRange = new monaco.Range(prefixStartLine, 1, startLine, startColumn);
+    const prefixCode = model.getValueInRange(prefixRange);
+
+    const suffixEndLine = Math.min(totalLines, endLine + 50);
+    const suffixEndCol = model.getLineMaxColumn(suffixEndLine);
+    const suffixRange = new monaco.Range(endLine, endColumn, suffixEndLine, suffixEndCol);
+    const suffixCode = model.getValueInRange(suffixRange);
+
+    const pos = editor.getPosition();
+    const scrolledPos = pos ? editor.getScrolledVisiblePosition(pos) : null;
+
+    let top = 60;
+    let left = 40;
+    if (scrolledPos && editorContainerRef.current) {
+      const rect = editorContainerRef.current.getBoundingClientRect();
+      top = Math.max(20, Math.min(scrolledPos.top + 30, rect.height - 350));
+      left = Math.max(20, Math.min(scrolledPos.left + 40, rect.width - 550));
+    }
+
+    setInlineAssist({
+      isOpen: true,
+      selectionContext: {
+        startLine,
+        startColumn,
+        endLine,
+        endColumn,
+        selectedCode,
+        prefixCode,
+        suffixCode,
+      },
+      position: { top, left },
+    });
+  };
+
+  const handleEditorMount = (editor: any, monaco: any) => {
+    editorRef.current = editor;
+    monacoRef.current = monaco;
+
+    // Register Cmd+K / Ctrl+K keybinding in Monaco
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
+      triggerInlineAssist(editor, monaco);
+    });
+  };
+
+  const handleAcceptInlineAssist = (replacementCode: string) => {
+    if (!editorRef.current || !monacoRef.current || !inlineAssist || !activeTab) return;
+
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const { selectionContext } = inlineAssist;
+
+    clearPreviewDecorations();
+
+    const range = new monaco.Range(
+      selectionContext.startLine,
+      selectionContext.startColumn,
+      selectionContext.endLine,
+      selectionContext.endColumn
+    );
+
+    editor.executeEdits("inline-assist", [
+      {
+        range: range,
+        text: replacementCode,
+        forceMoveMarkers: true,
+      },
+    ]);
+
+    const updatedValue = editor.getValue();
+    handleContentChange(activeTab, updatedValue);
+    setInlineAssist(null);
+  };
+
   const fetchTree = async () => {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
@@ -517,7 +668,18 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     fetchTree();
   }, [repoUrl]);
 
+  const clearInlineAssistState = () => {
+    clearPreviewDecorations();
+    setInlineAssist(null);
+  };
+
+  const switchTab = (path: string) => {
+    clearInlineAssistState();
+    setActiveTab(path);
+  };
+
   const openFile = async (path: string) => {
+    clearInlineAssistState();
     if (!openTabs.includes(path)) {
       setOpenTabs([...openTabs, path]);
     }
@@ -544,6 +706,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const closeTab = (e: React.MouseEvent, path: string) => {
     e.stopPropagation();
+    clearInlineAssistState();
     const newTabs = openTabs.filter(t => t !== path);
     setOpenTabs(newTabs);
     
@@ -896,7 +1059,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                 return (
                   <div 
                     key={tab}
-                    onClick={() => setActiveTab(tab)}
+                    onClick={() => switchTab(tab)}
                     className={`flex items-center gap-2 h-full px-3 text-sm cursor-pointer border-r border-[#1e1e1e] group ${
                       isTabActive ? "bg-[#1e1e1e] text-[#cccccc] border-t border-t-[#007acc]" : "bg-[#2d2d2d] text-[#888888] hover:bg-[#2b2b2b]"
                     }`}
@@ -921,8 +1084,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                 );
               })}
             </div>
-           
-            {/* Editor Breadcrumbs & Save */}
+            {/* Editor Breadcrumbs & Actions */}
             <div className="h-8 flex items-center justify-between px-4 text-xs text-[#cccccc] shrink-0 bg-[#1e1e1e] border-b border-zinc-800">
               <div className="flex items-center">
                 <span className="opacity-70">{repoUrl}</span>
@@ -930,6 +1092,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                 <span className="opacity-70">{activeTab?.split("/").join(" > ")}</span>
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => triggerInlineAssist()}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-indigo-300 hover:text-white bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-800/60 transition-colors"
+                  title="AI Inline Assist (Cmd+K)"
+                >
+                  <Sparkles className="w-3 h-3 text-indigo-400" />
+                  <span>Inline Assist (⌘K)</span>
+                </button>
                 <button 
                   onClick={handleSave}
                   disabled={!hasActiveTabUnsavedChanges || isSaving}
@@ -951,23 +1121,41 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
             </div>
 
             {/* Code Content */}
-            <div className="flex-1 overflow-hidden bg-[#1e1e1e] relative">
+            <div ref={editorContainerRef} className="flex-1 overflow-hidden bg-[#1e1e1e] relative">
               {activeTab && loadingFiles[activeTab] ? (
                 <div className="p-8 text-[#cccccc] text-sm animate-pulse">Loading file content...</div>
               ) : activeTab && editedContents[activeTab] !== undefined ? (
-                <Editor
-                  height="100%"
-                  theme="vs-dark"
-                  language={getLanguage(activeTab)}
-                  value={editedContents[activeTab]}
-                  onChange={(value) => handleContentChange(activeTab!, value ?? "")}
-                  options={{
-                    minimap: { enabled: true },
-                    fontSize: 14,
-                    wordWrap: "on",
-                    padding: { top: 16 }
-                  }}
-                />
+                <>
+                  <Editor
+                    height="100%"
+                    theme="vs-dark"
+                    language={getLanguage(activeTab)}
+                    value={editedContents[activeTab]}
+                    onMount={handleEditorMount}
+                    onChange={(value) => handleContentChange(activeTab!, value ?? "")}
+                    options={{
+                      minimap: { enabled: true },
+                      fontSize: 14,
+                      wordWrap: "on",
+                      padding: { top: 16 }
+                    }}
+                  />
+                  {inlineAssist?.isOpen && (
+                    <InlineAssist
+                      filePath={activeTab}
+                      selectionContext={inlineAssist.selectionContext}
+                      position={inlineAssist.position}
+                      onClose={() => {
+                        clearPreviewDecorations();
+                        setInlineAssist(null);
+                      }}
+                      onAccept={handleAcceptInlineAssist}
+                      onUpdatePreview={handleUpdatePreviewDecorations}
+                      getBackendUrl={getBackendUrl}
+                      repoUrl={repoUrl}
+                    />
+                  )}
+                </>
               ) : null}
             </div>
           </>

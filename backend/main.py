@@ -7,6 +7,7 @@ from fastapi import (
     Depends,
     Header,
 )
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from github import Github
 from fastapi.middleware.cors import CORSMiddleware
@@ -299,6 +300,23 @@ async def healthz_supabase():
 async def healthz_observability():
     """Health check for observability components."""
     return check_observability_health()
+
+
+class InlineAssistSelection(BaseModel):
+    startLine: int
+    startColumn: int
+    endLine: int
+    endColumn: int
+
+
+class InlineAssistRequest(BaseModel):
+    repo_name: Optional[str] = None
+    file_path: str
+    prompt: str
+    selected_code: str
+    prefix_code: str = ""
+    suffix_code: str = ""
+    selection: InlineAssistSelection
 
 
 # --- New Celery-based endpoints ---
@@ -621,6 +639,27 @@ async def stop_agents_legacy(req: Optional[StopRequest] = None):
                     stopped_any = True
             active_tasks.clear()
             return {"status": "stopped" if stopped_any else "not_running"}
+
+
+@app.post("/assist/inline")
+async def inline_assist(req: InlineAssistRequest):
+    from agents import stream_inline_assist
+
+    try:
+        generator = stream_inline_assist(
+            prompt=req.prompt,
+            selected_code=req.selected_code,
+            prefix_code=req.prefix_code,
+            suffix_code=req.suffix_code,
+            file_path=req.file_path,
+        )
+        return StreamingResponse(generator, media_type="text/event-stream")
+    except Exception as e:
+        logger.error(f"Inline assist failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Inline assist processing failed: {str(e)}",
+        )
 
 
 # --- File operations (unchanged) ---

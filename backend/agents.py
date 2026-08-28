@@ -1,5 +1,8 @@
 import os
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from litellm import completion
@@ -125,6 +128,46 @@ async def run_llm(
                 }
             )
         raise
+
+
+async def stream_inline_assist(
+    prompt: str,
+    selected_code: str,
+    prefix_code: str,
+    suffix_code: str,
+    file_path: str,
+):
+    try:
+        manager = await get_rate_limit_manager()
+        async with manager.key_context(estimated_tokens=2000) as key_state:
+            llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=key_state.key)
+
+            system_prompt = (
+                "You are an expert AI code editor assisting a developer inline inside a code editor.\n"
+                "Your task is to produce targeted replacement code for the selected code according to the user instruction.\n"
+                "Output ONLY the raw code replacement directly without conversational commentary or markdown backtick wrappers."
+            )
+
+            user_prompt = (
+                f"File: {file_path}\n\n"
+                f"--- Preceding Context (up to 50 lines before) ---\n{prefix_code}\n\n"
+                f"--- Selected Code (Target to Replace) ---\n{selected_code}\n\n"
+                f"--- Following Context (up to 50 lines after) ---\n{suffix_code}\n\n"
+                f"--- User Instruction ---\n{prompt}"
+            )
+
+            async for chunk in llm.astream(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
+            ):
+                if chunk.content:
+                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+            yield "data: [DONE]\n\n"
+    except Exception as e:
+        logger.exception(f"Error during stream_inline_assist for {file_path}: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
 async def run_llm_with_tools(
