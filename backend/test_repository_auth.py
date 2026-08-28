@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -45,10 +47,11 @@ def test_legacy_stop_requires_authentication():
 
 
 def test_terminal_rejects_missing_authentication():
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect(
-            "/api/terminal/ws?repo_url=PxA-Labs/AutoMaintainer",
-        ):
-            pass
+    with client.websocket_connect(
+        "/api/terminal/ws?repo_url=PxA-Labs/AutoMaintainer",
+    ) as websocket:
+        websocket.send_text(json.dumps({"type": "resize", "cols": 80, "rows": 24}))
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            websocket.receive_text()
 
     assert excinfo.value.code == 1008

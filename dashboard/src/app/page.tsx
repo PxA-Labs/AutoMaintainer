@@ -679,7 +679,7 @@ function DashboardContent() {
           {activeTab === 'ide' ? (
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
-                <WebIDE repoUrl={repoUrl} />
+                <WebIDE repoUrl={repoUrl} accessToken={session?.access_token} />
               </div>
               <div className="h-48 border-t border-[#333333] bg-[#1e1e1e] flex flex-col shrink-0">
                   <div className="h-8 bg-[#252526] flex items-center px-4 gap-4 shrink-0 shadow-sm border-b border-[#333333]">
@@ -705,7 +705,7 @@ function DashboardContent() {
                     </div>
                   ) : (
                     <div className="flex-1 min-h-0">
-                      <InteractiveTerminal repoUrl={repoUrl} />
+                      <InteractiveTerminal repoUrl={repoUrl} accessToken={session?.access_token} />
                     </div>
                   )}
               </div>

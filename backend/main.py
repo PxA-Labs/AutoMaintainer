@@ -236,15 +236,35 @@ def parse_github_repo_name(repo_url: str) -> str | None:
     return value
 
 
-async def authorize_terminal(websocket: WebSocket, repo_url: str) -> str | None:
-    """Authenticate a terminal socket and authorize its repository workspace."""
+async def receive_terminal_auth(websocket: WebSocket) -> str | None:
+    """Receive a browser-compatible bearer-token handshake without using the URL."""
     try:
-        user = await get_current_user(websocket.headers.get("authorization"))
-    except HTTPException:
+        message = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+    except WebSocketDisconnect:
+        return None
+    except asyncio.TimeoutError:
+        await websocket.close(code=1008, reason="Authentication timeout")
+        return None
+
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
         await websocket.close(code=1008, reason="Authentication required")
         return None
 
-    origin = websocket.headers.get("origin")
+    token = payload.get("access_token") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") != "auth"
+        or not isinstance(token, str)
+        or not token.strip()
+    ):
+        await websocket.close(code=1008, reason="Authentication required")
+        return None
+    return f"Bearer {token.strip()}"
+
+
+def terminal_origin_is_allowed(origin: str | None) -> bool:
     configured_origins = {
         item.strip().rstrip("/")
         for item in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -256,8 +276,17 @@ async def authorize_terminal(websocket: WebSocket, repo_url: str) -> str | None:
         "http://[::1]:3000",
         *configured_origins,
     }
-    if origin and origin.rstrip("/") not in allowed_origins:
-        await websocket.close(code=1008, reason="Origin not allowed")
+    return not origin or origin.rstrip("/") in allowed_origins
+
+
+async def authorize_terminal(
+    websocket: WebSocket, repo_url: str, authorization: str | None
+) -> str | None:
+    """Authenticate a terminal socket and authorize its repository workspace."""
+    try:
+        user = await get_current_user(authorization)
+    except HTTPException:
+        await websocket.close(code=1008, reason="Authentication required")
         return None
 
     repo_name = parse_github_repo_name(repo_url)
@@ -1026,11 +1055,21 @@ async def propose_changes(
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    repo_name = await authorize_terminal(websocket, repo_url)
-    if not repo_name:
+    if not terminal_origin_is_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=1008, reason="Origin not allowed")
         return
 
     await websocket.accept()
+
+    authorization = await receive_terminal_auth(websocket)
+    if not authorization:
+        return
+
+    repo_name = await authorize_terminal(websocket, repo_url, authorization)
+    if not repo_name:
+        return
+
+    await websocket.send_json({"type": "authenticated"})
 
     cwd = None
     try:
