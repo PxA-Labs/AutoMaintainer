@@ -144,6 +144,7 @@ function UserMenu({ user, onSignOut }: { user: any; onSignOut: () => void }) {
 // Main dashboard component (wrapped with auth)
 function DashboardContent() {
   const { user, session, loading: authLoading, signInWithGitHub, signOut } = useAuth();
+  const [skipAuth, setSkipAuth] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [repoUrl, setRepoUrl] = useState("owner/repo");
   const [isEditingRepo, setIsEditingRepo] = useState(false);
@@ -169,6 +170,11 @@ function DashboardContent() {
   const [loadingRuns, setLoadingRuns] = useState(false);
 
   const handleStartStop = useCallback(async () => {
+    if (!user) {
+      setSkipAuth(false);
+      return;
+    }
+    
     if (!isRunning) {
       if (!repoUrl || repoUrl.trim() === "owner/repo" || repoUrl.trim() === "") {
         alert("Please enter a Target Repository first!");
@@ -494,7 +500,7 @@ function DashboardContent() {
     );
   }
 
-  if (!user) {
+  if (!user && !skipAuth) {
     return (
       <div className="flex h-screen w-full bg-[#0a0a0a] items-center justify-center">
         <div className="text-center p-8">
@@ -507,14 +513,22 @@ function DashboardContent() {
           <p className="text-zinc-500 mb-8 max-w-md mx-auto">
             An Always-On Autonomous AI Software Engineering Team. Sign in with GitHub to start managing your repositories.
           </p>
-          <button
-            onClick={signInWithGitHub}
-            disabled={authLoading}
-            className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg font-medium hover:bg-indigo-500/20 transition-colors"
-          >
-            <LogIn className="w-5 h-5" />
-            Sign in with GitHub
-          </button>
+          <div className="flex flex-col items-center gap-4">
+            <button
+              onClick={signInWithGitHub}
+              disabled={authLoading}
+              className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg font-medium hover:bg-indigo-500/20 transition-colors"
+            >
+              <LogIn className="w-5 h-5" />
+              Sign in with GitHub
+            </button>
+            <button
+              onClick={() => setSkipAuth(true)}
+              className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Skip for now
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -568,7 +582,13 @@ function DashboardContent() {
             <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4 px-2">Configuration</h2>
             <div className="space-y-1">
               <div className="flex flex-col p-2 rounded-lg hover:bg-zinc-800/50 transition-colors text-sm gap-2">
-                <div className="flex items-center justify-between cursor-pointer" onClick={() => setIsEditingRepo(true)}>
+                <div className="flex items-center justify-between cursor-pointer" onClick={() => {
+                  if (!user) {
+                    setSkipAuth(false);
+                    return;
+                  }
+                  setIsEditingRepo(true);
+                }}>
                   <div className="flex items-center gap-3 text-zinc-400">
                     <GitBranch className="w-4 h-4 text-zinc-400" />
                     <span>Target Repository</span>
