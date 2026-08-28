@@ -278,6 +278,23 @@ async def test_start_and_stop_concurrency(monkeypatch):
 
     monkeypatch.setattr(main, "run_agent_loop", mock_agent_loop)
 
+    async def allow_repository_access():
+        return {"org_id": "test-org", "user_id": "test-user"}
+
+    async def allow_current_user():
+        return {"org_id": "test-org", "user_id": "test-user"}
+
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        main.require_repository_access,
+        allow_repository_access,
+    )
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        main.get_current_user,
+        allow_current_user,
+    )
+
     transport = httpx.ASGITransport(app=main.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         res_start = await client.post("/start-legacy", json={"repo_name": "test/repo"})
