@@ -169,6 +169,19 @@ function DashboardContent() {
   const [runs, setRuns] = useState<any[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
 
+  // Clear sensitive state if the user signs out
+  useEffect(() => {
+    if (!user) {
+      setActiveRunId(null);
+      setIsRunning(false);
+      setLogs([{ time: "00:00:00", agent: "System", msg: "Connecting to backend...", color: "text-zinc-500" }]);
+      setPipeline([]);
+      setActivity([]);
+      setRuns([]);
+      // Reset skipAuth so they don't immediately get dumped back into a broken state if not skipping
+    }
+  }, [user]);
+
   const handleStartStop = useCallback(async () => {
     if (!user) {
       setSkipAuth(false);
@@ -198,7 +211,10 @@ function DashboardContent() {
         const backendUrl = getBackendUrl();
         const res = await fetch(`${backendUrl}/start`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+          },
           body: JSON.stringify({
             repo_name: repoUrl,
             target_issue: targetIssueNumber,
@@ -226,11 +242,19 @@ function DashboardContent() {
         if (activeRunId) {
           await fetch(`${backendUrl}/stop`, { 
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+            },
             body: JSON.stringify({ run_id: activeRunId })
           });
         } else {
-          await fetch(`${backendUrl}/stop`, { method: "POST" });
+          await fetch(`${backendUrl}/stop`, { 
+            method: "POST",
+            headers: {
+              "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+            }
+          });
         }
       } catch (err) {
         console.error("Failed to stop agents:", err);
@@ -699,7 +723,13 @@ function DashboardContent() {
           {activeTab === 'ide' ? (
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
-                <WebIDE repoUrl={repoUrl} />
+                {user ? (
+                  <WebIDE repoUrl={repoUrl} />
+                ) : (
+                  <div className="flex items-center justify-center h-full bg-[#1e1e1e] text-zinc-500">
+                    Sign in to access the Web IDE
+                  </div>
+                )}
               </div>
               <div className="h-48 border-t border-[#333333] bg-[#1e1e1e] flex flex-col shrink-0">
                   <div className="h-8 bg-[#252526] flex items-center px-4 gap-4 shrink-0 shadow-sm border-b border-[#333333]">
@@ -725,7 +755,13 @@ function DashboardContent() {
                     </div>
                   ) : (
                     <div className="flex-1 min-h-0">
-                      <InteractiveTerminal repoUrl={repoUrl} />
+                      {user ? (
+                        <InteractiveTerminal repoUrl={repoUrl} />
+                      ) : (
+                        <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
+                          Sign in to access the Interactive Terminal
+                        </div>
+                      )}
                     </div>
                   )}
               </div>
