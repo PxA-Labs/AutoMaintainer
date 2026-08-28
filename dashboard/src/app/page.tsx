@@ -24,6 +24,20 @@ const InteractiveTerminal = dynamic(() => import('../components/InteractiveTermi
  *  2. In local dev (Next.js runs on :3000, FastAPI on :8000) -> use localhost:8000
  *  3. In production (static export served from FastAPI itself) -> use same host
  */
+function parseTargetIssue(value: string): number | null {
+  const normalized = value.trim().replace(/^#/, "");
+  if (!normalized) return null;
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error("Target issue must be a positive integer, for example 123 or #123.");
+  }
+
+  const issueNumber = Number(normalized);
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new Error("Target issue must be a positive integer within the safe number range.");
+  }
+  return issueNumber;
+}
+
 function getBackendUrl(): string {
   if (process.env.NEXT_PUBLIC_BACKEND_URL) {
     return process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "");
@@ -162,6 +176,16 @@ function DashboardContent() {
         setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: "Please configure a valid Target Repository in the sidebar first.", color: "text-red-400" }]);
         return;
       }
+      let targetIssueNumber: number | null;
+      try {
+        targetIssueNumber = parseTargetIssue(targetIssue);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid target issue.";
+        alert(message);
+        setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: message, color: "text-red-400" }]);
+        return;
+      }
+
       setIsRunning(true);
       setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: `Triggering AI Agent Loop for ${repoUrl}...`, color: "text-zinc-500" }]);
       try {
@@ -169,12 +193,16 @@ function DashboardContent() {
         const res = await fetch(`${backendUrl}/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             repo_name: repoUrl,
-            target_issue: targetIssue ? parseInt(targetIssue.replace('#',''), 10) : null 
+            target_issue: targetIssueNumber,
           })
         });
         const data = await res.json();
+        if (!res.ok) {
+          const detail = typeof data.detail === "string" ? data.detail : `Backend returned HTTP ${res.status}.`;
+          throw new Error(detail);
+        }
         if (data.run_id) {
           setActiveRunId(data.run_id);
           setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), agent: "System", msg: `Agent run queued: ${data.run_id.substring(0,8)}...`, color: "text-emerald-500" }]);
