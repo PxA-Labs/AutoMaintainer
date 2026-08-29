@@ -561,8 +561,8 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     const model = editor.getModel();
     if (!model) return;
 
-    let startLine = selection ? selection.startLineNumber : 1;
-    let endLine = selection ? selection.endLineNumber : startLine;
+    const startLine = selection ? selection.startLineNumber : 1;
+    const endLine = selection ? selection.endLineNumber : startLine;
     let startColumn = selection ? selection.startColumn : 1;
     let endColumn = selection ? selection.endColumn : 1;
 

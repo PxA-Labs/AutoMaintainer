@@ -144,6 +144,7 @@ function UserMenu({ user, onSignOut }: { user: any; onSignOut: () => void }) {
 // Main dashboard component (wrapped with auth)
 function DashboardContent() {
   const { user, session, loading: authLoading, signInWithGitHub, signOut } = useAuth();
+  const [skipAuth, setSkipAuth] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [repoUrl, setRepoUrl] = useState("owner/repo");
   const [isEditingRepo, setIsEditingRepo] = useState(false);
@@ -168,7 +169,25 @@ function DashboardContent() {
   const [runs, setRuns] = useState<any[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
 
+  // Clear sensitive state if the user signs out
+  useEffect(() => {
+    if (!user) {
+      setActiveRunId(null);
+      setIsRunning(false);
+      setLogs([{ time: "00:00:00", agent: "System", msg: "Connecting to backend...", color: "text-zinc-500" }]);
+      setPipeline([]);
+      setActivity([]);
+      setRuns([]);
+      // Reset skipAuth so they don't immediately get dumped back into a broken state if not skipping
+    }
+  }, [user]);
+
   const handleStartStop = useCallback(async () => {
+    if (!user) {
+      setSkipAuth(false);
+      return;
+    }
+    
     if (!isRunning) {
       if (!repoUrl || repoUrl.trim() === "owner/repo" || repoUrl.trim() === "") {
         alert("Please enter a Target Repository first!");
@@ -192,7 +211,10 @@ function DashboardContent() {
         const backendUrl = getBackendUrl();
         const res = await fetch(`${backendUrl}/start`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+          },
           body: JSON.stringify({
             repo_name: repoUrl,
             target_issue: targetIssueNumber,
@@ -220,11 +242,19 @@ function DashboardContent() {
         if (activeRunId) {
           await fetch(`${backendUrl}/stop`, { 
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+            },
             body: JSON.stringify({ run_id: activeRunId })
           });
         } else {
-          await fetch(`${backendUrl}/stop`, { method: "POST" });
+          await fetch(`${backendUrl}/stop`, { 
+            method: "POST",
+            headers: {
+              "Authorization": session?.access_token ? `Bearer ${session.access_token}` : ""
+            }
+          });
         }
       } catch (err) {
         console.error("Failed to stop agents:", err);
@@ -494,7 +524,7 @@ function DashboardContent() {
     );
   }
 
-  if (!user) {
+  if (!user && !skipAuth) {
     return (
       <div className="flex h-screen w-full bg-[#0a0a0a] items-center justify-center">
         <div className="text-center p-8">
@@ -507,14 +537,22 @@ function DashboardContent() {
           <p className="text-zinc-500 mb-8 max-w-md mx-auto">
             An Always-On Autonomous AI Software Engineering Team. Sign in with GitHub to start managing your repositories.
           </p>
-          <button
-            onClick={signInWithGitHub}
-            disabled={authLoading}
-            className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg font-medium hover:bg-indigo-500/20 transition-colors"
-          >
-            <LogIn className="w-5 h-5" />
-            Sign in with GitHub
-          </button>
+          <div className="flex flex-col items-center gap-4">
+            <button
+              onClick={signInWithGitHub}
+              disabled={authLoading}
+              className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg font-medium hover:bg-indigo-500/20 transition-colors"
+            >
+              <LogIn className="w-5 h-5" />
+              Sign in with GitHub
+            </button>
+            <button
+              onClick={() => setSkipAuth(true)}
+              className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Skip for now
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -568,7 +606,13 @@ function DashboardContent() {
             <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4 px-2">Configuration</h2>
             <div className="space-y-1">
               <div className="flex flex-col p-2 rounded-lg hover:bg-zinc-800/50 transition-colors text-sm gap-2">
-                <div className="flex items-center justify-between cursor-pointer" onClick={() => setIsEditingRepo(true)}>
+                <div className="flex items-center justify-between cursor-pointer" onClick={() => {
+                  if (!user) {
+                    setSkipAuth(false);
+                    return;
+                  }
+                  setIsEditingRepo(true);
+                }}>
                   <div className="flex items-center gap-3 text-zinc-400">
                     <GitBranch className="w-4 h-4 text-zinc-400" />
                     <span>Target Repository</span>
@@ -679,7 +723,13 @@ function DashboardContent() {
           {activeTab === 'ide' ? (
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
-                <WebIDE repoUrl={repoUrl} />
+                {user ? (
+                  <WebIDE repoUrl={repoUrl} />
+                ) : (
+                  <div className="flex items-center justify-center h-full bg-[#1e1e1e] text-zinc-500">
+                    Sign in to access the Web IDE
+                  </div>
+                )}
               </div>
               <div className="h-48 border-t border-[#333333] bg-[#1e1e1e] flex flex-col shrink-0">
                   <div className="h-8 bg-[#252526] flex items-center px-4 gap-4 shrink-0 shadow-sm border-b border-[#333333]">
@@ -705,7 +755,13 @@ function DashboardContent() {
                     </div>
                   ) : (
                     <div className="flex-1 min-h-0">
-                      <InteractiveTerminal repoUrl={repoUrl} />
+                      {user ? (
+                        <InteractiveTerminal repoUrl={repoUrl} />
+                      ) : (
+                        <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
+                          Sign in to access the Interactive Terminal
+                        </div>
+                      )}
                     </div>
                   )}
               </div>
