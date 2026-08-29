@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@supabase/auth-helpers-nextjs": "^0.10.0",
+    "@supabase/auth-helpers-nextjs": "^0.15.0",
     "@supabase/supabase-js": "^2.112.3",
     "@xterm/addon-fit": "^0.11.0",
     "framer-motion": "^13.1.0",
