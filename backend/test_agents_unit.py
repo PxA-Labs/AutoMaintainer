@@ -172,7 +172,7 @@ def test_healthz_is_independent_of_supabase():
     response = TestClient(app).get("/healthz")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "healthy"}
 
 
 def test_healthz_supabase_not_configured(monkeypatch):
