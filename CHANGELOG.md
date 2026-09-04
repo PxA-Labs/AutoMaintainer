@@ -98,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump release-drafter/release-drafter from 6.4.0 to 7.7.0 ([#228](https://github.com/PxA-Labs/AutoMaintainer/pull/228)) - @dependabot[bot]
 - chore(deps-dev): bump eslint-config-next from 16.3.0 to 16.3.1 in /dashboard ([#155](https://github.com/PxA-Labs/AutoMaintainer/pull/155)) - @dependabot[bot]
 - chore(deps): bump next from 16.3.0 to 16.3.1 in /dashboard ([#150](https://github.com/PxA-Labs/AutoMaintainer/pull/150)) - @dependabot[bot]
 - chore(deps): bump @supabase/supabase-js from 2.112.1 to 2.112.3 in /dashboard ([#128](https://github.com/PxA-Labs/AutoMaintainer/pull/128)) - @dependabot[bot]
@@ -131,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
 
 ---
 
