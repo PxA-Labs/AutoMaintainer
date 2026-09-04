@@ -724,7 +724,7 @@ function DashboardContent() {
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
                 {user ? (
-                  <WebIDE repoUrl={repoUrl} />
+                  <WebIDE repoUrl={repoUrl} accessToken={session?.access_token} />
                 ) : (
                   <div className="flex items-center justify-center h-full bg-[#1e1e1e] text-zinc-500">
                     Sign in to access the Web IDE
@@ -756,7 +756,7 @@ function DashboardContent() {
                   ) : (
                     <div className="flex-1 min-h-0">
                       {user ? (
-                        <InteractiveTerminal repoUrl={repoUrl} />
+                        <InteractiveTerminal repoUrl={repoUrl} accessToken={session?.access_token} />
                       ) : (
                         <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
                           Sign in to access the Interactive Terminal

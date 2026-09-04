@@ -27,6 +27,7 @@ import subprocess
 import re
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 gitnexus_process = None
 active_tasks: Dict[str, asyncio.Task] = {}
+active_task_orgs: Dict[str, str] = {}
 tasks_lock = asyncio.Lock()
 
 
@@ -167,6 +169,26 @@ async def get_user_id(user: dict = Depends(get_current_user)) -> str:
     return user["user_id"]
 
 
+async def require_repository_access(
+    repo_name: str, user: dict = Depends(get_current_user)
+) -> dict:
+    """Authorize a repository against the caller's organization before access."""
+    from agents import supabase as agents_supabase
+
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    repository_id, github_installation_id = await validate_repo_access(
+        repo_name, user["org_id"], user["user_id"], agents_supabase
+    )
+    return {
+        "repository_id": repository_id,
+        "github_installation_id": github_installation_id,
+        "org_id": user["org_id"],
+        "user_id": user["user_id"],
+    }
+
+
 # --- Repository validation helper ---
 async def validate_repo_access(
     repo_name: str, org_id: str, user_id: str, supabase_client
@@ -191,6 +213,107 @@ async def validate_repo_access(
         )
 
     return result.data["id"], result.data["github_installation_id"]
+
+
+def parse_github_repo_name(repo_url: str) -> str | None:
+    """Normalize an owner/repo value or GitHub URL to an owner/repo name."""
+    value = repo_url.strip()
+    if not value:
+        return None
+    if "://" in value:
+        parsed = urlparse(value)
+        if (
+            parsed.scheme not in ("http", "https")
+            or parsed.netloc.lower() != "github.com"
+        ):
+            return None
+        value = parsed.path.strip("/")
+    else:
+        value = value.strip("/")
+    value = value.removesuffix(".git")
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+", value):
+        return None
+    return value
+
+
+async def receive_terminal_auth(websocket: WebSocket) -> str | None:
+    """Receive a browser-compatible bearer-token handshake without using the URL."""
+    try:
+        message = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+    except WebSocketDisconnect:
+        return None
+    except asyncio.TimeoutError:
+        await websocket.close(code=1008, reason="Authentication timeout")
+        return None
+
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        await websocket.close(code=1008, reason="Authentication required")
+        return None
+
+    token = payload.get("access_token") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") != "auth"
+        or not isinstance(token, str)
+        or not token.strip()
+    ):
+        await websocket.close(code=1008, reason="Authentication required")
+        return None
+    return f"Bearer {token.strip()}"
+
+
+def terminal_origin_is_allowed(origin: str | None) -> bool:
+    configured_origins = {
+        item.strip().rstrip("/")
+        for item in os.getenv("ALLOWED_ORIGINS", "").split(",")
+        if item.strip()
+    }
+    allowed_origins = {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+        *configured_origins,
+    }
+    return not origin or origin.rstrip("/") in allowed_origins
+
+
+async def authorize_terminal(
+    websocket: WebSocket, repo_url: str, authorization: str | None
+) -> str | None:
+    """Authenticate a terminal socket and authorize its repository workspace."""
+    try:
+        user = await get_current_user(authorization)
+    except HTTPException:
+        await websocket.close(code=1008, reason="Authentication required")
+        return None
+
+    repo_name = parse_github_repo_name(repo_url)
+    if not repo_name:
+        await websocket.close(code=1008, reason="A valid GitHub repository is required")
+        return None
+
+    from agents import supabase as agents_supabase
+
+    if not agents_supabase:
+        await websocket.close(code=1011, reason="Database not configured")
+        return None
+    try:
+        await validate_repo_access(
+            repo_name, user["org_id"], user["user_id"], agents_supabase
+        )
+    except HTTPException as exc:
+        await websocket.close(
+            code=1008 if exc.status_code in (401, 403, 404) else 1011,
+            reason="Repository access denied",
+        )
+        return None
+    except Exception:
+        logger.exception("Failed to authorize terminal repository %s", repo_name)
+        await websocket.close(code=1011, reason="Repository authorization failed")
+        return None
+    return repo_name
 
 
 @asynccontextmanager
@@ -593,18 +716,23 @@ async def stop_agents(
 
 # Keep backward compatibility for in-memory tasks (deprecated)
 @app.post("/start-legacy")
-async def start_agents_legacy(req: StartRequest):
+async def start_agents_legacy(
+    req: StartRequest,
+    repo_access: dict = Depends(require_repository_access),
+):
     """Legacy endpoint using in-memory tasks. Deprecated."""
     run_id = str(uuid.uuid4())
     task = asyncio.create_task(run_agent_loop(req.repo_name, req.target_issue, run_id))
 
     async with tasks_lock:
         active_tasks[run_id] = task
+        active_task_orgs[run_id] = repo_access["org_id"]
 
     def on_task_done(t):
         async def remove_task():
             async with tasks_lock:
                 active_tasks.pop(run_id, None)
+                active_task_orgs.pop(run_id, None)
 
         try:
             loop = asyncio.get_running_loop()
@@ -617,10 +745,15 @@ async def start_agents_legacy(req: StartRequest):
 
 
 @app.post("/stop-legacy")
-async def stop_agents_legacy(req: Optional[StopRequest] = None):
+async def stop_agents_legacy(
+    req: Optional[StopRequest] = None,
+    user: dict = Depends(get_current_user),
+):
     """Legacy endpoint using in-memory tasks. Deprecated."""
     async with tasks_lock:
         if req and req.run_id:
+            if active_task_orgs.get(req.run_id) != user["org_id"]:
+                raise HTTPException(status_code=404, detail="Run not found")
             task = active_tasks.get(req.run_id)
             if task and not task.done():
                 task.cancel()
@@ -634,10 +767,15 @@ async def stop_agents_legacy(req: Optional[StopRequest] = None):
         else:
             stopped_any = False
             for r_id, task in list(active_tasks.items()):
+                if active_task_orgs.get(r_id) != user["org_id"]:
+                    continue
                 if not task.done():
                     task.cancel()
                     stopped_any = True
-            active_tasks.clear()
+            for r_id in list(active_tasks):
+                if active_task_orgs.get(r_id) == user["org_id"]:
+                    active_tasks.pop(r_id, None)
+                    active_task_orgs.pop(r_id, None)
             return {"status": "stopped" if stopped_any else "not_running"}
 
 
@@ -666,7 +804,11 @@ async def inline_assist(req: InlineAssistRequest):
 
 
 @app.post("/repo/{repo_name:path}/file")
-async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
+async def update_repo_file(
+    repo_name: str,
+    payload: FileUpdateRequest,
+    repo_access: dict = Depends(require_repository_access),
+):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if (
@@ -706,7 +848,11 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
 
 
 @app.post("/repo/{repo_name:path}/file/create")
-async def create_repo_file(repo_name: str, payload: FileCreateRequest):
+async def create_repo_file(
+    repo_name: str,
+    payload: FileCreateRequest,
+    repo_access: dict = Depends(require_repository_access),
+):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if (
@@ -751,7 +897,10 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 
 @app.delete("/repo/{repo_name:path}/file")
 async def delete_repo_file(
-    repo_name: str, file_path: str, commit_message: Optional[str] = None
+    repo_name: str,
+    file_path: str,
+    commit_message: Optional[str] = None,
+    repo_access: dict = Depends(require_repository_access),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -806,8 +955,7 @@ class ProposeChangesRequest(BaseModel):
 async def propose_changes(
     repo_name: str,
     payload: ProposeChangesRequest,
-    org_id: str = Depends(get_org_id),
-    user_id: str = Depends(get_user_id),
+    repo_access: dict = Depends(require_repository_access),
 ):
     """
     Create a new branch, commit changes, and open a Pull Request.
@@ -907,39 +1055,36 @@ async def propose_changes(
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    origin = websocket.headers.get("origin")
-    if origin and not (
-        origin.startswith("http://localhost")
-        or "huggingface.co" in origin
-        or origin.startswith("http://127.0.0.1")
-    ):
-        await websocket.close(code=1008)
+    if not terminal_origin_is_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=1008, reason="Origin not allowed")
         return
 
     await websocket.accept()
 
+    authorization = await receive_terminal_auth(websocket)
+    if not authorization:
+        return
+
+    repo_name = await authorize_terminal(websocket, repo_url, authorization)
+    if not repo_name:
+        return
+
+    await websocket.send_json({"type": "authenticated"})
+
     cwd = None
-    if repo_url:
-        match = re.search(
-            r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?$",
-            repo_url,
-        )
-        if match:
-            owner, repo = match.group(1), match.group(2)
-            repo_name = f"{owner}/{repo}"
-            try:
-                repo_dir = get_safe_repo_dir(repo_name)
-                base_dir = get_base_workspace_dir()
-                real_dir = os.path.realpath(str(repo_dir))
-                real_base = os.path.realpath(str(base_dir))
-                if (
-                    real_dir.startswith(real_base + os.path.sep)
-                    and os.path.exists(real_dir)
-                    and os.path.isdir(real_dir)
-                ):
-                    cwd = real_dir
-            except HTTPException:
-                pass
+    try:
+        repo_dir = get_safe_repo_dir(repo_name)
+        base_dir = get_base_workspace_dir()
+        real_dir = os.path.realpath(str(repo_dir))
+        real_base = os.path.realpath(str(base_dir))
+        if (
+            real_dir.startswith(real_base + os.path.sep)
+            and os.path.exists(real_dir)
+            and os.path.isdir(real_dir)
+        ):
+            cwd = real_dir
+    except HTTPException:
+        pass
 
     if sys.platform == "win32":
         import pywinpty
@@ -1048,7 +1193,10 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 
 
 @app.get("/repo/{repo_name:path}/tree")
-def get_repo_tree(repo_name: str):
+def get_repo_tree(
+    repo_name: str,
+    repo_access: dict = Depends(require_repository_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
 
     if not os.path.exists(repo_dir):
@@ -1100,7 +1248,11 @@ def get_repo_tree(repo_name: str):
 
 
 @app.get("/repo/{repo_name:path}/search")
-def search_repo(repo_name: str, q: str):
+def search_repo(
+    repo_name: str,
+    q: str,
+    repo_access: dict = Depends(require_repository_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
 
     if not repo_dir.exists():
@@ -1154,7 +1306,11 @@ def search_repo(repo_name: str, q: str):
 
 
 @app.get("/repo/{repo_name:path}/file")
-def get_repo_file(repo_name: str, file_path: str):
+def get_repo_file(
+    repo_name: str,
+    file_path: str,
+    repo_access: dict = Depends(require_repository_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
 

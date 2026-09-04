@@ -13,6 +13,7 @@ import {
 import { motion } from "framer-motion";
 import Editor from "@monaco-editor/react";
 import InlineAssist, { SelectionContext } from "./InlineAssist";
+import { useAuth } from "@/lib/auth";
 
 interface TreeNode {
   name: string;
@@ -29,6 +30,7 @@ interface SearchResult {
 
 interface WebIDEProps {
   repoUrl: string;
+  accessToken?: string;
 }
 
 interface FileChange {
@@ -470,7 +472,13 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
   );
 }
 
-export default function WebIDE({ repoUrl }: WebIDEProps) {
+export default function WebIDE({ repoUrl, accessToken }: WebIDEProps) {
+  const { session } = useAuth();
+  const token = accessToken ?? session?.access_token;
+  const authHeaders: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+
   // Tree State
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -652,7 +660,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const fetchTree = async () => {
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`, {
+        headers: authHeaders,
+      });
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
       setTree(data);
@@ -666,7 +676,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   useEffect(() => {
     setLoadingTree(true);
     fetchTree();
-  }, [repoUrl]);
+  }, [repoUrl, token]);
 
   const clearInlineAssistState = () => {
     clearPreviewDecorations();
@@ -688,7 +698,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (fileContents[path] === undefined) {
       setLoadingFiles(prev => ({...prev, [path]: true}));
       try {
-        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
+        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`, {
+          headers: authHeaders,
+        });
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
         setFileContents(prev => ({...prev, [path]: data.content}));
@@ -729,7 +741,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({ file_path: activeTab, content })
       });
       if (!res.ok) throw new Error("Failed to save");
@@ -781,7 +793,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file/create`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({ file_path: newPath, is_dir: isDir, content: "" })
       });
       if (!res.ok) throw new Error("Failed to create");
@@ -796,7 +808,8 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (!confirm(`Are you sure you want to delete ${path}? This will also push a commit to GitHub.`)) return;
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: authHeaders,
       });
       if (!res.ok) throw new Error("Failed to delete");
       if (openTabs.includes(path)) closeTab({ stopPropagation: () => {} } as any, path);
@@ -832,7 +845,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`);
+      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`, {
+        headers: authHeaders,
+      });
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setSearchResults(data.results);
@@ -851,7 +866,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       // Call backend to create PR
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/propose-changes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
           title,
           description,

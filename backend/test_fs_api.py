@@ -3,7 +3,7 @@ import shutil
 import uuid
 import pytest
 from fastapi.testclient import TestClient
-from main import app, get_safe_repo_dir
+from main import app, get_safe_repo_dir, require_repository_access
 
 client = TestClient(app)
 
@@ -12,6 +12,11 @@ client = TestClient(app)
 def setup_dummy_repo():
     repo_name = f"PxA-Labs/AutoMaintainerTestSandbox-{uuid.uuid4().hex[:8]}"
     repo_dir = get_safe_repo_dir(repo_name)
+
+    async def allow_test_repository():
+        return {"org_id": "test-org", "user_id": "test-user"}
+
+    app.dependency_overrides[require_repository_access] = allow_test_repository
 
     if repo_dir.exists():
         shutil.rmtree(repo_dir, ignore_errors=True)
@@ -27,6 +32,7 @@ def setup_dummy_repo():
 
     yield repo_name
 
+    app.dependency_overrides.pop(require_repository_access, None)
     if repo_dir.exists():
         shutil.rmtree(repo_dir, ignore_errors=True)
 
