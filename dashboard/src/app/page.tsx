@@ -8,12 +8,10 @@ import { BrainCircuit, GitPullRequest, Search, FileCode, CheckCircle, Activity, 
 import { motion } from "framer-motion";
 import WebIDE from "../components/WebIDE";
 import dynamic from 'next/dynamic';
-import { createClient } from '@supabase/supabase-js';
 import { AuthProvider, useAuth } from '@/lib/auth';
+import { getBrowserClient } from '@/lib/supabase';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = getBrowserClient();
 
 const InteractiveTerminal = dynamic(() => import('../components/InteractiveTerminal'), { ssr: false });
 
