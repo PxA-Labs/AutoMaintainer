@@ -29,6 +29,7 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 # Celery integration
 from celery_app import celery_app
@@ -258,10 +259,48 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 
-# Allow the Next.js frontend to connect to this API
+
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
+
+
+def parse_allowed_origins(configured_origins: str | None) -> list[str]:
+    """Return safe, normalized CORS origins from a comma-separated setting."""
+    candidates = list(DEFAULT_ALLOWED_ORIGINS)
+    if configured_origins:
+        candidates.extend(origin.strip() for origin in configured_origins.split(","))
+
+    origins = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "ALLOWED_ORIGINS must contain comma-separated http(s) origins "
+                f"without paths or wildcards: {candidate!r}"
+            )
+        normalized = f"{parsed.scheme}://{parsed.netloc}"
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
+
+
+ALLOWED_ORIGINS = parse_allowed_origins(os.getenv("ALLOWED_ORIGINS"))
+
+# Allow the Next.js frontend to connect to this API. Origins are exact matches;
+# wildcard origins are intentionally rejected because credentials are enabled.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
