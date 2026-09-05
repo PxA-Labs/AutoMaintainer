@@ -290,7 +290,7 @@ async def healthz_supabase():
     if not supabase:
         raise HTTPException(
             status_code=503,
-            detail="Supabase is not configured. Please check environment variables.",
+            detail="Supabase is not configured. Please check SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables.",
         )
     try:
         await asyncio.to_thread(
@@ -301,7 +301,7 @@ async def healthz_supabase():
         logger.error(f"Supabase connection check failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail="Supabase connection failed (database may be paused or unreachable)",
+            detail=f"Supabase connection failed: {e}",
         )
 
 

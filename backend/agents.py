@@ -30,8 +30,16 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 gh = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+def _clean_env(val: str | None) -> str | None:
+    if not val:
+        return None
+    cleaned = val.strip().strip("'\"").strip()
+    return cleaned if cleaned else None
+
+
+SUPABASE_URL = _clean_env(os.getenv("SUPABASE_URL"))
+SUPABASE_SERVICE_KEY = _clean_env(os.getenv("SUPABASE_SERVICE_KEY"))
 supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
