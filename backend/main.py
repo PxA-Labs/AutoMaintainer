@@ -259,9 +259,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 
 # Allow the Next.js frontend to connect to this API
+cors_origins_env = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+)
+allowed_origins = [
+    origin.strip() for origin in cors_origins_env.split(",") if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins if allowed_origins else ["*"],
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"^https:\/\/.*\.vercel\.app$"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
