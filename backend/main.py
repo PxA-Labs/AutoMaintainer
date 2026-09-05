@@ -74,6 +74,7 @@ class StopRequest(BaseModel):
 class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
+    branch_name: str
     commit_message: Optional[str] = None
 
 
@@ -81,6 +82,7 @@ class FileCreateRequest(BaseModel):
     file_path: str
     content: str = ""
     is_dir: bool = False
+    branch_name: str
     commit_message: Optional[str] = None
 
 
@@ -683,15 +685,26 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
         repo = gh.get_repo(repo_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+    if payload.branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     try:
-        file = repo.get_contents(payload.file_path)
+        file = repo.get_contents(payload.file_path, ref=payload.branch_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
     message = (
         payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
     )
     try:
-        repo.update_file(file.path, message, payload.content, file.sha)
+        repo.update_file(
+            file.path,
+            message,
+            payload.content,
+            file.sha,
+            branch=payload.branch_name,
+        )
 
         # Write to local clone so the IDE doesn't show stale reads
         repo_dir = get_safe_repo_dir(repo_name)
@@ -724,6 +737,11 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
 
+    if payload.branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     message = (
         payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
     )
@@ -735,7 +753,12 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
         actual_content = ""
 
     try:
-        repo.create_file(actual_path, message, actual_content)
+        repo.create_file(
+            actual_path,
+            message,
+            actual_content,
+            branch=payload.branch_name,
+        )
 
         # Write to local clone
         repo_dir = get_safe_repo_dir(repo_name)
@@ -751,13 +774,15 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 
 @app.delete("/repo/{repo_name:path}/file")
 async def delete_repo_file(
-    repo_name: str, file_path: str, commit_message: Optional[str] = None
+    repo_name: str,
+    file_path: str,
+    branch_name: str,
+    commit_message: Optional[str] = None,
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
         raise HTTPException(status_code=400, detail="Invalid file path")
-
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
@@ -767,8 +792,13 @@ async def delete_repo_file(
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
 
+    if branch_name == repo.default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="WebIDE changes must target a feature branch, not the default branch.",
+        )
     try:
-        file = repo.get_contents(file_path)
+        file = repo.get_contents(file_path, ref=branch_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
 
@@ -780,7 +810,19 @@ async def delete_repo_file(
 
     message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
     try:
-        repo.delete_file(file.path, message, file.sha)
+        repo.delete_file(file.path, message, file.sha, branch=branch_name)
+
+        # Local delete
+        import shutil
+
+        repo_dir = get_safe_repo_dir(repo_name)
+        if repo_dir.exists():
+            target_path = get_safe_target_path(repo_dir, file_path)
+            if target_path.exists():
+                if target_path.is_file():
+                    target_path.unlink()
+                elif target_path.is_dir():
+                    shutil.rmtree(target_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
     return {"status": "deleted", "message": message}
@@ -1047,10 +1089,86 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 # --- Repository browsing endpoints (unchanged) ---
 
 
-@app.get("/repo/{repo_name:path}/tree")
-def get_repo_tree(repo_name: str):
-    repo_dir = get_safe_repo_dir(repo_name)
+def _get_branch_repo(repo_name: str, branch_name: str):
+    """Return a GitHub repository after validating the requested branch."""
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=401, detail="GitHub token not configured")
+    try:
+        repo = Github(token).get_repo(repo_name)
+        repo.get_branch(branch_name)
+        return repo
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Repository or branch not found: {e}",
+        )
 
+
+def _build_remote_tree(repo_name: str, repo, branch_name: str):
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        "venv",
+        "env",
+        "build",
+        "dist",
+        ".next",
+    }
+    root = {"name": repo_name, "type": "directory", "children": []}
+    nodes = {"": root}
+    branch_sha = repo.get_branch(branch_name).commit.sha
+    tree = repo.get_git_tree(branch_sha, recursive=True)
+    if tree.truncated:
+        raise HTTPException(
+            status_code=413,
+            detail="Repository tree is too large to load from GitHub.",
+        )
+
+    for entry in tree.tree:
+        if entry.type not in {"blob", "tree"}:
+            continue
+        parts = entry.path.split("/")
+        if any(part in ignored_dirs for part in parts):
+            continue
+        parent_path = ""
+        for index, part in enumerate(parts):
+            node_path = "/".join(parts[: index + 1])
+            is_directory = index < len(parts) - 1 or entry.type == "tree"
+            if node_path not in nodes:
+                node = {
+                    "name": part,
+                    "path": node_path,
+                    "type": "directory" if is_directory else "file",
+                }
+                if is_directory:
+                    node["children"] = []
+                nodes[node_path] = node
+                nodes[parent_path]["children"].append(node)
+            parent_path = node_path
+
+    def sort_children(node):
+        node["children"].sort(
+            key=lambda item: (item["type"] != "directory", item["name"].lower())
+        )
+        for child in node["children"]:
+            if child["type"] == "directory":
+                sort_children(child)
+
+    sort_children(root)
+    return root
+
+
+@app.get("/repo/{repo_name:path}/tree")
+def get_repo_tree(repo_name: str, branch_name: Optional[str] = None):
+    if branch_name:
+        repo = _get_branch_repo(repo_name, branch_name)
+        return _build_remote_tree(repo_name, repo, branch_name)
+
+    repo_dir = get_safe_repo_dir(repo_name)
     if not os.path.exists(repo_dir):
         raise HTTPException(
             status_code=404,
@@ -1074,11 +1192,8 @@ def get_repo_tree(repo_name: str):
                 if item in ignored_dirs:
                     continue
                 item_path = os.path.join(path, item)
-
-                # Prevent symlink loops
                 if os.path.islink(item_path):
                     continue
-
                 is_dir = os.path.isdir(item_path)
                 node = {
                     "name": item,
@@ -1091,8 +1206,6 @@ def get_repo_tree(repo_name: str):
         except (OSError, PermissionError) as e:
             logger.warning(f"Error accessing path {path}: {e}")
             raise HTTPException(status_code=500, detail="Error accessing file system")
-
-        # Sort directories first, then files
         tree.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
         return tree
 
@@ -1100,9 +1213,54 @@ def get_repo_tree(repo_name: str):
 
 
 @app.get("/repo/{repo_name:path}/search")
-def search_repo(repo_name: str, q: str):
-    repo_dir = get_safe_repo_dir(repo_name)
+def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
+    if branch_name:
+        repo = _get_branch_repo(repo_name, branch_name)
+        branch_sha = repo.get_branch(branch_name).commit.sha
+        tree = repo.get_git_tree(branch_sha, recursive=True)
+        if tree.truncated:
+            raise HTTPException(
+                status_code=413,
+                detail="Repository tree is too large to search through GitHub.",
+            )
+        results = []
+        for entry in tree.tree:
+            if entry.type != "blob" or not entry.path:
+                continue
+            if any(
+                part
+                in {
+                    ".git",
+                    "node_modules",
+                    "__pycache__",
+                    "venv",
+                    "env",
+                    "build",
+                    "dist",
+                    ".next",
+                }
+                for part in entry.path.split("/")
+            ):
+                continue
+            try:
+                file = repo.get_contents(entry.path, ref=branch_name)
+                content = file.decoded_content.decode("utf-8")
+            except Exception:
+                continue
+            for line_number, line in enumerate(content.splitlines(), start=1):
+                if q.lower() in line.lower():
+                    results.append(
+                        {
+                            "file": entry.path,
+                            "line_number": line_number,
+                            "snippet": line.strip()[:200],
+                        }
+                    )
+                    if len(results) >= 100:
+                        return {"query": q, "results": results}
+        return {"query": q, "results": results}
 
+    repo_dir = get_safe_repo_dir(repo_name)
     if not repo_dir.exists():
         raise HTTPException(status_code=404, detail="Repo not found locally")
 
@@ -1117,7 +1275,6 @@ def search_repo(repo_name: str, q: str):
         ".next",
     }
     results = []
-
     try:
         for root, dirs, files in os.walk(repo_dir):
             dirs[:] = [
@@ -1130,50 +1287,60 @@ def search_repo(repo_name: str, q: str):
                 if os.path.islink(file_path):
                     continue
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f):
+                    with open(file_path, "r", encoding="utf-8") as handle:
+                        for line_number, line in enumerate(handle, start=1):
                             if q.lower() in line.lower():
-                                rel_path = (
-                                    Path(file_path).relative_to(repo_dir).as_posix()
-                                )
                                 results.append(
                                     {
-                                        "file": rel_path,
-                                        "line_number": i + 1,
+                                        "file": Path(file_path)
+                                        .relative_to(repo_dir)
+                                        .as_posix(),
+                                        "line_number": line_number,
                                         "snippet": line.strip()[:200],
                                     }
                                 )
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, OSError):
                     pass
-                except Exception:
-                    pass
-    except Exception as e:
+    except OSError as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     return {"query": q, "results": results[:100]}
 
 
 @app.get("/repo/{repo_name:path}/file")
-def get_repo_file(repo_name: str, file_path: str):
+def get_repo_file(
+    repo_name: str,
+    file_path: str,
+    branch_name: Optional[str] = None,
+):
+    if branch_name:
+        repo = _get_branch_repo(repo_name, branch_name)
+        try:
+            file = repo.get_contents(file_path, ref=branch_name)
+            if isinstance(file, list):
+                raise HTTPException(status_code=404, detail="File not found")
+            content = file.decoded_content.decode("utf-8")
+            return {"content": content}
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=415, detail="Cannot read binary file")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"File not found: {e}")
+
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
-
     import os, stat
 
     try:
         fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         raise HTTPException(status_code=404, detail="File not found")
-
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise HTTPException(status_code=404, detail="File not found")
-
-        # Pass closefd=False so the finally block retains exclusive ownership of closing fd
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
-            content = f.read()
-        return {"content": content}
+            return {"content": f.read()}
     except UnicodeDecodeError:
         raise HTTPException(status_code=415, detail="Cannot read binary file")
     except HTTPException:

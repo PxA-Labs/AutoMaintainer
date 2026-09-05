@@ -835,6 +835,12 @@ async def implementer_node(state: AgentState):
         sb = gh_repo.get_branch(default_branch)
         branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
         gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
+        new_logs.append(
+            {
+                "type": "ui_update",
+                "branchName": branch_name,
+            }
+        )
         if target_file and target_file_exists:
             gh_repo.update_file(
                 path=target_file,

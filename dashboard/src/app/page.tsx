@@ -149,6 +149,7 @@ function DashboardContent() {
   const [targetIssue, setTargetIssue] = useState("");
   const [activeTab, setActiveTab] = useState("dashboard");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeBranchName, setActiveBranchName] = useState<string | null>(null);
   const [terminalMode, setTerminalMode] = useState<'logs' | 'pty'>('logs');
   const [logs, setLogs] = useState([
     { time: "00:00:00", agent: "System", msg: "Connecting to backend...", color: "text-zinc-500" }
@@ -289,6 +290,7 @@ function DashboardContent() {
 
     let isMounted = true;
     setSystemHealth({ latency: 0, tokensUsed: 0 });
+    setActiveBranchName(null);
     setLogs([{ time: new Date().toLocaleTimeString(), agent: "System", msg: "Connecting...", color: "text-zinc-500" }]);
     setPipeline([]);
     setActivity([]);
@@ -328,6 +330,7 @@ function DashboardContent() {
           }
         }
         if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
+        if (msgData.branchName) setActiveBranchName(msgData.branchName);
         if (msgData.pipeline) {
           setPipeline((prev) => {
             const exists = prev.find((p) => p.id === msgData.pipeline.id);
@@ -722,7 +725,7 @@ function DashboardContent() {
             <main className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 min-h-0">
                 {user ? (
-                  <WebIDE repoUrl={repoUrl} />
+                  <WebIDE repoUrl={repoUrl} branchName={activeBranchName} />
                 ) : (
                   <div className="flex items-center justify-center h-full bg-[#1e1e1e] text-zinc-500">
                     Sign in to access the Web IDE

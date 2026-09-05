@@ -29,6 +29,7 @@ interface SearchResult {
 
 interface WebIDEProps {
   repoUrl: string;
+  branchName?: string | null;
 }
 
 interface FileChange {
@@ -470,7 +471,7 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
   );
 }
 
-export default function WebIDE({ repoUrl }: WebIDEProps) {
+export default function WebIDE({ repoUrl, branchName }: WebIDEProps) {
   // Tree State
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -652,7 +653,12 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const fetchTree = async () => {
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+      const branchQuery = branchName
+        ? `?branch_name=${encodeURIComponent(branchName)}`
+        : "";
+      const res = await fetch(
+        `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree${branchQuery}`
+      );
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
       setTree(data);
@@ -666,7 +672,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   useEffect(() => {
     setLoadingTree(true);
     fetchTree();
-  }, [repoUrl]);
+  }, [repoUrl, branchName]);
 
   const clearInlineAssistState = () => {
     clearPreviewDecorations();
@@ -688,7 +694,12 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (fileContents[path] === undefined) {
       setLoadingFiles(prev => ({...prev, [path]: true}));
       try {
-        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
+        const branchQuery = branchName
+          ? `&branch_name=${encodeURIComponent(branchName)}`
+          : "";
+        const res = await fetch(
+          `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}${branchQuery}`
+        );
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
         setFileContents(prev => ({...prev, [path]: data.content}));
@@ -722,6 +733,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const handleSave = async () => {
     if (!activeTab || editedContents[activeTab] === undefined) return;
+    if (!branchName) {
+      alert("Start an agent run before saving WebIDE changes so edits stay on a feature branch.");
+      return;
+    }
     const content = editedContents[activeTab];
     if (content === fileContents[activeTab]) return;
 
@@ -730,7 +745,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: activeTab, content })
+        body: JSON.stringify({ file_path: activeTab, content, branch_name: branchName })
       });
       if (!res.ok) throw new Error("Failed to save");
       setFileContents(prev => ({...prev, [activeTab]: content}));
@@ -774,6 +789,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   };
 
   const handleCreate = async (parentPath: string, isDir: boolean) => {
+    if (!branchName) {
+      alert("Start an agent run before creating WebIDE files so changes stay on a feature branch.");
+      return;
+    }
     const name = prompt(`Enter name for new ${isDir ? 'folder' : 'file'} in ${parentPath}:`);
     if (!name) return;
     
@@ -782,7 +801,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file/create`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: newPath, is_dir: isDir, content: "" })
+        body: JSON.stringify({ file_path: newPath, is_dir: isDir, content: "", branch_name: branchName })
       });
       if (!res.ok) throw new Error("Failed to create");
       await fetchTree();
@@ -793,9 +812,13 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   };
 
   const handleDelete = async (path: string) => {
+    if (!branchName) {
+      alert("Start an agent run before deleting WebIDE files so changes stay on a feature branch.");
+      return;
+    }
     if (!confirm(`Are you sure you want to delete ${path}? This will also push a commit to GitHub.`)) return;
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`, {
+      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}&branch_name=${encodeURIComponent(branchName)}`, {
         method: "DELETE"
       });
       if (!res.ok) throw new Error("Failed to delete");
@@ -832,7 +855,12 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`);
+      const branchQuery = branchName
+        ? `&branch_name=${encodeURIComponent(branchName)}`
+        : "";
+      const res = await fetch(
+        `${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}${branchQuery}`
+      );
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setSearchResults(data.results);
