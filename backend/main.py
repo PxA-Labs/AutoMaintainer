@@ -285,7 +285,8 @@ async def healthz():
 
 @app.get("/healthz/supabase")
 async def healthz_supabase():
-    from agents import supabase
+    from agents import supabase, SUPABASE_URL
+    from urllib.parse import urlparse
 
     if not supabase:
         raise HTTPException(
@@ -299,9 +300,11 @@ async def healthz_supabase():
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         logger.error(f"Supabase connection check failed: {e}", exc_info=True)
+        parsed = urlparse(SUPABASE_URL or "")
+        safe_host = parsed.netloc or parsed.path or "unknown"
         raise HTTPException(
             status_code=503,
-            detail=f"Supabase connection failed: {e}",
+            detail=f"Supabase connection failed ({e}) [target_host='{safe_host}']",
         )
 
 
