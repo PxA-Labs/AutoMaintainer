@@ -8,7 +8,8 @@ import {
   BarChart3, Server, GitBranch, Terminal, Settings
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { useAuth, AuthProvider } from '@/lib/auth';
+import { useAuth } from '@/lib/auth';
+import { getBackendUrl } from '@/lib/config';
 
 interface AdminMetrics {
   orgs: {
@@ -78,21 +79,7 @@ function AdminDashboard() {
       setLoading(true);
       setError(null);
       
-      const backendUrl = (() => {
-        if (process.env.NEXT_PUBLIC_BACKEND_URL) {
-          return process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "");
-        }
-        if (typeof window !== "undefined") {
-          const port = window.location.port;
-          const hostname = window.location.hostname;
-          if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") && port !== "8000") {
-            const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
-            return `${window.location.protocol}//${formattedHost}:8000`;
-          }
-          return `${window.location.protocol}//${window.location.host}`;
-        }
-        return "http://localhost:8000";
-      })();
+      const backendUrl = getBackendUrl();
 
       const res = await fetch(`${backendUrl}/admin/metrics`, {
         headers: { "Authorization": `Bearer ${session.access_token}` }
@@ -837,9 +824,5 @@ function AlertItem({ severity, message, time }: {
 }
 
 export default function AdminPage() {
-  return (
-    <AuthProvider>
-      <AdminDashboard />
-    </AuthProvider>
-  );
+  return <AdminDashboard />;
 }
