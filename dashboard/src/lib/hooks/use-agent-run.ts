@@ -29,7 +29,15 @@ export interface LogEntry {
   color: string;
 }
 
-export function useAgentRun(onLog: (entry: LogEntry) => void) {
+interface UseAgentRunOptions {
+  onRequireAuth?: () => void;
+  onStart?: () => void;
+}
+
+export function useAgentRun(
+  onLog: (entry: LogEntry) => void,
+  options?: UseAgentRunOptions
+) {
   const { user, session } = useAuth();
   const [isRunning, setIsRunning] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -55,7 +63,11 @@ export function useAgentRun(onLog: (entry: LogEntry) => void) {
   }, []);
 
   const startStop = useCallback(async () => {
-    if (!user) return;
+    if (!user) {
+      log("Please sign in with GitHub to start an agent run.", "text-amber-400");
+      options?.onRequireAuth?.();
+      return;
+    }
 
     if (!isRunning) {
       if (
@@ -81,6 +93,7 @@ export function useAgentRun(onLog: (entry: LogEntry) => void) {
         return;
       }
 
+      options?.onStart?.();
       setIsRunning(true);
       log(`Triggering AI Agent Loop for ${repoUrl}...`, "text-zinc-500");
 
@@ -152,7 +165,7 @@ export function useAgentRun(onLog: (entry: LogEntry) => void) {
         console.error("Failed to stop agents:", err);
       }
     }
-  }, [isRunning, repoUrl, targetIssue, activeRunId, user, session, log]);
+  }, [isRunning, repoUrl, targetIssue, activeRunId, user, session, log, options]);
 
   const state: AgentRunState = {
     isRunning,

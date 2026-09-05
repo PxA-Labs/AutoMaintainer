@@ -32,9 +32,15 @@ export function DashboardShell() {
   const addLogRef = useRef<(entry: LogEntry) => void>(() => {});
 
   // Agent run controller hook
-  const { state: runState, actions: runActions } = useAgentRun((entry) => {
-    addLogRef.current(entry);
-  });
+  const { state: runState, actions: runActions } = useAgentRun(
+    (entry) => {
+      addLogRef.current(entry);
+    },
+    {
+      onRequireAuth: () => setSkipAuth(false),
+      onStart: () => setSelectedRunId(null),
+    }
+  );
 
   const effectiveRunId = selectedRunId || runState.activeRunId;
 
