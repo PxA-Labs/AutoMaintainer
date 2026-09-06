@@ -19,6 +19,7 @@ import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from supabase import create_client, Client
+import operator
 
 # Rate limiting
 from rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
@@ -127,9 +128,6 @@ def get_all_groq_keys():
         if k:
             keys.append(k)
     return keys
-
-
-import operator
 
 
 class AgentState(TypedDict):
