@@ -1219,7 +1219,7 @@ elif os.path.exists("dashboard/out"):  # In docker container
 async def get_admin_metrics(
     org_id: str = Depends(get_org_id), user_id: str = Depends(get_user_id)
 ):
-    """Get system-wide metrics for admin dashboard."""
+    """Get metrics for the caller's organization admin dashboard."""
     from agents import supabase as agents_supabase
 
     sb = agents_supabase
@@ -1250,13 +1250,14 @@ async def get_admin_metrics(
     try:
         # Org health overview
         org_health = await asyncio.to_thread(
-            lambda: sb.table("org_health").select("*").execute()
+            lambda: sb.table("org_health").select("*").eq("org_id", org_id).execute()
         )
 
         # Recent runs
         recent_runs = await asyncio.to_thread(
             lambda: sb.table("recent_runs_detailed")
             .select("*")
+            .eq("org_id", org_id)
             .order("created_at", desc=True)
             .limit(100)
             .execute()
@@ -1266,6 +1267,7 @@ async def get_admin_metrics(
         usage_summary = await asyncio.to_thread(
             lambda: sb.table("monthly_usage_summary")
             .select("*")
+            .eq("org_id", org_id)
             .gte(
                 "month",
                 (datetime.utcnow().replace(day=1) - timedelta(days=30)).isoformat(),
@@ -1337,6 +1339,7 @@ async def get_admin_metrics(
                 "active": active_orgs,
                 "byPlan": plan_dist,
             },
+            "organizations": orgs,
             "runs": {
                 "total": total_runs,
                 "running": running_runs,
@@ -1356,9 +1359,9 @@ async def get_admin_metrics(
                 "public": 0,
             },
             "system": {
-                "supabaseHealthy": True,  # Would check actual health
-                "activeConnections": 0,
-                "queueDepth": 0,
+                "supabaseHealthy": True,
+                "activeConnections": None,
+                "queueDepth": None,
             },
         }
     except Exception as e:
