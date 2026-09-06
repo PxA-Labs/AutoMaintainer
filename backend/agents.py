@@ -418,11 +418,37 @@ async def architect_node(state: AgentState):
                 cmd.extend(["-c", f"http.extraheader={auth_header}"])
             cmd.extend([safe_repo_url, repo_dir])
             clone_proc = await asyncio.create_subprocess_exec(
-                *cmd, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
-            await clone_proc.communicate()
+            stdout, stderr = await clone_proc.communicate()
+            if clone_proc.returncode != 0:
+                err_msg = f"git clone failed (exit code {clone_proc.returncode}): {stderr.decode('utf-8', errors='replace').strip()}"
+                print(f"Failed to clone repo {safe_repo_url}: {err_msg}")
+                new_logs.append(
+                    {
+                        "agent": "Architect",
+                        "msg": f"Failed to clone repository: {err_msg}",
+                        "color": "text-red-500",
+                    }
+                )
+                run_id = current_run_id.get(None)
+                if run_id:
+                    await broadcast_log(
+                        {
+                            "agent": "Architect",
+                            "msg": f"Failed to clone repository: {err_msg}",
+                            "color": "text-red-500",
+                        }
+                    )
+                raise RuntimeError(err_msg)
+        except RuntimeError:
+            raise
         except Exception as e:
             print(f"Failed to clone repo {safe_repo_url}: {e}")
+            raise
     else:
         try:
             cmd = ["git"]
