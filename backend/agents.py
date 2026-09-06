@@ -374,13 +374,17 @@ async def architect_node(state: AgentState):
                 "log_messages": new_logs,
             }  # ARCHITECT EARLY RETURN
         except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "Architect",
-                    "msg": f"Failed to fetch issue #{target_issue}: {str(e)}",
-                    "color": "text-red-500",
-                }
-            )
+            err_log = {
+                "agent": "Architect",
+                "msg": f"Failed to fetch issue #{target_issue}: {e}",
+                "color": "text-red-500",
+            }
+            idle_ui = {"type": "ui_update", "agentStatus": {"Architect": "idle"}}
+            await broadcast_log(err_log)
+            await broadcast_log(idle_ui)
+            raise ValueError(
+                f"Architect failed to fetch target issue #{target_issue}: {e}"
+            ) from e
 
     if gh:
         try:

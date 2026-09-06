@@ -293,3 +293,54 @@ async def test_start_and_stop_concurrency(monkeypatch):
         res_stop_again = await client.post("/stop-legacy", json={"run_id": run_id})
         assert res_stop_again.status_code == 200
         assert res_stop_again.json()["status"] == "not_running"
+
+
+@pytest.mark.asyncio
+async def test_architect_node_target_issue_fetch_failure(monkeypatch):
+    import agents
+
+    mock_gh = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.get_issue.side_effect = Exception("API rate limit exceeded")
+    mock_gh.get_repo.return_value = mock_repo
+
+    monkeypatch.setattr(agents, "gh", mock_gh)
+
+    broadcasted_logs = []
+
+    async def mock_broadcast_log(msg):
+        broadcasted_logs.append(msg)
+
+    monkeypatch.setattr(agents, "broadcast_log", mock_broadcast_log)
+
+    state = {
+        "repo_name": "PxA-Labs/AutoMaintainer",
+        "target_issue": 142,
+        "architect_directive": "",
+        "log_messages": [],
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        await agents.architect_node(state)
+
+    assert (
+        "Architect failed to fetch target issue #142: API rate limit exceeded"
+        in str(exc_info.value)
+    )
+
+    error_logs = [
+        msg
+        for msg in broadcasted_logs
+        if msg.get("agent") == "Architect"
+        and "Failed to fetch issue #142: API rate limit exceeded" in msg.get("msg", "")
+    ]
+    assert len(error_logs) == 1
+    assert error_logs[0]["color"] == "text-red-500"
+
+    idle_updates = [
+        msg
+        for msg in broadcasted_logs
+        if msg.get("type") == "ui_update"
+        and msg.get("agentStatus", {}).get("Architect") == "idle"
+    ]
+    assert len(idle_updates) == 1
