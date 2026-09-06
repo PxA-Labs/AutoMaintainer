@@ -6,6 +6,7 @@ from fastapi import (
     HTTPException,
     Depends,
     Header,
+    Request,
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ from datetime import datetime, timedelta
 # Celery integration
 from celery_app import celery_app
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
+from github_app import handle_github_webhook
 
 # Observability
 from observability import (
@@ -275,6 +277,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request):
+    """Receive and persist signed GitHub App webhook deliveries."""
+    from agents import supabase as agents_supabase
+
+    if not os.getenv("GITHUB_WEBHOOK_SECRET"):
+        raise HTTPException(
+            status_code=503, detail="GitHub webhook secret is not configured"
+        )
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    raw_body = await request.body()
+    try:
+        return await handle_github_webhook(
+            raw_body,
+            dict(request.headers),
+            agents_supabase,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("GitHub webhook processing failed")
+        raise HTTPException(status_code=500, detail="Failed to queue GitHub webhook")
 
 
 @app.get("/healthz")
