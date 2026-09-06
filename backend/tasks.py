@@ -49,11 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Supabase client for tasks (service role)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = (
-    os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")
-    or os.getenv("SUPABASE_KEY")
-)
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 task_supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
@@ -66,15 +62,16 @@ def get_supabase() -> Client:
     if task_supabase:
         return task_supabase
     url = os.getenv("SUPABASE_URL")
-    key = (
-        os.getenv("SUPABASE_SERVICE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
-        or os.getenv("SUPABASE_KEY")
-    )
-    if url and key:
-        task_supabase = create_client(url, key)
-        return task_supabase
-    raise RuntimeError("No Supabase client available")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url:
+        raise RuntimeError("SUPABASE_URL is required for worker persistence")
+    if not key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_KEY is required for worker persistence; "
+            "anonymous keys are not supported"
+        )
+    task_supabase = create_client(url, key)
+    return task_supabase
 
 
 async def update_run_status(run_id: str, status: str, **kwargs) -> None:
