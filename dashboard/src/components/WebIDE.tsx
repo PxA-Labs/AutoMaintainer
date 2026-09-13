@@ -528,11 +528,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const monacoRef = useRef<MonacoInstance | null>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const previewDecorationsRef = useRef<string[]>([]);
+  const activeTabRef = useRef<string | null>(activeTab);
   const [inlineAssist, setInlineAssist] = useState<{
     isOpen: boolean;
+    filePath: string;
     selectionContext: SelectionContext;
     position: { top: number; left: number };
   } | null>(null);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   const clearPreviewDecorations = () => {
     if (editorRef.current && previewDecorationsRef.current.length > 0) {
@@ -576,13 +582,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const triggerInlineAssist = (editorInstance?: MonacoEditorInstance, monacoInstance?: MonacoInstance) => {
     const editor = editorInstance || editorRef.current;
     const monaco = monacoInstance || monacoRef.current;
-    if (!editor || !monaco || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editor || !monaco || !currentTab) return;
 
     clearPreviewDecorations();
 
-    const selection = editor.getSelection();
     const model = editor.getModel();
     if (!model) return;
+
+    const selection = editor.getSelection();
 
     const startLine = selection ? selection.startLineNumber : 1;
     const endLine = selection ? selection.endLineNumber : startLine;
@@ -621,6 +629,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     setInlineAssist({
       isOpen: true,
+      filePath: currentTab,
       selectionContext: {
         startLine,
         startColumn,
@@ -638,6 +647,12 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     editorRef.current = editor as unknown as MonacoEditorInstance;
     monacoRef.current = monaco as unknown as MonacoInstance;
 
+    editor.onDidDispose(() => {
+      clearPreviewDecorations();
+      editorRef.current = null;
+      monacoRef.current = null;
+    });
+
     // Register Cmd+K / Ctrl+K keybinding in Monaco
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
       triggerInlineAssist(editor as unknown as MonacoEditorInstance, monaco as unknown as MonacoInstance);
@@ -645,13 +660,25 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   };
 
   const handleAcceptInlineAssist = (replacementCode: string) => {
-    if (!editorRef.current || !monacoRef.current || !inlineAssist || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editorRef.current || !monacoRef.current || !inlineAssist || !currentTab) return;
+
+    if (inlineAssist.filePath !== currentTab) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
     const editor = editorRef.current;
     const monaco = monacoRef.current;
-    const { selectionContext } = inlineAssist;
+    const model = editor.getModel();
+    if (!model) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
-    clearPreviewDecorations();
+    const { selectionContext } = inlineAssist;
 
     const range = new monaco.Range(
       selectionContext.startLine,
@@ -659,6 +686,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       selectionContext.endLine,
       selectionContext.endColumn
     );
+
+    const currentSelectedCode = model.getValueInRange(range);
+    if (currentSelectedCode !== selectionContext.selectedCode) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
+
+    clearPreviewDecorations();
 
     editor.executeEdits("inline-assist", [
       {
@@ -669,7 +705,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     ]);
 
     const updatedValue = editor.getValue();
-    handleContentChange(activeTab, updatedValue);
+    handleContentChange(currentTab, updatedValue);
     setInlineAssist(null);
   };
 
@@ -688,7 +724,23 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   useEffect(() => {
     let active = true;
+
     const loadTree = async () => {
+      if (active) {
+        setLoadingTree(true);
+        setError(null);
+        setTree(null);
+        setOpenTabs([]);
+        setActiveTab(null);
+        setFileContents({});
+        setEditedContents({});
+        setOriginalContents({});
+        setStagedChanges([]);
+        setSearchQuery("");
+        setSearchResults([]);
+        clearPreviewDecorations();
+        setInlineAssist(null);
+      }
       try {
         const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
         if (!res.ok) throw new Error("Repository not found or API error");
