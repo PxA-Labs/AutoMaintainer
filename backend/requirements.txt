@@ -35,3 +35,5 @@ opentelemetry-exporter-prometheus
 pytest
 pytest-asyncio
 pytest-mock
+pytest-cov
+
