@@ -135,6 +135,7 @@ jobs:
       uses: codecov/codecov-action@13ce06bfc6bcdbe86e84b50f097bd047b710c9c2 # v4.4.0
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./backend/coverage.xml
         flags: unittests
         name: codecov-umbrella
