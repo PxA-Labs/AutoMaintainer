@@ -124,7 +124,7 @@ jobs:
         pytest -v --cov=. --cov-report=xml:coverage.xml --cov-report=term
 
     - name: Upload coverage report artifact
-      uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
@@ -132,7 +132,7 @@ jobs:
         retention-days: 14
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@13ce06bfc6bcdbe86e84b50f097bd047b710c9c2 # v4.4.0
+      uses: codecov/codecov-action@v4
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
