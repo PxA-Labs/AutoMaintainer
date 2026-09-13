@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
@@ -9,6 +8,23 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useAuth, AuthProvider } from '@/lib/auth';
+import ErrorBoundary from "@/components/ErrorBoundary";
+
+type AdminTab = 'overview' | 'orgs' | 'runs' | 'usage' | 'system';
+
+interface AdminRunRecord {
+  id: string;
+  org_id?: string;
+  repo_name: string;
+  mode: string;
+  status: string;
+  current_agent?: string;
+  iteration?: number;
+  max_iterations?: number;
+  created_at: string;
+  completed_at?: string;
+  started_at?: string;
+}
 
 interface AdminMetrics {
   orgs: {
@@ -213,7 +229,7 @@ function AdminDashboard() {
           ].map((tab) => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
+              onClick={() => setActiveTab(tab.id as AdminTab)}
               className={`w-full flex items-center gap-3 p-3 rounded-lg transition-all text-sm ${
                 activeTab === tab.id 
                   ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' 
@@ -496,7 +512,7 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
 }
 
 function RunsTable() {
-  const [runs, setRuns] = useState<any[]>([]);
+  const [runs, setRuns] = useState<AdminRunRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const { session } = useAuth();
 
@@ -838,8 +854,10 @@ function AlertItem({ severity, message, time }: {
 
 export default function AdminPage() {
   return (
-    <AuthProvider>
-      <AdminDashboard />
-    </AuthProvider>
+    <ErrorBoundary title="Admin Dashboard Error">
+      <AuthProvider>
+        <AdminDashboard />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

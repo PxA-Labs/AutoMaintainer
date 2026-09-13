@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
@@ -163,7 +162,7 @@ export default function InlineAssist({
             const dataStr = trimmed.slice(6);
             if (dataStr === "[DONE]") break;
 
-            let parsed: any;
+            let parsed: { error?: string; content?: string };
             try {
               parsed = JSON.parse(dataStr);
             } catch {
@@ -192,12 +191,14 @@ export default function InlineAssist({
         setSuggestion(finalCode);
         onUpdatePreview?.(finalCode);
       }
-    } catch (err: any) {
-      if (err.name === "AbortError" || controller.signal.aborted) {
+    } catch (err: unknown) {
+      const isAbort = (err as { name?: string })?.name === "AbortError" || controller.signal.aborted;
+      if (isAbort) {
         // Silently ignore aborts
         return;
       }
-      setError(err.message || "Failed to generate inline edit");
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage || "Failed to generate inline edit");
       onUpdatePreview?.(null);
     } finally {
       if (abortControllerRef.current === controller) {

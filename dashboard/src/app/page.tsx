@@ -1,15 +1,64 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { BrainCircuit, GitPullRequest, Search, FileCode, CheckCircle, Activity, GitBranch, Settings, Terminal, Play, Square, Code, LogIn, LogOut, User, ChevronDown, Loader2 } from "lucide-react";
+import { BrainCircuit, GitPullRequest, Search, FileCode, CheckCircle, Activity, GitBranch, Settings, Terminal, Code, LogIn, LogOut, User, ChevronDown, Loader2 } from "lucide-react";
 import { motion } from "framer-motion";
 import WebIDE from "../components/WebIDE";
 import dynamic from 'next/dynamic';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, User as SupabaseUser } from '@supabase/supabase-js';
 import { AuthProvider, useAuth } from '@/lib/auth';
+import ErrorBoundary from '@/components/ErrorBoundary';
+
+interface PipelineItem {
+  id: string;
+  title: string;
+  status: string;
+}
+
+interface ActivityItem {
+  time?: string;
+  title: string;
+}
+
+interface AgentStatusMap {
+  Architect: string;
+  Visionary: string;
+  Reviewer: string;
+  Implementer: string;
+  Maintainer: string;
+  [key: string]: string;
+}
+
+interface DashboardRunItem {
+  id: string;
+  status: string;
+  repo_name: string;
+  created_at: string;
+  error_message?: string;
+  result_summary?: string;
+}
+
+interface LogEntry {
+  time: string;
+  agent: string;
+  msg: string;
+  color: string;
+}
+
+interface LogRow {
+  id?: string;
+  log_type?: string;
+  metadata?: {
+    systemHealth?: { latency?: number; tokensUsed?: number };
+    agentStatus?: AgentStatusMap;
+    pipeline?: PipelineItem;
+    activity?: ActivityItem;
+  };
+  created_at?: string;
+  agent_name?: string;
+  message?: string;
+  color?: string;
+}
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
@@ -76,7 +125,7 @@ function LinkRow({ icon, label }: { icon: React.ReactNode; label: string }) {
 }
 
 // User dropdown component
-function UserMenu({ user, onSignOut }: { user: any; onSignOut: () => void }) {
+function UserMenu({ user, onSignOut }: { user: SupabaseUser | null; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   
   return (
@@ -141,9 +190,9 @@ function DashboardContent() {
     { time: "00:00:00", agent: "System", msg: "Connecting to backend...", color: "text-zinc-500" }
   ]);
   const [systemHealth, setSystemHealth] = useState({ latency: 0, tokensUsed: 0 });
-  const [pipeline, setPipeline] = useState<any[]>([]);
-  const [activity, setActivity] = useState<any[]>([]);
-  const [agentStatus, setAgentStatus] = useState<any>({
+  const [pipeline, setPipeline] = useState<PipelineItem[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [agentStatus, setAgentStatus] = useState<AgentStatusMap>({
     Architect: 'idle',
     Visionary: 'idle',
     Reviewer: 'idle',
@@ -151,7 +200,7 @@ function DashboardContent() {
     Maintainer: 'idle',
   });
   const [isSupabaseUnreachable, setIsSupabaseUnreachable] = useState(false);
-  const [runs, setRuns] = useState<any[]>([]);
+  const [runs, setRuns] = useState<DashboardRunItem[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
 
   const handleStartStop = useCallback(async () => {
@@ -245,12 +294,12 @@ function DashboardContent() {
     });
 
     let isReplaying = true;
-    const realtimeBuffer: any[] = [];
+    const realtimeBuffer: LogRow[] = [];
     const processedLogIds = new Set<string>();
 
     const processLogRow = (
-      row: any,
-      accumulator?: { historyLogs: any[]; historyTokens: number; lastLatency: number | null }
+      row: LogRow,
+      accumulator?: { historyLogs: LogEntry[]; historyTokens: number; lastLatency: number | null }
     ) => {
       if (!isMounted) return;
       if (row.id && processedLogIds.has(row.id)) return;
@@ -266,23 +315,27 @@ function DashboardContent() {
             }
           } else {
             setSystemHealth((prev) => ({
-              latency: msgData.systemHealth.latency ?? prev.latency,
-              tokensUsed: prev.tokensUsed + (msgData.systemHealth.tokensUsed || 0)
+              latency: msgData.systemHealth?.latency ?? prev.latency,
+              tokensUsed: prev.tokensUsed + (msgData.systemHealth?.tokensUsed || 0)
             }));
           }
         }
-        if (msgData.agentStatus) setAgentStatus((prev: any) => ({ ...prev, ...msgData.agentStatus }));
+        if (msgData.agentStatus) setAgentStatus((prev) => ({ ...prev, ...msgData.agentStatus }));
         if (msgData.pipeline) {
+          const item = msgData.pipeline;
           setPipeline((prev) => {
-            const exists = prev.find((p) => p.id === msgData.pipeline.id);
-            if (exists) return prev.map((p) => (p.id === msgData.pipeline.id ? msgData.pipeline : p));
-            return [msgData.pipeline, ...prev];
+            const exists = prev.find((p) => p.id === item.id);
+            if (exists) return prev.map((p) => (p.id === item.id ? item : p));
+            return [item, ...prev];
           });
         }
-        if (msgData.activity) setActivity((prev) => [msgData.activity, ...prev]);
+        if (msgData.activity) {
+          const item = msgData.activity;
+          setActivity((prev) => [item, ...prev]);
+        }
       } else {
         const date = new Date(row.created_at || Date.now());
-        const logEntry = {
+        const logEntry: LogEntry = {
           time: date.toLocaleTimeString(),
           agent: row.agent_name || "System",
           msg: row.message || "",
@@ -323,12 +376,12 @@ function DashboardContent() {
 
         if (data && data.length > 0) {
           const accumulator = {
-            historyLogs: [] as any[],
+            historyLogs: [] as LogEntry[],
             historyTokens: 0,
             lastLatency: null as number | null
           };
 
-          data.forEach((row: any) => {
+          data.forEach((row: LogRow) => {
             processLogRow(row, accumulator);
           });
 
@@ -376,7 +429,7 @@ function DashboardContent() {
         { event: 'INSERT', schema: 'public', table: 'logs', filter: `run_id=eq.${activeRunId}` },
         (payload) => {
           if (!isMounted) return;
-          const row = payload.new as any;
+          const row = payload.new as LogRow;
           if (isReplaying) {
             realtimeBuffer.push(row);
           } else {
@@ -432,8 +485,8 @@ function DashboardContent() {
         } else {
           setIsSupabaseUnreachable(false);
         }
-      } catch (err: any) {
-        if (err.name !== "AbortError") {
+      } catch (err: unknown) {
+        if ((err as { name?: string })?.name !== "AbortError") {
           console.error("Failed to check Supabase health:", err);
           setIsSupabaseUnreachable(true);
         }
@@ -628,13 +681,13 @@ function DashboardContent() {
        
         {/* Top Header */}
         <header className="h-16 border-b border-zinc-800/50 flex items-center justify-between px-8 backdrop-blur-sm">
-          <div className="flex items-center gap-3 text-sm text-zinc-400">
+          <button onClick={handleStartStop} className="flex items-center gap-3 text-sm text-zinc-400 hover:text-white transition-colors cursor-pointer">
             <span className="flex h-2 w-2 relative">
               <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${isRunning ? 'bg-emerald-400' : 'bg-red-400'}`}></span>
               <span className={`relative inline-flex rounded-full h-2 w-2 ${isRunning ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
             </span>
-            {isRunning ? 'System Active • Monitoring Repository' : 'System Halted'}
-          </div>
+            {isRunning ? 'System Active • Monitoring Repository (Click to Stop)' : 'System Halted (Click to Start)'}
+          </button>
           <div className="flex items-center gap-4">
             <div className="text-xs font-mono text-zinc-500 bg-zinc-900/50 px-3 py-1.5 rounded-md border border-zinc-800/50">
               Model: Llama-3-70b (Cloud)
@@ -756,7 +809,7 @@ function DashboardContent() {
                   </h3>
                   <div className="space-y-2">
                     {pipeline.length > 0 ? (
-                      pipeline.map((p: any) => (
+                      pipeline.map((p: PipelineItem) => (
                         <div key={p.id} className="flex items-center gap-2 p-2 bg-zinc-800/50 rounded">
                           <span className="text-xs font-mono text-zinc-400">{p.id}</span>
                           <span className="text-xs text-zinc-300 truncate flex-1">{p.title}</span>
@@ -786,7 +839,7 @@ function DashboardContent() {
                   </h3>
                   <div className="space-y-2 max-h-64 overflow-y-auto">
                     {activity.length > 0 ? (
-                      activity.slice(0, 10).map((a: any, i: number) => (
+                      activity.slice(0, 10).map((a: ActivityItem, i: number) => (
                         <div key={i} className="flex items-start gap-2 p-2 bg-zinc-800/50 rounded">
                           <span className="text-[10px] text-zinc-500 shrink-0 mt-0.5">{a.time || 'now'}</span>
                           <span className="text-xs text-zinc-300">{a.title}</span>
@@ -894,11 +947,13 @@ function DashboardContent() {
     );
 }
 
-// Export the main component wrapped with AuthProvider
+// Export the main component wrapped with AuthProvider and ErrorBoundary
 export default function Home() {
   return (
-    <AuthProvider>
-      <DashboardContent />
-    </AuthProvider>
+    <ErrorBoundary title="Dashboard Error">
+      <AuthProvider>
+        <DashboardContent />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
