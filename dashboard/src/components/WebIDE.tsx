@@ -1,18 +1,41 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
-import React, { useState, useEffect, useRef, FormEvent } from "react";
+import React, { useState, useEffect, useRef, useCallback, FormEvent } from "react";
 import { 
   ChevronRight, ChevronDown, File as FileIcon, FolderOpen, Folder, 
-  Save, Search, X, Plus, Trash2, FilePlus, FolderPlus, Sparkles,
-  GitPullRequest, GitBranch, Diff, CheckCircle, AlertCircle,
-  ArrowUpRight, RefreshCw, Copy, ExternalLink
+  Save, Search, X, Trash2, FilePlus, FolderPlus, Sparkles,
+  GitPullRequest, GitBranch, Diff, CheckCircle,
+  ArrowUpRight, RefreshCw, ExternalLink
 } from "lucide-react";
 import { motion } from "framer-motion";
-import Editor from "@monaco-editor/react";
+import Editor, { OnMount } from "@monaco-editor/react";
 import InlineAssist, { SelectionContext } from "./InlineAssist";
+
+interface MonacoRange {
+  new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
+}
+
+interface MonacoEditorInstance {
+  getValue: () => string;
+  getSelection: () => { startLineNumber: number; endLineNumber: number; startColumn: number; endColumn: number } | null;
+  getModel: () => {
+    getValueInRange: (range: unknown) => string;
+    getLineContent: (line: number) => string;
+    getLineCount: () => number;
+    getLineMaxColumn: (line: number) => number;
+  } | null;
+  executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers: boolean }>) => void;
+  deltaDecorations: (oldDecorations: string[], newDecorations: unknown[]) => string[];
+  getPosition: () => { lineNumber: number; column: number } | null;
+  getScrolledVisiblePosition: (pos: unknown) => { top: number; left: number } | null;
+  addCommand: (keybinding: number, handler: () => void) => void;
+}
+
+interface MonacoInstance {
+  Range: MonacoRange;
+  KeyMod: { CtrlCmd: number };
+  KeyCode: { KeyK: number };
+}
 
 interface TreeNode {
   name: string;
@@ -501,15 +524,21 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const [originalContents, setOriginalContents] = useState<Record<string, string>>({});
 
   // Monaco & Inline Assist State
-  const editorRef = useRef<any>(null);
-  const monacoRef = useRef<any>(null);
+  const editorRef = useRef<MonacoEditorInstance | null>(null);
+  const monacoRef = useRef<MonacoInstance | null>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
   const previewDecorationsRef = useRef<string[]>([]);
+  const activeTabRef = useRef<string | null>(activeTab);
   const [inlineAssist, setInlineAssist] = useState<{
     isOpen: boolean;
+    filePath: string;
     selectionContext: SelectionContext;
     position: { top: number; left: number };
   } | null>(null);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   const clearPreviewDecorations = () => {
     if (editorRef.current && previewDecorationsRef.current.length > 0) {
@@ -550,16 +579,18 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     previewDecorationsRef.current = editor.deltaDecorations(previewDecorationsRef.current, decorations);
   };
 
-  const triggerInlineAssist = (editorInstance?: any, monacoInstance?: any) => {
+  const triggerInlineAssist = (editorInstance?: MonacoEditorInstance, monacoInstance?: MonacoInstance) => {
     const editor = editorInstance || editorRef.current;
     const monaco = monacoInstance || monacoRef.current;
-    if (!editor || !monaco || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editor || !monaco || !currentTab) return;
 
     clearPreviewDecorations();
 
-    const selection = editor.getSelection();
     const model = editor.getModel();
     if (!model) return;
+
+    const selection = editor.getSelection();
 
     const startLine = selection ? selection.startLineNumber : 1;
     const endLine = selection ? selection.endLineNumber : startLine;
@@ -598,6 +629,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     setInlineAssist({
       isOpen: true,
+      filePath: currentTab,
       selectionContext: {
         startLine,
         startColumn,
@@ -611,24 +643,42 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     });
   };
 
-  const handleEditorMount = (editor: any, monaco: any) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
+  const handleEditorMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor as unknown as MonacoEditorInstance;
+    monacoRef.current = monaco as unknown as MonacoInstance;
+
+    editor.onDidDispose(() => {
+      clearPreviewDecorations();
+      editorRef.current = null;
+      monacoRef.current = null;
+    });
 
     // Register Cmd+K / Ctrl+K keybinding in Monaco
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
-      triggerInlineAssist(editor, monaco);
+      triggerInlineAssist(editor as unknown as MonacoEditorInstance, monaco as unknown as MonacoInstance);
     });
   };
 
   const handleAcceptInlineAssist = (replacementCode: string) => {
-    if (!editorRef.current || !monacoRef.current || !inlineAssist || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editorRef.current || !monacoRef.current || !inlineAssist || !currentTab) return;
+
+    if (inlineAssist.filePath !== currentTab) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
     const editor = editorRef.current;
     const monaco = monacoRef.current;
-    const { selectionContext } = inlineAssist;
+    const model = editor.getModel();
+    if (!model) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
-    clearPreviewDecorations();
+    const { selectionContext } = inlineAssist;
 
     const range = new monaco.Range(
       selectionContext.startLine,
@@ -636,6 +686,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       selectionContext.endLine,
       selectionContext.endColumn
     );
+
+    const currentSelectedCode = model.getValueInRange(range);
+    if (currentSelectedCode !== selectionContext.selectedCode) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
+
+    clearPreviewDecorations();
 
     editor.executeEdits("inline-assist", [
       {
@@ -646,26 +705,57 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     ]);
 
     const updatedValue = editor.getValue();
-    handleContentChange(activeTab, updatedValue);
+    handleContentChange(currentTab, updatedValue);
     setInlineAssist(null);
   };
 
-  const fetchTree = async () => {
+  const fetchTree = useCallback(async () => {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
       setTree(data);
-    } catch (err: any) {
-      setError(err.message || "Failed to fetch repository tree");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
     } finally {
       setLoadingTree(false);
     }
-  };
+  }, [repoUrl]);
 
   useEffect(() => {
-    setLoadingTree(true);
-    fetchTree();
+    let active = true;
+
+    const loadTree = async () => {
+      if (active) {
+        setLoadingTree(true);
+        setError(null);
+        setTree(null);
+        setOpenTabs([]);
+        setActiveTab(null);
+        setFileContents({});
+        setEditedContents({});
+        setOriginalContents({});
+        setStagedChanges([]);
+        setSearchQuery("");
+        setSearchResults([]);
+        clearPreviewDecorations();
+        setInlineAssist(null);
+      }
+      try {
+        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+        if (!res.ok) throw new Error("Repository not found or API error");
+        const data = await res.json();
+        if (active) setTree(data);
+      } catch (err: unknown) {
+        if (active) setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
+      } finally {
+        if (active) setLoadingTree(false);
+      }
+    };
+    loadTree();
+    return () => {
+      active = false;
+    };
   }, [repoUrl]);
 
   const clearInlineAssistState = () => {
@@ -695,16 +785,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         setEditedContents(prev => ({...prev, [path]: data.content}));
         // Store original for diff
         setOriginalContents(prev => ({...prev, [path]: data.content}));
-      } catch (err: any) {
-        setFileContents(prev => ({...prev, [path]: `// Error: ${err.message}`}));
-        setEditedContents(prev => ({...prev, [path]: `// Error: ${err.message}`}));
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setFileContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
+        setEditedContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
       } finally {
         setLoadingFiles(prev => ({...prev, [path]: false}));
       }
     }
   };
 
-  const closeTab = (e: React.MouseEvent, path: string) => {
+  const closeTab = (e: React.MouseEvent | { stopPropagation: () => void }, path: string) => {
     e.stopPropagation();
     clearInlineAssistState();
     const newTabs = openTabs.filter(t => t !== path);
@@ -720,7 +811,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     setOriginalContents(prev => { const n = {...prev}; delete n[path]; return n; });
   };
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!activeTab || editedContents[activeTab] === undefined) return;
     const content = editedContents[activeTab];
     if (content === fileContents[activeTab]) return;
@@ -739,12 +830,13 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       
       // Remove from staged changes since it's now saved to main
       setStagedChanges(prev => prev.filter(c => c.path !== activeTab));
-    } catch (err: any) {
-      alert("Failed to save file: " + err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert("Failed to save file: " + msg);
     } finally {
       setIsSaving(false);
     }
-  };
+  }, [activeTab, editedContents, fileContents, repoUrl]);
 
   const handleContentChange = (path: string, newContent: string) => {
     setEditedContents(prev => ({...prev, [path]: newContent}));
@@ -787,8 +879,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       if (!res.ok) throw new Error("Failed to create");
       await fetchTree();
       if (!isDir) openFile(newPath);
-    } catch (err: any) {
-      alert("Failed to create: " + err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert("Failed to create: " + msg);
     }
   };
 
@@ -799,7 +892,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         method: "DELETE"
       });
       if (!res.ok) throw new Error("Failed to delete");
-      if (openTabs.includes(path)) closeTab({ stopPropagation: () => {} } as any, path);
+      if (openTabs.includes(path)) closeTab({ stopPropagation: () => {} }, path);
       
       // Track as deleted in staged changes
       const original = originalContents[path] || "";
@@ -822,8 +915,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       }
       
       await fetchTree();
-    } catch (err: any) {
-      alert("Failed to delete: " + err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert("Failed to delete: " + msg);
     }
   };
 
@@ -836,8 +930,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setSearchResults(data.results);
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(msg);
     } finally {
       setIsSearching(false);
     }
@@ -896,8 +991,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       setActiveTab(null);
       await fetchTree();
       
-    } catch (err: any) {
-      alert("Failed to propose changes: " + err.message);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert("Failed to propose changes: " + msg);
     } finally {
       setProposing(false);
     }
@@ -912,7 +1008,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeTab, editedContents]);
+  }, [handleSave]);
 
   const getLanguage = (filename: string) => {
     const ext = filename.split(".").pop()?.toLowerCase();
@@ -932,10 +1028,12 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   return (
     <div className="flex h-full w-full bg-[#1e1e1e] border-l border-zinc-800 font-sans shadow-2xl overflow-hidden relative">
       {/* Proposed Changes Panel */}
-      <ProposedChangesPanel 
-        changes={proposedChanges} 
-        onClose={() => setShowProposedPanel(false)} 
-      />
+      {showProposedPanel && (
+        <ProposedChangesPanel
+          changes={proposedChanges}
+          onClose={() => setShowProposedPanel(false)}
+        />
+      )}
       
       {/* Propose Changes Modal */}
       <ProposeChangesModal
