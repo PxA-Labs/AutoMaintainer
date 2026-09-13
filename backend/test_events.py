@@ -465,6 +465,30 @@ async def test_composite_emitter_child_failure_isolation():
     mock_emitter_ok.emit.assert_awaited_once_with(event)
 
 
+def test_parse_event_unknown_type_rejection():
+    with pytest.raises(ValueError, match="Unknown or unregistered event type"):
+        parse_event({"event_type": "CompletelyUnknownEvent", "run_id": "123"})
+
+
+@pytest.mark.asyncio
+async def test_composite_emitter_child_timeout():
+    mock_emitter_slow = AsyncMock(spec=EventEmitter)
+
+    async def slow_emit(event: BaseEvent):
+        await asyncio.sleep(5.0)
+
+    mock_emitter_slow.emit.side_effect = slow_emit
+    mock_emitter_fast = AsyncMock(spec=EventEmitter)
+
+    composite = CompositeEmitter(
+        [mock_emitter_slow, mock_emitter_fast], child_timeout=0.1
+    )
+    event = TelemetryEvent(run_id="run-123", latency_ms=10.0)
+
+    await composite.emit(event)
+    mock_emitter_fast.emit.assert_awaited_once_with(event)
+
+
 # ============================================================================
 # 12. Agent Layer Event Decoupling Tests
 # ============================================================================

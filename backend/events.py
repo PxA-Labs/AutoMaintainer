@@ -122,7 +122,9 @@ def parse_event(data: Union[Dict[str, Any], str]) -> BaseEvent:
         data = json.loads(data)
 
     event_type = data.get("event_type", "BaseEvent")
-    model_cls = EVENT_REGISTRY.get(event_type, BaseEvent)
+    if event_type not in EVENT_REGISTRY:
+        raise ValueError(f"Unknown or unregistered event type: '{event_type}'")
+    model_cls = EVENT_REGISTRY[event_type]
     return model_cls.model_validate(data)
 
 
@@ -273,17 +275,28 @@ class CompositeEmitter(EventEmitter):
     Ensures that slow or failing emitters do not block other sinks or the main loop.
     """
 
-    def __init__(self, emitters: Optional[List[EventEmitter]] = None):
+    def __init__(
+        self,
+        emitters: Optional[List[EventEmitter]] = None,
+        child_timeout: Optional[float] = 10.0,
+    ):
         self.emitters = list(emitters) if emitters is not None else []
+        self.child_timeout = child_timeout
 
     def add_emitter(self, emitter: EventEmitter) -> None:
         self.emitters.append(emitter)
+
+    async def _emit_child(self, emitter: EventEmitter, event: BaseEvent) -> None:
+        if self.child_timeout is not None:
+            await asyncio.wait_for(emitter.emit(event), timeout=self.child_timeout)
+        else:
+            await emitter.emit(event)
 
     async def emit(self, event: BaseEvent) -> None:
         if not self.emitters:
             return
         results = await asyncio.gather(
-            *(emitter.emit(event) for emitter in self.emitters),
+            *(self._emit_child(emitter, event) for emitter in self.emitters),
             return_exceptions=True,
         )
         for r in results:
