@@ -259,9 +259,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 
 # Allow the Next.js frontend to connect to this API
+cors_origins_env = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000",
+)
+allowed_origins = [
+    origin.strip() for origin in cors_origins_env.split(",") if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins if allowed_origins else ["*"],
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"^https:\/\/.*\.vercel\.app$"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -276,12 +285,13 @@ async def healthz():
 
 @app.get("/healthz/supabase")
 async def healthz_supabase():
-    from agents import supabase
+    from agents import supabase, SUPABASE_URL
+    from urllib.parse import urlparse
 
     if not supabase:
         raise HTTPException(
             status_code=503,
-            detail="Supabase is not configured. Please check environment variables.",
+            detail="Supabase is not configured. Please check SUPABASE_URL and SUPABASE_SERVICE_KEY environment variables.",
         )
     try:
         await asyncio.to_thread(
@@ -290,9 +300,11 @@ async def healthz_supabase():
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         logger.error(f"Supabase connection check failed: {e}", exc_info=True)
+        parsed = urlparse(SUPABASE_URL or "")
+        safe_host = parsed.netloc or parsed.path or "unknown"
         raise HTTPException(
             status_code=503,
-            detail="Supabase connection failed (database may be paused or unreachable)",
+            detail=f"Supabase connection failed ({e}) [target_host='{safe_host}']",
         )
 
 

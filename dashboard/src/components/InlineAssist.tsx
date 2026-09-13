@@ -219,7 +219,7 @@ export default function InlineAssist({
 
   return (
     <div
-      className="absolute z-50 w-[520px] bg-[#1e1e1e] border border-indigo-500/40 rounded-xl shadow-2xl overflow-hidden font-sans text-zinc-100 backdrop-blur-md transition-all"
+      className="absolute z-50 w-[520px] bg-[#1e1e2e] border border-indigo-500/40 rounded-xl shadow-2xl overflow-hidden font-sans text-zinc-100 backdrop-blur-md transition-all"
       style={{
         top: Math.max(10, Math.min(position.top, window.innerHeight - 380)),
         left: Math.max(20, Math.min(position.left, window.innerWidth - 560)),

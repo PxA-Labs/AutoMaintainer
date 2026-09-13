@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { createClient } from '@supabase/supabase-js';
+import { sanitizeSupabaseUrl } from './supabase';
 
 /**
  * Service role client for admin/server operations.
@@ -19,7 +20,9 @@ export const createServiceClient = () => {
     );
   }
 
-  return createClient(supabaseUrl, serviceKey, {
+  const cleanUrl = sanitizeSupabaseUrl(supabaseUrl);
+
+  return createClient(cleanUrl, serviceKey.trim().replace(/^['"]+|['"]+$/g, ''), {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
