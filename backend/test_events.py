@@ -3,6 +3,7 @@ Unit tests for strongly-typed domain events and EventEmitter implementations.
 Part of Epic #157 (GitHub Issue #185).
 """
 
+import asyncio
 from datetime import datetime
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
