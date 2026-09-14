@@ -1,3 +1,4 @@
+import operator
 import os
 import logging
 from dotenv import load_dotenv
@@ -127,9 +128,6 @@ def get_all_groq_keys():
         if k:
             keys.append(k)
     return keys
-
-
-import operator
 
 
 class AgentState(TypedDict):
