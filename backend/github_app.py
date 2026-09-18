@@ -6,6 +6,8 @@ Replaces PAT-based authentication with GitHub App installation tokens.
 import os
 import time
 import json
+import asyncio
+from datetime import datetime, timezone
 import jwt
 import httpx
 from typing import Optional, Dict, Any
@@ -144,29 +146,31 @@ async def sync_installation_repositories(
             continue
 
         try:
-            await supabase_client.table("repositories").upsert(
-                {
-                    "id": repo_data["id"],
-                    "org_id": org_id,
-                    "github_installation_id": installation_id,
-                    "full_name": repo_data["full_name"],
-                    "name": repo_data["name"],
-                    "owner_login": repo_data["owner_login"],
-                    "owner_type": repo_data["owner_type"],
-                    "private": repo_data["private"],
-                    "default_branch": repo_data["default_branch"],
-                    "description": repo_data["description"],
-                    "language": repo_data["language"],
-                    "topics": repo_data["topics"],
-                    "avatar_url": repo_data["avatar_url"],
-                    "html_url": repo_data["html_url"],
-                    "archived": repo_data["archived"],
-                    "disabled": repo_data["disabled"],
-                    "pushed_at": repo_data["pushed_at"],
-                    "synced_at": time.time(),
-                },
-                on_conflict="id",
-            ).execute()
+            repository_record = {
+                "id": repo_data["id"],
+                "org_id": org_id,
+                "github_installation_id": installation_id,
+                "full_name": repo_data["full_name"],
+                "name": repo_data["name"],
+                "owner_login": repo_data["owner_login"],
+                "owner_type": repo_data["owner_type"],
+                "private": repo_data["private"],
+                "default_branch": repo_data["default_branch"],
+                "description": repo_data["description"],
+                "language": repo_data["language"],
+                "topics": repo_data["topics"],
+                "avatar_url": repo_data["avatar_url"],
+                "html_url": repo_data["html_url"],
+                "archived": repo_data["archived"],
+                "disabled": repo_data["disabled"],
+                "pushed_at": repo_data["pushed_at"],
+                "synced_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await asyncio.to_thread(
+                lambda: supabase_client.table("repositories")
+                .upsert(repository_record, on_conflict="id")
+                .execute()
+            )
             synced += 1
         except Exception as e:
             logger.error(f"Failed to sync repo {repo_data['full_name']}: {e}")

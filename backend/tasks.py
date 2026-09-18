@@ -44,6 +44,7 @@ except ImportError:
 from supabase import create_client, Client
 
 from agents import run_agent_loop, broadcast_log
+from github_app import sync_installation_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -428,24 +429,51 @@ def sync_repositories(self):
         result = loop.run_until_complete(
             asyncio.to_thread(
                 lambda: sb.table("github_installations")
-                .select("id, org_id, account_login, access_token")
+                .select("id, org_id, account_login")
                 .is_("suspended_at", "null")
                 .execute()
             )
         )
 
         installations = result.data or []
-        synced_count = 0
+        repositories_synced = 0
+        errors = []
 
         for install in installations:
-            # This would use GitHub App token to fetch repos
-            # Implementation depends on GitHub App integration (next task)
-            logger.info(
-                f"Would sync repos for installation {install['id']} ({install['account_login']})"
-            )
-            synced_count += 1
+            installation_id = install["id"]
+            account_login = install["account_login"]
+            try:
+                synced = loop.run_until_complete(
+                    sync_installation_repositories(
+                        sb, installation_id, install["org_id"]
+                    )
+                )
+                repositories_synced += synced
+                logger.info(
+                    "Synced %s repositories for installation %s (%s)",
+                    synced,
+                    installation_id,
+                    account_login,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to sync installation %s (%s)",
+                    installation_id,
+                    account_login,
+                )
+                errors.append(
+                    {
+                        "installation_id": installation_id,
+                        "account_login": account_login,
+                        "error": str(exc),
+                    }
+                )
 
-        return {"installations_processed": synced_count}
+        return {
+            "installations_processed": len(installations),
+            "repositories_synced": repositories_synced,
+            "errors": errors,
+        }
 
     except Exception as e:
         logger.exception(f"Sync repositories failed: {e}")
