@@ -10,7 +10,7 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def setup_dummy_repo():
-    repo_name = f"PxA-Labs/AutoMaintainerTestSandbox-{uuid.uuid4().hex[:8]}"
+    repo_name = f"PxA-Labs/AutoMaintainerTestSandbox-{uuid.uuid4().hex}"
     repo_dir = get_safe_repo_dir(repo_name)
 
     if repo_dir.exists():
