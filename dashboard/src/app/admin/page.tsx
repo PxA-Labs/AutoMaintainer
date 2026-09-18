@@ -4,12 +4,26 @@
 import { useState, useEffect, useCallback } from "react";
 import { 
   Users, Database, Activity, DollarSign, TrendingUp, AlertCircle, 
-  CheckCircle, XCircle, Clock, RefreshCw, Loader2, 
+  Clock, RefreshCw, Loader2,
   BarChart3, Server, GitBranch, Terminal, Settings
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useAuth } from '@/lib/auth';
 import { getBackendUrl } from '@/lib/config';
+
+interface OrganizationMetric {
+  org_id: string;
+  org_name: string;
+  slug: string;
+  plan: string;
+  member_count: number;
+  repo_count: number;
+  active_runs: number;
+  runs_24h: number;
+  failed_24h: number;
+  estimated_cost_30d_usd: number;
+  last_run_at: string | null;
+}
 
 interface AdminMetrics {
   orgs: {
@@ -17,6 +31,7 @@ interface AdminMetrics {
     active: number;
     byPlan: Record<string, number>;
   };
+  organizations: OrganizationMetric[];
   runs: {
     total: number;
     running: number;
@@ -33,13 +48,13 @@ interface AdminMetrics {
   };
   repos: {
     total: number;
-    private: number;
-    public: number;
+    private: number | null;
+    public: number | null;
   };
   system: {
-    supabaseHealthy: boolean;
-    activeConnections: number;
-    queueDepth: number;
+    supabaseHealthy: boolean | null;
+    activeConnections: number | null;
+    queueDepth: number | null;
   };
 }
 
@@ -237,11 +252,11 @@ function AdminDashboard() {
             <div className="flex items-center gap-4 text-sm text-zinc-500">
               <span className="flex items-center gap-1">
                 <span className={`w-2 h-2 rounded-full ${metrics.system.supabaseHealthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                Supabase: {metrics.system.supabaseHealthy ? 'Healthy' : 'Unhealthy'}
+                Supabase: {metrics.system.supabaseHealthy === null ? 'Unknown' : metrics.system.supabaseHealthy ? 'Healthy' : 'Unhealthy'}
               </span>
               <span className="flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5" />
-                Queue: {metrics.system.queueDepth}
+                Queue: {metrics.system.queueDepth === null ? 'Unknown' : metrics.system.queueDepth}
               </span>
             </div>
           </div>
@@ -282,7 +297,7 @@ function AdminDashboard() {
                 value={metrics.repos.total} 
                 icon={GitBranch} 
                 color="blue"
-                subtitle={`${metrics.repos.private} private`}
+                subtitle={`${metrics.repos.private === null ? 'Visibility data unavailable' : `${metrics.repos.private} private`}`}
               />
               <MetricCard 
                 title="Est. Cost (30d)" 
@@ -442,40 +457,43 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
-              {/* Mock data - would come from API */}
-              <tr className="hover:bg-zinc-800/30">
-                <td className="px-4 py-3">
-                  <div className="font-mono text-zinc-200">acme-corp</div>
-                  <div className="text-xs text-zinc-500">acme-corp</div>
-                </td>
-                <td className="px-4 py-3">
-                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-indigo-500/20 text-indigo-400">team</span>
-                </td>
-                <td className="px-4 py-3 text-zinc-300">12</td>
-                <td className="px-4 py-3 text-zinc-300">47</td>
-                <td className="px-4 py-3 text-zinc-300">23</td>
-                <td className="px-4 py-3 font-mono text-zinc-300">$47.32</td>
-                <td className="px-4 py-3 text-xs text-zinc-500">2 min ago</td>
-              </tr>
-              <tr className="hover:bg-zinc-800/30">
-                <td className="px-4 py-3">
-                  <div className="font-mono text-zinc-200">personal-dev</div>
-                  <div className="text-xs text-zinc-500">john@example.com</div>
-                </td>
-                <td className="px-4 py-3">
-                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-emerald-500/20 text-emerald-400">free</span>
-                </td>
-                <td className="px-4 py-3 text-zinc-300">1</td>
-                <td className="px-4 py-3 text-zinc-300">3</td>
-                <td className="px-4 py-3 text-zinc-300">5</td>
-                <td className="px-4 py-3 font-mono text-zinc-300">$0.00</td>
-                <td className="px-4 py-3 text-xs text-zinc-500">1 hour ago</td>
-              </tr>
+              {metrics.organizations.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
+                    No organization metrics are available.
+                  </td>
+                </tr>
+              ) : (
+                metrics.organizations.map((organization) => (
+                  <tr key={organization.org_id} className="hover:bg-zinc-800/30">
+                    <td className="px-4 py-3">
+                      <div className="font-mono text-zinc-200">{organization.org_name}</div>
+                      <div className="text-xs text-zinc-500">{organization.slug}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="px-2 py-0.5 rounded text-xs font-medium bg-indigo-500/20 text-indigo-400">
+                        {organization.plan}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-300">{organization.member_count}</td>
+                    <td className="px-4 py-3 text-zinc-300">{organization.repo_count}</td>
+                    <td className="px-4 py-3 text-zinc-300">{organization.runs_24h}</td>
+                    <td className="px-4 py-3 font-mono text-zinc-300">
+                      ${Number(organization.estimated_cost_30d_usd || 0).toFixed(2)}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-zinc-500">
+                      {organization.last_run_at
+                        ? new Date(organization.last_run_at).toLocaleString()
+                        : "No runs"}
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
         <div className="px-5 py-4 border-t border-zinc-800/50 text-xs text-zinc-500">
-          Showing 2 of {metrics.orgs.total} organizations. Connect to admin API for full data.
+          Showing {metrics.organizations.length} organization{metrics.organizations.length === 1 ? "" : "s"} in your organization scope.
         </div>
       </div>
     </div>
@@ -646,35 +664,35 @@ function SystemHealth({ metrics }: { metrics: AdminMetrics }) {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <HealthCard 
           title="Supabase Database" 
-          status={metrics.system.supabaseHealthy ? 'healthy' : 'unhealthy'}
+          status={metrics.system.supabaseHealthy === null ? 'unknown' : metrics.system.supabaseHealthy ? 'healthy' : 'unhealthy'}
           icon={Database}
           checks={[
-            { label: 'Connection', status: metrics.system.supabaseHealthy ? 'ok' : 'fail' },
-            { label: 'Realtime', status: metrics.system.supabaseHealthy ? 'ok' : 'fail' },
-            { label: 'RLS Policies', status: 'ok' },
-            { label: 'Migrations', status: 'ok' },
+            { label: 'Connection', status: metrics.system.supabaseHealthy === null ? 'unknown' : metrics.system.supabaseHealthy ? 'ok' : 'fail' },
+            { label: 'Realtime', status: 'unknown' },
+            { label: 'RLS Policies', status: 'unknown' },
+            { label: 'Migrations', status: 'unknown' },
           ]}
         />
         <HealthCard 
           title="Redis / Celery" 
-          status="healthy"
+          status="unknown"
           icon={Terminal}
           checks={[
-            { label: 'Redis Connection', status: 'ok' },
-            { label: 'Worker Count', status: 'ok', detail: '3 workers' },
-            { label: 'Queue Depth', status: metrics.system.queueDepth > 100 ? 'warn' : 'ok', detail: `${metrics.system.queueDepth} jobs` },
-            { label: 'Beat Scheduler', status: 'ok' },
+            { label: 'Redis Connection', status: 'unknown' },
+            { label: 'Worker Count', status: 'unknown' },
+            { label: 'Queue Depth', status: metrics.system.queueDepth === null ? 'unknown' : metrics.system.queueDepth > 100 ? 'warn' : 'ok', detail: metrics.system.queueDepth === null ? 'Not reported' : `${metrics.system.queueDepth} jobs` },
+            { label: 'Beat Scheduler', status: 'unknown' },
           ]}
         />
         <HealthCard 
           title="GitHub Integration" 
-          status="healthy"
+          status="unknown"
           icon={GitBranch}
           checks={[
-            { label: 'App Installation', status: 'ok' },
-            { label: 'Webhook Delivery', status: 'ok' },
-            { label: 'Token Refresh', status: 'ok' },
-            { label: 'API Rate Limit', status: 'ok', detail: '4,850/5,000' },
+            { label: 'App Installation', status: 'unknown' },
+            { label: 'Webhook Delivery', status: 'unknown' },
+            { label: 'Token Refresh', status: 'unknown' },
+            { label: 'API Rate Limit', status: 'unknown' },
           ]}
         />
       </div>
@@ -682,35 +700,16 @@ function SystemHealth({ metrics }: { metrics: AdminMetrics }) {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="System Resources" icon={Server}>
           <div className="space-y-4">
-            <ResourceBar label="CPU Usage" value={34} warning={80} critical={95} />
-            <ResourceBar label="Memory Usage" value={67} warning={80} critical={95} />
-            <ResourceBar label="Disk Usage" value={23} warning={80} critical={95} />
-            <ResourceBar label="Network I/O" value={12} warning={80} critical={95} />
+            <ResourceBar label="CPU Usage" value={null} warning={80} critical={95} />
+            <ResourceBar label="Memory Usage" value={null} warning={80} critical={95} />
+            <ResourceBar label="Disk Usage" value={null} warning={80} critical={95} />
+            <ResourceBar label="Network I/O" value={null} warning={80} critical={95} />
           </div>
         </ChartCard>
 
         <ChartCard title="Recent Alerts" icon={AlertCircle}>
           <div className="space-y-2">
-            <AlertItem 
-              severity="warning" 
-              message="High queue depth detected on agent_runs queue" 
-              time="5 min ago" 
-            />
-            <AlertItem 
-              severity="info" 
-              message="New organization registered: startup-io" 
-              time="12 min ago" 
-            />
-            <AlertItem 
-              severity="success" 
-              message="Celery worker autoscaled to 5 instances" 
-              time="1 hour ago" 
-            />
-            <AlertItem 
-              severity="error" 
-              message="Supabase connection timeout (recovered)" 
-              time="3 hours ago" 
-            />
+            <p className="text-sm text-zinc-500">No live alert feed is configured for this dashboard.</p>
           </div>
         </ChartCard>
       </div>
@@ -720,14 +719,15 @@ function SystemHealth({ metrics }: { metrics: AdminMetrics }) {
 
 function HealthCard({ title, status, icon: Icon, checks }: { 
   title: string; 
-  status: 'healthy' | 'degraded' | 'unhealthy';
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
   icon: React.ComponentType<{ className?: string }>;
-  checks: Array<{ label: string; status: 'ok' | 'warn' | 'fail'; detail?: string }>;
+  checks: Array<{ label: string; status: 'ok' | 'warn' | 'fail' | 'unknown'; detail?: string }>;
 }) {
   const statusStyles = {
     healthy: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/20',
     degraded: 'bg-amber-500/20 text-amber-400 border-amber-500/20',
     unhealthy: 'bg-red-500/20 text-red-400 border-red-500/20',
+    unknown: 'bg-zinc-500/20 text-zinc-400 border-zinc-500/20',
   };
 
   return (
@@ -753,6 +753,7 @@ function HealthCard({ title, status, icon: Icon, checks }: {
               <span className={`w-2 h-2 rounded-full ${
                 check.status === 'ok' ? 'bg-emerald-400' :
                 check.status === 'warn' ? 'bg-amber-400' :
+                check.status === 'unknown' ? 'bg-zinc-500' :
                 'bg-red-400'
               }`} />
               {check.detail && <span className="text-xs text-zinc-500">{check.detail}</span>}
@@ -766,58 +767,23 @@ function HealthCard({ title, status, icon: Icon, checks }: {
 
 function ResourceBar({ label, value, warning, critical }: { 
   label: string; 
-  value: number; 
+  value: number | null;
   warning: number; 
   critical: number;
 }) {
-  const color = value >= critical ? 'bg-red-500' : value >= warning ? 'bg-amber-500' : 'bg-emerald-500';
+  const color = value === null ? 'bg-zinc-600' : value >= critical ? 'bg-red-500' : value >= warning ? 'bg-amber-500' : 'bg-emerald-500';
   
   return (
     <div className="space-y-1">
       <div className="flex justify-between text-xs">
         <span className="text-zinc-400">{label}</span>
-        <span className="font-mono text-zinc-200">{value}%</span>
+        <span className="font-mono text-zinc-200">{value === null ? 'Unknown' : `${value}%`}</span>
       </div>
       <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
         <div 
           className={`h-full ${color} transition-all`}
-          style={{ width: `${value}%` }}
+          style={{ width: `${value ?? 0}%` }}
         />
-      </div>
-    </div>
-  );
-}
-
-function AlertItem({ severity, message, time }: { 
-  severity: 'info' | 'warning' | 'error' | 'success';
-  message: string; 
-  time: string;
-}) {
-  const severityStyles = {
-    info: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-    warning: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-    error: 'bg-red-500/10 text-red-400 border-red-500/20',
-    success: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-  };
-
-  const icons = {
-    info: <CheckCircle className="w-4 h-4" />,
-    warning: <AlertCircle className="w-4 h-4" />,
-    error: <XCircle className="w-4 h-4" />,
-    success: <CheckCircle className="w-4 h-4" />,
-  };
-
-  return (
-    <div className={`p-3 rounded-lg border ${severityStyles[severity]}`}>
-      <div className="flex items-start gap-3">
-        <div className="flex-shrink-0 mt-0.5">{icons[severity]}</div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium">{message}</p>
-          <p className="text-xs text-zinc-500 mt-0.5">{time}</p>
-        </div>
-        <span className={`px-2 py-0.5 rounded text-[10px] font-medium uppercase ${severityStyles[severity]}`}>
-          {severity}
-        </span>
       </div>
     </div>
   );
