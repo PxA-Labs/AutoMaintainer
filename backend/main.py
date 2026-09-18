@@ -521,10 +521,10 @@ async def stop_agents(
         # Cancel specific run
         run_id = req.run_id
 
-        # Verify ownership
+        # Verify ownership before touching anything
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, status, celery_task_id")
+            .select("id, status, org_id")
             .eq("id", run_id)
             .eq("org_id", org_id)
             .single()
@@ -534,34 +534,23 @@ async def stop_agents(
         if not result.data:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        run = result.data
-
-        if run["status"] not in ("queued", "running"):
+        if result.data["status"] not in ("queued", "running"):
             return {
                 "status": "not_running",
                 "run_id": run_id,
-                "current_status": run["status"],
+                "current_status": result.data["status"],
             }
 
-        # Revoke Celery task
-        celery_task_id = run.get("celery_task_id")
-        if celery_task_id:
-            celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
-
-        # Update status
-        await asyncio.to_thread(
-            lambda: sb.table("runs")
-            .update(
-                {
-                    "status": "cancelled",
-                    "error_message": "Cancelled by user",
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
+        # Delegate to cancel_run_task -- it revokes the Celery task,
+        # updates status to 'cancelled', AND releases the repo lock.
+        # Calling the task function directly (not .delay()) runs it
+        # synchronously here since it's just DB reads/writes plus a
+        # control.revoke() call, not agent work.
+        outcome = await asyncio.to_thread(cancel_run_task, run_id)
+        if not outcome.get("success"):
+            raise HTTPException(
+                status_code=500, detail=outcome.get("error", "Cancellation failed")
             )
-            .eq("id", run_id)
-            .execute()
-        )
 
         return {"status": "cancelled", "run_id": run_id}
 
@@ -569,7 +558,7 @@ async def stop_agents(
         # Cancel all running runs for org
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, celery_task_id")
+            .select("id")
             .eq("org_id", org_id)
             .in_("status", ["queued", "running"])
             .execute()
@@ -579,26 +568,14 @@ async def stop_agents(
         cancelled_count = 0
 
         for run in runs:
-            celery_task_id = run.get("celery_task_id")
-            if celery_task_id:
-                celery_app.control.revoke(
-                    celery_task_id, terminate=True, signal="SIGTERM"
+            outcome = await asyncio.to_thread(cancel_run_task, run["id"])
+            if outcome.get("success"):
+                cancelled_count += 1
+            else:
+                logger.warning(
+                    f"Failed to cancel run {run['id']} during bulk stop: "
+                    f"{outcome.get('error')}"
                 )
-
-            await asyncio.to_thread(
-                lambda r=run: sb.table("runs")
-                .update(
-                    {
-                        "status": "cancelled",
-                        "error_message": "Cancelled by user (bulk)",
-                        "completed_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", r["id"])
-                .execute()
-            )
-            cancelled_count += 1
 
         return {"status": "cancelled", "count": cancelled_count}
 
