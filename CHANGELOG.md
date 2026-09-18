@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- Add signed GitHub webhook ingestion ([#216](https://github.com/PxA-Labs/AutoMaintainer/pull/216)) (closes [#215](https://github.com/PxA-Labs/AutoMaintainer/issues/215)) - @SriRamkunamsetty
 - **dashboard**: Handle selectedRunId reset on new run and guest auth prompt on start ([#247](https://github.com/PxA-Labs/AutoMaintainer/pull/247)) - @purvanshjoshi
 - **backend**: Include target host diagnostic in healthz_supabase error response ([#244](https://github.com/PxA-Labs/AutoMaintainer/pull/244)) - @purvanshjoshi
  & System Stability
@@ -139,6 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
 
 ---
 
