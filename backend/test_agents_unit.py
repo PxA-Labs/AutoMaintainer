@@ -165,6 +165,16 @@ async def test_broadcast_log_no_supabase():
     await broadcast_log({"msg": "Test fallback logging", "type": "message"})
 
 
+def test_healthz_is_independent_of_supabase():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    response = TestClient(app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
+
+
 def test_healthz_supabase_not_configured(monkeypatch):
     import agents
 
