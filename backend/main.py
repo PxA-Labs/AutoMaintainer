@@ -6,6 +6,7 @@ from fastapi import (
     HTTPException,
     Depends,
     Header,
+    Request,
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -33,6 +34,7 @@ from datetime import datetime, timedelta
 # Celery integration
 from celery_app import celery_app
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
+from github_app import handle_github_webhook
 
 # Observability
 from observability import (
@@ -275,6 +277,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request):
+    """Receive and persist signed GitHub App webhook deliveries."""
+    from agents import supabase as agents_supabase
+
+    if not os.getenv("GITHUB_WEBHOOK_SECRET"):
+        raise HTTPException(
+            status_code=503, detail="GitHub webhook secret is not configured"
+        )
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    raw_body = await request.body()
+    try:
+        return await handle_github_webhook(
+            raw_body,
+            dict(request.headers),
+            agents_supabase,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("GitHub webhook processing failed")
+        raise HTTPException(status_code=500, detail="Failed to queue GitHub webhook")
 
 
 @app.get("/healthz")
@@ -521,10 +549,10 @@ async def stop_agents(
         # Cancel specific run
         run_id = req.run_id
 
-        # Verify ownership
+        # Verify ownership before touching anything
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, status, celery_task_id")
+            .select("id, status, org_id")
             .eq("id", run_id)
             .eq("org_id", org_id)
             .single()
@@ -534,34 +562,23 @@ async def stop_agents(
         if not result.data:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        run = result.data
-
-        if run["status"] not in ("queued", "running"):
+        if result.data["status"] not in ("queued", "running"):
             return {
                 "status": "not_running",
                 "run_id": run_id,
-                "current_status": run["status"],
+                "current_status": result.data["status"],
             }
 
-        # Revoke Celery task
-        celery_task_id = run.get("celery_task_id")
-        if celery_task_id:
-            celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
-
-        # Update status
-        await asyncio.to_thread(
-            lambda: sb.table("runs")
-            .update(
-                {
-                    "status": "cancelled",
-                    "error_message": "Cancelled by user",
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
+        # Delegate to cancel_run_task -- it revokes the Celery task,
+        # updates status to 'cancelled', AND releases the repo lock.
+        # Calling the task function directly (not .delay()) runs it
+        # synchronously here since it's just DB reads/writes plus a
+        # control.revoke() call, not agent work.
+        outcome = await asyncio.to_thread(cancel_run_task, run_id)
+        if not outcome.get("success"):
+            raise HTTPException(
+                status_code=500, detail=outcome.get("error", "Cancellation failed")
             )
-            .eq("id", run_id)
-            .execute()
-        )
 
         return {"status": "cancelled", "run_id": run_id}
 
@@ -569,7 +586,7 @@ async def stop_agents(
         # Cancel all running runs for org
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, celery_task_id")
+            .select("id")
             .eq("org_id", org_id)
             .in_("status", ["queued", "running"])
             .execute()
@@ -579,26 +596,14 @@ async def stop_agents(
         cancelled_count = 0
 
         for run in runs:
-            celery_task_id = run.get("celery_task_id")
-            if celery_task_id:
-                celery_app.control.revoke(
-                    celery_task_id, terminate=True, signal="SIGTERM"
+            outcome = await asyncio.to_thread(cancel_run_task, run["id"])
+            if outcome.get("success"):
+                cancelled_count += 1
+            else:
+                logger.warning(
+                    f"Failed to cancel run {run['id']} during bulk stop: "
+                    f"{outcome.get('error')}"
                 )
-
-            await asyncio.to_thread(
-                lambda r=run: sb.table("runs")
-                .update(
-                    {
-                        "status": "cancelled",
-                        "error_message": "Cancelled by user (bulk)",
-                        "completed_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", r["id"])
-                .execute()
-            )
-            cancelled_count += 1
 
         return {"status": "cancelled", "count": cancelled_count}
 
@@ -1222,7 +1227,7 @@ elif os.path.exists("dashboard/out"):  # In docker container
 async def get_admin_metrics(
     org_id: str = Depends(get_org_id), user_id: str = Depends(get_user_id)
 ):
-    """Get system-wide metrics for admin dashboard."""
+    """Get metrics for the caller's organization admin dashboard."""
     from agents import supabase as agents_supabase
 
     sb = agents_supabase
@@ -1253,13 +1258,14 @@ async def get_admin_metrics(
     try:
         # Org health overview
         org_health = await asyncio.to_thread(
-            lambda: sb.table("org_health").select("*").execute()
+            lambda: sb.table("org_health").select("*").eq("org_id", org_id).execute()
         )
 
         # Recent runs
         recent_runs = await asyncio.to_thread(
             lambda: sb.table("recent_runs_detailed")
             .select("*")
+            .eq("org_id", org_id)
             .order("created_at", desc=True)
             .limit(100)
             .execute()
@@ -1269,6 +1275,7 @@ async def get_admin_metrics(
         usage_summary = await asyncio.to_thread(
             lambda: sb.table("monthly_usage_summary")
             .select("*")
+            .eq("org_id", org_id)
             .gte(
                 "month",
                 (datetime.utcnow().replace(day=1) - timedelta(days=30)).isoformat(),
@@ -1340,6 +1347,7 @@ async def get_admin_metrics(
                 "active": active_orgs,
                 "byPlan": plan_dist,
             },
+            "organizations": orgs,
             "runs": {
                 "total": total_runs,
                 "running": running_runs,
@@ -1359,9 +1367,9 @@ async def get_admin_metrics(
                 "public": 0,
             },
             "system": {
-                "supabaseHealthy": True,  # Would check actual health
-                "activeConnections": 0,
-                "queueDepth": 0,
+                "supabaseHealthy": True,
+                "activeConnections": None,
+                "queueDepth": None,
             },
         }
     except Exception as e:

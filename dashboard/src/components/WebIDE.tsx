@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, FormEvent } from "react";
-import { 
-  ChevronRight, ChevronDown, File as FileIcon, FolderOpen, Folder, 
+import {
+  ChevronRight, ChevronDown, File as FileIcon, FolderOpen, Folder,
   Save, Search, X, Trash2, FilePlus, FolderPlus, Sparkles,
   GitPullRequest, GitBranch, Diff, CheckCircle,
   ArrowUpRight, RefreshCw, ExternalLink
@@ -10,6 +10,77 @@ import {
 import { motion } from "framer-motion";
 import Editor, { OnMount } from "@monaco-editor/react";
 import InlineAssist, { SelectionContext } from "./InlineAssist";
+interface MonacoRange {
+  new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
+}
+
+interface MonacoEditorInstance {
+  getValue: () => string;
+  getSelection: () => { startLineNumber: number; endLineNumber: number; startColumn: number; endColumn: number } | null;
+  getModel: () => {
+    getValueInRange: (range: unknown) => string;
+    getLineContent: (line: number) => string;
+    getLineCount: () => number;
+    getLineMaxColumn: (line: number) => number;
+  } | null;
+  executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers: boolean }>) => void;
+  deltaDecorations: (oldDecorations: string[], newDecorations: unknown[]) => string[];
+  getPosition: () => { lineNumber: number; column: number } | null;
+  getScrolledVisiblePosition: (pos: unknown) => { top: number; left: number } | null;
+  addCommand: (keybinding: number, handler: () => void) => void;
+}
+
+interface MonacoInstance {
+  Range: MonacoRange;
+  KeyMod: { CtrlCmd: number };
+  KeyCode: { KeyK: number; KeyS: number; KeyW: number };
+  Uri: { parse: (uri: string) => unknown };
+  editor: {
+    getModel: (uri: unknown) => { dispose: () => void } | null;
+    getModels?: () => Array<{ dispose: () => void }>;
+  };
+}
+
+export function getLanguageFromPath(path: string | null): string {
+  if (!path) return "plaintext";
+  const filename = path.split("/").pop() || "";
+  const lowerName = filename.toLowerCase();
+
+  if (lowerName === "dockerfile" || lowerName.endsWith(".dockerfile") || lowerName.startsWith("dockerfile.")) {
+    return "dockerfile";
+  }
+
+  const ext = lowerName.includes(".") ? lowerName.split(".").pop() || "" : "";
+
+  const languageMap: Record<string, string> = {
+    py: "python",
+    ts: "typescript",
+    tsx: "typescript",
+    js: "javascript",
+    jsx: "javascript",
+    json: "json",
+    md: "markdown",
+    yaml: "yaml",
+    yml: "yaml",
+    html: "html",
+    css: "css",
+    sh: "shell",
+    bash: "shell",
+    sql: "sql",
+    go: "go",
+    rs: "rust",
+    cpp: "cpp",
+    c: "c",
+    h: "cpp",
+    hpp: "cpp",
+    java: "java",
+    xml: "xml",
+    graphql: "graphql",
+    gql: "graphql",
+  };
+
+  return languageMap[ext] || "plaintext";
+}
 
 interface MonacoRange {
   new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
@@ -89,11 +160,10 @@ const FileTreeNode = ({
   level?: number;
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
   const isDir = node.type === "directory";
   const isActive = activePath === node.path;
 
-  const handleToggle = (e: React.MouseEvent) => {
+  const handleToggle = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation();
     if (isDir) {
       setIsOpen(!isOpen);
@@ -106,9 +176,9 @@ const FileTreeNode = ({
     <div>
       <div
         onClick={handleToggle}
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-        className={`flex items-center justify-between w-full text-left py-1 px-2 cursor-pointer select-none text-sm font-sans transition-colors group ${
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggle(e); } }}
+        tabIndex={0}
+        className={`flex items-center justify-between w-full text-left py-1 px-2 cursor-pointer select-none text-sm font-sans transition-colors group focus:outline-none focus:bg-[#2a2d2e] ${
           isActive ? "bg-[#37373d] text-white" : "text-[#cccccc] hover:bg-[#2a2d2e] hover:text-white"
         }`}
         style={{ paddingLeft: `${level * 12 + 8}px` }}
@@ -128,37 +198,38 @@ const FileTreeNode = ({
           </span>
           <span className="truncate">{node.name}</span>
         </div>
-       
-        {/* Action Icons (Visible on Hover) */}
-        {isHovered && (
-          <div className="flex items-center gap-1 shrink-0 bg-transparent px-1">
-            {isDir && (
-              <>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); onCreate(node.path, false); }}
-                  className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-white"
-                  title="New File"
-                >
-                  <FilePlus className="w-3.5 h-3.5" />
-                </button>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); onCreate(node.path, true); }}
-                  className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-white"
-                  title="New Folder"
-                >
-                  <FolderPlus className="w-3.5 h-3.5" />
-                </button>
-              </>
-            )}
-            <button 
-              onClick={(e) => { e.stopPropagation(); onDelete(node.path); }}
-              className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-red-400"
-              title="Delete"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
+
+        {/* Action Icons (Accessible) */}
+        <div className="flex items-center gap-1 shrink-0 bg-transparent px-1 opacity-0 group-hover:opacity-100 group-focus:opacity-100 focus-within:opacity-100 transition-opacity">
+          {isDir && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); onCreate(node.path, false); }}
+                className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                title="New File"
+                aria-label={`New file in ${node.name}`}
+              >
+                <FilePlus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onCreate(node.path, true); }}
+                className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                title="New Folder"
+                aria-label={`New folder in ${node.name}`}
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(node.path); }}
+            className="p-0.5 hover:bg-[#4d4d4d] rounded text-zinc-400 hover:text-red-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            title="Delete"
+            aria-label={`Delete ${node.name}`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
       {isDir && isOpen && node.children && (
         <div>
@@ -200,11 +271,11 @@ function generateDiff(oldContent: string, newContent: string): string {
   const newLines = newContent.split('\n');
   const maxLen = Math.max(oldLines.length, newLines.length);
   let diff = '';
-  
+
   for (let i = 0; i < maxLen; i++) {
     const oldLine = oldLines[i];
     const newLine = newLines[i];
-    
+
     if (oldLine === newLine) {
       diff += ` ${oldLine || ''}\n`;
     } else if (oldLine !== undefined && newLine !== undefined) {
@@ -221,7 +292,7 @@ function generateDiff(oldContent: string, newContent: string): string {
 function DiffView({ oldContent, newContent, fileName }: { oldContent: string; newContent: string; fileName: string }) {
   const diff = generateDiff(oldContent, newContent);
   const lines = diff.split('\n');
-  
+
   return (
     <div className="bg-[#1e1e1e] rounded-lg border border-zinc-800 overflow-hidden">
       <div className="px-4 py-2 bg-zinc-900/50 border-b border-zinc-800 flex items-center justify-between">
@@ -278,15 +349,15 @@ function ChangeSummary({ changes }: { changes: FileChange[] }) {
   );
 }
 
-function ProposeChangesModal({ 
-  isOpen, 
-  onClose, 
-  changes, 
+function ProposeChangesModal({
+  isOpen,
+  onClose,
+  changes,
   onPropose,
-  loading 
-}: { 
-  isOpen: boolean; 
-  onClose: () => void; 
+  loading
+}: {
+  isOpen: boolean;
+  onClose: () => void;
   changes: FileChange[];
   onPropose: (title: string, description: string) => void;
   loading: boolean;
@@ -294,9 +365,9 @@ function ProposeChangesModal({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [step, setStep] = useState<'review' | 'confirm'>('review');
-  
+
   if (!isOpen) return null;
-  
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <motion.div
@@ -316,7 +387,7 @@ function ProposeChangesModal({
                 {step === 'review' ? 'Review Changes' : 'Create Pull Request'}
               </h3>
               <p className="text-sm text-zinc-500">
-                {step === 'review' 
+                {step === 'review'
                   ? `${changes.length} file${changes.length !== 1 ? 's' : ''} will be included`
                   : 'Fill in details to open a PR'}
               </p>
@@ -326,7 +397,7 @@ function ProposeChangesModal({
             <X className="w-5 h-5" />
           </button>
         </div>
-        
+
         {/* Step Indicator */}
         <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-2">
           <div className={`flex items-center gap-2 ${step === 'review' ? 'text-blue-400' : 'text-zinc-500'}`}>
@@ -343,32 +414,32 @@ function ProposeChangesModal({
             <span className="text-sm font-medium">Propose</span>
           </div>
         </div>
-        
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
           {step === 'review' ? (
             <div className="space-y-6">
               <ChangeSummary changes={changes} />
-              
+
               <div className="border-t border-zinc-800 pt-4">
                 <h4 className="text-sm font-medium text-zinc-400 mb-3">File Diffs</h4>
                 <div className="space-y-4 max-h-[50vh] overflow-y-auto">
                   {changes.map((change, i) => (
-                    <DiffView 
-                      key={i} 
-                      oldContent={change.oldContent} 
-                      newContent={change.newContent} 
+                    <DiffView
+                      key={i}
+                      oldContent={change.oldContent}
+                      newContent={change.newContent}
                       fileName={change.path}
                     />
                   ))}
                 </div>
               </div>
-              
+
               <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800">
                 <button onClick={onClose} className="px-4 py-2 text-zinc-300 hover:text-white transition-colors">
                   Cancel
                 </button>
-                <button 
+                <button
                   onClick={() => setStep('confirm')}
                   className="px-4 py-2 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-lg hover:bg-blue-500/20 transition-colors flex items-center gap-2"
                 >
@@ -402,7 +473,7 @@ function ProposeChangesModal({
                   />
                 </div>
               </div>
-              
+
               <div className="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700">
                 <h5 className="text-sm font-medium text-zinc-300 mb-2 flex items-center gap-2">
                   <GitBranch className="w-4 h-4" />
@@ -412,15 +483,15 @@ function ProposeChangesModal({
                   Changes will be pushed to this branch and a Pull Request will be opened against the default branch.
                 </p>
               </div>
-              
+
               <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800">
-                <button 
+                <button
                   onClick={() => setStep('review')}
                   className="px-4 py-2 text-zinc-300 hover:text-white transition-colors"
                 >
                   Back
                 </button>
-                <button 
+                <button
                   onClick={() => onPropose(title, description)}
                   disabled={!title.trim() || loading}
                   className="px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg hover:bg-emerald-500/20 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -439,7 +510,7 @@ function ProposeChangesModal({
 
 function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[]; onClose: () => void }) {
   if (changes.length === 0) return null;
-  
+
   return (
     <div className="fixed bottom-4 right-4 z-40 w-96 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden">
       <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
@@ -498,28 +569,28 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Tab State
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [editedContents, setEditedContents] = useState<Record<string, string>>({});
   const [loadingFiles, setLoadingFiles] = useState<Record<string, boolean>>({});
-  
+
   // Sidebar State
   const [activeSidebarMode, setActiveSidebarMode] = useState<"explorer" | "search">("explorer");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  
+
   // Preview/PR Flow State
   const [stagedChanges, setStagedChanges] = useState<FileChange[]>([]);
   const [showProposeModal, setShowProposeModal] = useState(false);
   const [proposing, setProposing] = useState(false);
   const [proposedChanges, setProposedChanges] = useState<ProposedChange[]>([]);
   const [showProposedPanel, setShowProposedPanel] = useState(false);
-  
+
   // Track original content for diff
   const [originalContents, setOriginalContents] = useState<Record<string, string>>({});
 
@@ -646,7 +717,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor as unknown as MonacoEditorInstance;
     monacoRef.current = monaco as unknown as MonacoInstance;
-
     editor.onDidDispose(() => {
       clearPreviewDecorations();
       editorRef.current = null;
@@ -657,6 +727,22 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
       triggerInlineAssist(editor as unknown as MonacoEditorInstance, monaco as unknown as MonacoInstance);
     });
+
+    // Register Cmd+S / Ctrl+S keybinding in Monaco
+    if (monaco.KeyCode.KeyS) {
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        handleSaveRef.current();
+      });
+    }
+
+    // Register Cmd+W / Ctrl+W keybinding in Monaco
+    if (monaco.KeyCode.KeyW) {
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
+        if (activeTabRef.current) {
+          closeTabByPathRef.current(activeTabRef.current);
+        }
+      });
+    }
   };
 
   const handleAcceptInlineAssist = (replacementCode: string) => {
@@ -666,6 +752,11 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (inlineAssist.filePath !== currentTab) {
       clearPreviewDecorations();
       setInlineAssist(null);
+      return;
+    }
+
+    if (inlineAssist.filePath !== activeTab) {
+      clearInlineAssistState();
       return;
     }
 
@@ -720,48 +811,56 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     } finally {
       setLoadingTree(false);
     }
+
   }, [repoUrl]);
+
+  const clearInlineAssistState = useCallback(() => {
+    clearPreviewDecorations();
+    setInlineAssist(null);
+  }, []);
 
   useEffect(() => {
     let active = true;
 
-    const loadTree = async () => {
-      if (active) {
-        setLoadingTree(true);
-        setError(null);
-        setTree(null);
-        setOpenTabs([]);
-        setActiveTab(null);
-        setFileContents({});
-        setEditedContents({});
-        setOriginalContents({});
-        setStagedChanges([]);
-        setSearchQuery("");
-        setSearchResults([]);
-        clearPreviewDecorations();
-        setInlineAssist(null);
-      }
-      try {
-        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+    // Repository switch state isolation & Monaco cleanup
+    if (monacoRef.current?.editor?.getModels) {
+      const models = monacoRef.current.editor.getModels();
+      models.forEach(model => model.dispose());
+    }
+
+    setOpenTabs([]);
+    setActiveTab(null);
+    setFileContents({});
+    setEditedContents({});
+    setOriginalContents({});
+    setStagedChanges([]);
+    setProposedChanges([]);
+    clearInlineAssistState();
+
+    setLoadingTree(true);
+    setError(null);
+    setTree(null);
+
+    fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`)
+      .then(res => {
         if (!res.ok) throw new Error("Repository not found or API error");
-        const data = await res.json();
+        return res.json();
+      })
+      .then(data => {
         if (active) setTree(data);
-      } catch (err: unknown) {
+      })
+      .catch((err: unknown) => {
         if (active) setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
-      } finally {
+      })
+      .finally(() => {
         if (active) setLoadingTree(false);
-      }
-    };
-    loadTree();
+      });
     return () => {
       active = false;
     };
-  }, [repoUrl]);
+  }, [repoUrl, clearInlineAssistState]);
 
-  const clearInlineAssistState = () => {
-    clearPreviewDecorations();
-    setInlineAssist(null);
-  };
+
 
   const switchTab = (path: string) => {
     clearInlineAssistState();
@@ -770,45 +869,88 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const openFile = async (path: string) => {
     clearInlineAssistState();
-    if (!openTabs.includes(path)) {
-      setOpenTabs([...openTabs, path]);
-    }
+    setOpenTabs(prev => prev.includes(path) ? prev : [...prev, path]);
     setActiveTab(path);
-    
+
     if (fileContents[path] === undefined) {
       setLoadingFiles(prev => ({...prev, [path]: true}));
+      const currentRepoUrl = repoUrl;
       try {
         const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
-        setFileContents(prev => ({...prev, [path]: data.content}));
-        setEditedContents(prev => ({...prev, [path]: data.content}));
-        // Store original for diff
-        setOriginalContents(prev => ({...prev, [path]: data.content}));
+        // Guard against race conditions
+        setOpenTabs(currentTabs => {
+          if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {
+            setFileContents(prev => ({...prev, [path]: data.content}));
+            setEditedContents(prev => ({...prev, [path]: data.content}));
+            setOriginalContents(prev => ({...prev, [path]: data.content}));
+          }
+          return currentTabs;
+        });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setFileContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
-        setEditedContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
+        setOpenTabs(currentTabs => {
+          if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setFileContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
+            setEditedContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
+          }
+          return currentTabs;
+        });
+      }
       } finally {
         setLoadingFiles(prev => ({...prev, [path]: false}));
       }
     }
   };
 
-  const closeTab = (e: React.MouseEvent | { stopPropagation: () => void }, path: string) => {
-    e.stopPropagation();
-    clearInlineAssistState();
-    const newTabs = openTabs.filter(t => t !== path);
-    setOpenTabs(newTabs);
-    
-    if (activeTab === path) {
-      setActiveTab(newTabs.length > 0 ? newTabs[newTabs.length - 1] : null);
+  const closeTabByPath = useCallback((path: string, force: boolean = false) => {
+    const isUnsaved = editedContents[path] !== undefined && editedContents[path] !== fileContents[path];
+    if (isUnsaved && !force) {
+      if (!window.confirm(`You have unsaved changes in ${path.split('/').pop()}. Are you sure you want to close it?`)) {
+        return;
+      }
     }
-    
+    }
+
+    clearInlineAssistState();
+
+    if (monacoRef.current && typeof monacoRef.current.Uri?.parse === "function") {
+      try {
+        const uri = monacoRef.current.Uri.parse(path);
+        const model = monacoRef.current.editor?.getModel(uri);
+        if (model && typeof model.dispose === "function") {
+          model.dispose();
+        }
+      } catch {
+        // Ignore if uri parsing fails
+      }
+    }
+
+    setOpenTabs(prevTabs => {
+      const index = prevTabs.indexOf(path);
+      if (index === -1) return prevTabs;
+      const newTabs = prevTabs.filter(t => t !== path);
+      if (activeTabRef.current === path) {
+        if (newTabs.length > 0) {
+          const nextIndex = Math.min(index, newTabs.length - 1);
+          setActiveTab(newTabs[nextIndex]);
+        } else {
+          setActiveTab(null);
+        }
+      }
+      return newTabs;
+    });
+
     // Clean up memory
     setFileContents(prev => { const n = {...prev}; delete n[path]; return n; });
     setEditedContents(prev => { const n = {...prev}; delete n[path]; return n; });
     setOriginalContents(prev => { const n = {...prev}; delete n[path]; return n; });
+  }, [clearInlineAssistState, editedContents, fileContents]);
+
+  const closeTab = (e: React.MouseEvent | { stopPropagation: () => void }, path: string) => {
+    e.stopPropagation();
+    closeTabByPath(path);
   };
 
   const handleSave = useCallback(async () => {
@@ -827,7 +969,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       setFileContents(prev => ({...prev, [activeTab]: content}));
       // Update original content after successful save to main branch
       setOriginalContents(prev => ({...prev, [activeTab]: content}));
-      
+
       // Remove from staged changes since it's now saved to main
       setStagedChanges(prev => prev.filter(c => c.path !== activeTab));
     } catch (err: unknown) {
@@ -840,7 +982,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const handleContentChange = (path: string, newContent: string) => {
     setEditedContents(prev => ({...prev, [path]: newContent}));
-    
+
     // Track staged changes
     const original = originalContents[path] || "";
     if (newContent !== original) {
@@ -868,7 +1010,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const handleCreate = async (parentPath: string, isDir: boolean) => {
     const name = prompt(`Enter name for new ${isDir ? 'folder' : 'file'} in ${parentPath}:`);
     if (!name) return;
-    
+
     const newPath = parentPath === "." || parentPath === "" ? name : `${parentPath}/${name}`;
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file/create`, {
@@ -893,7 +1035,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       });
       if (!res.ok) throw new Error("Failed to delete");
       if (openTabs.includes(path)) closeTab({ stopPropagation: () => {} }, path);
-      
+
       // Track as deleted in staged changes
       const original = originalContents[path] || "";
       if (original) {
@@ -913,7 +1055,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           return [...prev, change];
         });
       }
-      
+
       await fetchTree();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -940,7 +1082,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const handleProposeChanges = async (title: string, description: string) => {
     if (!title.trim() || stagedChanges.length === 0) return;
-    
+
     setProposing(true);
     try {
       // Call backend to create PR
@@ -957,14 +1099,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           }))
         })
       });
-      
+
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.detail || "Failed to create PR");
       }
-      
+
       const data = await res.json();
-      
+
       // Add to proposed changes list
       const newProposed: ProposedChange = {
         id: data.branch_name,
@@ -977,11 +1119,11 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         prUrl: data.pr_url,
         createdAt: new Date().toISOString(),
       };
-      
+
       setProposedChanges(prev => [newProposed, ...prev]);
       setShowProposedPanel(true);
       setShowProposeModal(false);
-      
+
       // Clear staged changes
       setStagedChanges([]);
       setOriginalContents({});
@@ -990,7 +1132,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       setOpenTabs([]);
       setActiveTab(null);
       await fetchTree();
-      
+
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       alert("Failed to propose changes: " + msg);
@@ -999,30 +1141,48 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     }
   };
 
+  const handleSaveRef = useRef(handleSave);
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-        e.preventDefault();
-        handleSave();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    handleSaveRef.current = handleSave;
   }, [handleSave]);
 
-  const getLanguage = (filename: string) => {
-    const ext = filename.split(".").pop()?.toLowerCase();
-    const map: Record<string, string> = {
-      js: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript",
-      py: "python", json: "json", md: "markdown", html: "html", css: "css", sh: "bash",
-    };
-    return map[ext || ""] || "text";
-  };
+  const closeTabByPathRef = useRef(closeTabByPath);
+  useEffect(() => {
+    closeTabByPathRef.current = closeTabByPath;
+  }, [closeTabByPath]);
 
-  const hasActiveTabUnsavedChanges = activeTab 
-    ? (editedContents[activeTab] !== undefined && editedContents[activeTab] !== fileContents[activeTab]) 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === 's') {
+          e.preventDefault();
+          e.stopPropagation();
+          handleSaveRef.current();
+        } else if (key === 'w') {
+          const activeElement = document.activeElement;
+          const isInputFocused = activeElement && (
+            activeElement.tagName === 'INPUT' ||
+            activeElement.tagName === 'TEXTAREA' ||
+            (activeElement as HTMLElement).isContentEditable
+          );
+
+          if (!isInputFocused && activeTabRef.current) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeTabByPathRef.current(activeTabRef.current);
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, []);
+
+  const hasActiveTabUnsavedChanges = activeTab
+    ? (editedContents[activeTab] !== undefined && editedContents[activeTab] !== fileContents[activeTab])
     : false;
-  
+
   const hasStagedChanges = stagedChanges.length > 0;
 
   return (
@@ -1034,7 +1194,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           onClose={() => setShowProposedPanel(false)}
         />
       )}
-      
+
       {/* Propose Changes Modal */}
       <ProposeChangesModal
         isOpen={showProposeModal}
@@ -1043,17 +1203,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         onPropose={handleProposeChanges}
         loading={proposing}
       />
-      
+
       {/* Activity Bar */}
       <div className="w-12 bg-[#333333] flex flex-col items-center py-2 shrink-0 border-r border-[#252526]">
-        <button 
+        <button
           onClick={() => setActiveSidebarMode("explorer")}
           className={`p-2 rounded-lg mb-2 transition-colors ${activeSidebarMode === 'explorer' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
           title="Explorer"
         >
           <FileIcon className="w-6 h-6" />
         </button>
-        <button 
+        <button
           onClick={() => setActiveSidebarMode("search")}
           className={`p-2 rounded-lg transition-colors ${activeSidebarMode === 'search' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
           title="Search"
@@ -1061,7 +1221,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           <Search className="w-6 h-6" />
         </button>
         {hasStagedChanges && (
-          <button 
+          <button
             onClick={() => setShowProposeModal(true)}
             className="p-2 rounded-lg mt-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 transition-colors"
             title="Propose Changes"
@@ -1077,12 +1237,24 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           <span>{activeSidebarMode === "explorer" ? "Explorer" : "Search"}</span>
           {activeSidebarMode === "explorer" && (
             <div className="flex gap-2">
-              <button onClick={() => handleCreate(".", false)} title="New File in Root"><FilePlus className="w-4 h-4 text-zinc-400 hover:text-white" /></button>
-              <button onClick={() => handleCreate(".", true)} title="New Folder in Root"><FolderPlus className="w-4 h-4 text-zinc-400 hover:text-white" /></button>
+              <button
+                onClick={() => handleCreate(".", false)}
+                title="New File in Root"
+                aria-label="New File in Root"
+              >
+                <FilePlus className="w-4 h-4 text-zinc-400 hover:text-white" />
+              </button>
+              <button
+                onClick={() => handleCreate(".", true)}
+                title="New Folder in Root"
+                aria-label="New Folder in Root"
+              >
+                <FolderPlus className="w-4 h-4 text-zinc-400 hover:text-white" />
+              </button>
             </div>
           )}
         </div>
-       
+
         <div className="flex-1 overflow-y-auto custom-scrollbar pb-4">
           {activeSidebarMode === "explorer" ? (
             loadingTree ? (
@@ -1106,11 +1278,11 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           ) : (
             <div className="p-4 flex flex-col h-full">
               <form onSubmit={handleSearch} className="mb-4">
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
-                  placeholder="Search..." 
+                  placeholder="Search..."
                   className="w-full bg-[#3c3c3c] text-white border border-[#3c3c3c] focus:border-[#007acc] rounded px-2 py-1 text-sm outline-none"
                 />
               </form>
@@ -1119,8 +1291,8 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                   <div className="text-sm text-zinc-400">Searching...</div>
                 ) : searchResults.length > 0 ? (
                   searchResults.map((res, i) => (
-                    <div 
-                      key={i} 
+                    <div
+                      key={i}
                       className="text-sm mb-2 cursor-pointer hover:bg-[#2a2d2e] p-1 rounded group"
                       onClick={() => openFile(res.file)}
                     >
@@ -1155,7 +1327,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                 const isUnsaved = editedContents[tab] !== undefined && editedContents[tab] !== fileContents[tab];
                 const isStaged = stagedChanges.some(c => c.path === tab);
                 return (
-                  <div 
+                  <div
                     key={tab}
                     onClick={() => switchTab(tab)}
                     className={`flex items-center gap-2 h-full px-3 text-sm cursor-pointer border-r border-[#1e1e1e] group ${
@@ -1168,9 +1340,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                     {(isUnsaved || isStaged) && (
                       <span className="w-2 h-2 bg-emerald-400 rounded-full mx-1 animate-pulse" title={isStaged ? "Staged for PR" : "Unsaved"} />
                     )}
-                    <button 
+                    <button
                       onClick={(e) => closeTab(e, tab)}
                       className={`p-0.5 rounded hover:bg-[#4d4d4d] shrink-0 ${isUnsaved && !isTabActive ? "invisible" : ""}`}
+                      aria-label={`Close ${tab.split('/').pop()}`}
                     >
                       {isUnsaved ? (
                         <div className="w-2 h-2 bg-white rounded-full mx-1"></div>
@@ -1198,7 +1371,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                   <Sparkles className="w-3 h-3 text-indigo-400" />
                   <span>Inline Assist (⌘K)</span>
                 </button>
-                <button 
+                <button
                   onClick={handleSave}
                   disabled={!hasActiveTabUnsavedChanges || isSaving}
                   className={`flex items-center gap-1 px-3 py-1 rounded transition-colors ${hasActiveTabUnsavedChanges ? 'bg-[#0e639c] text-white hover:bg-[#1177bb]' : 'text-zinc-500 cursor-not-allowed'}`}
@@ -1207,7 +1380,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                   {isSaving ? "Saving..." : "Save"}
                 </button>
                 {hasStagedChanges && (
-                  <button 
+                  <button
                     onClick={() => setShowProposeModal(true)}
                     className="flex items-center gap-1 px-3 py-1 rounded transition-colors bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 text-xs"
                   >
@@ -1227,15 +1400,19 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
                   <Editor
                     height="100%"
                     theme="vs-dark"
-                    language={getLanguage(activeTab)}
+                    path={activeTab}
+                    language={getLanguageFromPath(activeTab)}
                     value={editedContents[activeTab]}
                     onMount={handleEditorMount}
                     onChange={(value) => handleContentChange(activeTab!, value ?? "")}
+                    saveViewState={true}
                     options={{
                       minimap: { enabled: true },
                       fontSize: 14,
                       wordWrap: "on",
-                      padding: { top: 16 }
+                      padding: { top: 16 },
+                      automaticLayout: true,
+                      scrollBeyondLastLine: false,
                     }}
                   />
                   {inlineAssist?.isOpen && (
