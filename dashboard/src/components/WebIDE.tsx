@@ -82,6 +82,32 @@ export function getLanguageFromPath(path: string | null): string {
   return languageMap[ext] || "plaintext";
 }
 
+interface MonacoRange {
+  new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
+}
+
+interface MonacoEditorInstance {
+  getValue: () => string;
+  getSelection: () => { startLineNumber: number; endLineNumber: number; startColumn: number; endColumn: number } | null;
+  getModel: () => {
+    getValueInRange: (range: unknown) => string;
+    getLineContent: (line: number) => string;
+    getLineCount: () => number;
+    getLineMaxColumn: (line: number) => number;
+  } | null;
+  executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers: boolean }>) => void;
+  deltaDecorations: (oldDecorations: string[], newDecorations: unknown[]) => string[];
+  getPosition: () => { lineNumber: number; column: number } | null;
+  getScrolledVisiblePosition: (pos: unknown) => { top: number; left: number } | null;
+  addCommand: (keybinding: number, handler: () => void) => void;
+}
+
+interface MonacoInstance {
+  Range: MonacoRange;
+  KeyMod: { CtrlCmd: number };
+  KeyCode: { KeyK: number };
+}
+
 interface TreeNode {
   name: string;
   path: string;
@@ -632,9 +658,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     clearPreviewDecorations();
 
-    const selection = editor.getSelection();
     const model = editor.getModel();
     if (!model) return;
+
+    const selection = editor.getSelection();
 
     const startLine = selection ? selection.startLineNumber : 1;
     const endLine = selection ? selection.endLineNumber : startLine;
@@ -690,6 +717,11 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor as unknown as MonacoEditorInstance;
     monacoRef.current = monaco as unknown as MonacoInstance;
+    editor.onDidDispose(() => {
+      clearPreviewDecorations();
+      editorRef.current = null;
+      monacoRef.current = null;
+    });
 
     // Register Cmd+K / Ctrl+K keybinding in Monaco
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
@@ -714,7 +746,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   };
 
   const handleAcceptInlineAssist = (replacementCode: string) => {
-    if (!editorRef.current || !monacoRef.current || !inlineAssist || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editorRef.current || !monacoRef.current || !inlineAssist || !currentTab) return;
+
+    if (inlineAssist.filePath !== currentTab) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
     if (inlineAssist.filePath !== activeTab) {
       clearInlineAssistState();
@@ -723,9 +762,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     const editor = editorRef.current;
     const monaco = monacoRef.current;
-    const { selectionContext } = inlineAssist;
+    const model = editor.getModel();
+    if (!model) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
-    clearPreviewDecorations();
+    const { selectionContext } = inlineAssist;
 
     const range = new monaco.Range(
       selectionContext.startLine,
@@ -733,6 +777,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       selectionContext.endLine,
       selectionContext.endColumn
     );
+
+    const currentSelectedCode = model.getValueInRange(range);
+    if (currentSelectedCode !== selectionContext.selectedCode) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
+
+    clearPreviewDecorations();
 
     editor.executeEdits("inline-assist", [
       {
@@ -743,7 +796,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     ]);
 
     const updatedValue = editor.getValue();
-    handleContentChange(activeTab, updatedValue);
+    handleContentChange(currentTab, updatedValue);
     setInlineAssist(null);
   };
 
@@ -758,6 +811,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     } finally {
       setLoadingTree(false);
     }
+
   }, [repoUrl]);
 
   const clearInlineAssistState = useCallback(() => {
@@ -825,7 +879,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
-
         // Guard against race conditions
         setOpenTabs(currentTabs => {
           if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {
@@ -844,6 +897,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           }
           return currentTabs;
         });
+      }
       } finally {
         setLoadingFiles(prev => ({...prev, [path]: false}));
       }
@@ -856,6 +910,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       if (!window.confirm(`You have unsaved changes in ${path.split('/').pop()}. Are you sure you want to close it?`)) {
         return;
       }
+    }
     }
 
     clearInlineAssistState();

@@ -659,7 +659,10 @@ async def stop_agents_legacy(req: Optional[StopRequest] = None):
 
 
 @app.post("/assist/inline")
-async def inline_assist(req: InlineAssistRequest):
+async def inline_assist(
+    req: InlineAssistRequest,
+    user: dict = Depends(get_current_user),
+):
     from agents import stream_inline_assist
 
     try:

@@ -245,6 +245,17 @@ async def stream_inline_assist(
     file_path: str,
 ):
     try:
+        # Truncate excessive input lengths to prevent token overflow and enforce rate limit bounds
+        MAX_INPUT_CHARS = 3000
+        if len(prompt) > MAX_INPUT_CHARS:
+            prompt = prompt[:MAX_INPUT_CHARS]
+        if len(selected_code) > MAX_INPUT_CHARS:
+            selected_code = selected_code[:MAX_INPUT_CHARS]
+        if len(prefix_code) > MAX_INPUT_CHARS:
+            prefix_code = prefix_code[-MAX_INPUT_CHARS:]
+        if len(suffix_code) > MAX_INPUT_CHARS:
+            suffix_code = suffix_code[:MAX_INPUT_CHARS]
+
         manager = await get_rate_limit_manager()
         async with manager.key_context(estimated_tokens=2000) as key_state:
             llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=key_state.key)
