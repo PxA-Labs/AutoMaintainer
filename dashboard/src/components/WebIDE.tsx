@@ -82,31 +82,6 @@ export function getLanguageFromPath(path: string | null): string {
   return languageMap[ext] || "plaintext";
 }
 
-interface MonacoRange {
-  new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
-}
-
-interface MonacoEditorInstance {
-  getValue: () => string;
-  getSelection: () => { startLineNumber: number; endLineNumber: number; startColumn: number; endColumn: number } | null;
-  getModel: () => {
-    getValueInRange: (range: unknown) => string;
-    getLineContent: (line: number) => string;
-    getLineCount: () => number;
-    getLineMaxColumn: (line: number) => number;
-  } | null;
-  executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers: boolean }>) => void;
-  deltaDecorations: (oldDecorations: string[], newDecorations: unknown[]) => string[];
-  getPosition: () => { lineNumber: number; column: number } | null;
-  getScrolledVisiblePosition: (pos: unknown) => { top: number; left: number } | null;
-  addCommand: (keybinding: number, handler: () => void) => void;
-}
-
-interface MonacoInstance {
-  Range: MonacoRange;
-  KeyMod: { CtrlCmd: number };
-  KeyCode: { KeyK: number };
-}
 
 interface TreeNode {
   name: string;
@@ -897,7 +872,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
           }
           return currentTabs;
         });
-      }
       } finally {
         setLoadingFiles(prev => ({...prev, [path]: false}));
       }
@@ -910,7 +884,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       if (!window.confirm(`You have unsaved changes in ${path.split('/').pop()}. Are you sure you want to close it?`)) {
         return;
       }
-    }
     }
 
     clearInlineAssistState();
