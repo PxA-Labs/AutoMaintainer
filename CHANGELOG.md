@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump docker/metadata-action from 5.7.0 to 6.2.0 ([#276](https://github.com/PxA-Labs/AutoMaintainer/pull/276)) - @dependabot[bot]
 - **deps**: Bump amannn/action-semantic-pull-request from 5.5.3 to 6.1.1 ([#264](https://github.com/PxA-Labs/AutoMaintainer/pull/264)) - @dependabot[bot]
 - **deps-dev**: Bump eslint-config-next from 16.3.3 to 16.3.4 in /dashboard ([#249](https://github.com/PxA-Labs/AutoMaintainer/pull/249)) - @dependabot[bot]
 - **deps**: Bump release-drafter/release-drafter from 6.4.0 to 7.7.0 ([#228](https://github.com/PxA-Labs/AutoMaintainer/pull/228)) - @dependabot[bot]
@@ -140,6 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
 
 ---
 
