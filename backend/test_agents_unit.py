@@ -2,9 +2,120 @@ import pytest
 import asyncio
 import httpx
 from unittest.mock import MagicMock
-from agents import get_all_groq_keys, should_implement, should_iterate, broadcast_log
+from agents import (
+    EmptyAgentStreamError,
+    broadcast_log,
+    extract_final_agent_content,
+    extract_target_file,
+    get_all_groq_keys,
+    normalize_generated_code,
+    should_implement,
+    should_iterate,
+)
 from workspace import get_base_workspace_dir, get_safe_repo_dir, get_safe_target_path
 from fastapi import HTTPException
+
+
+def test_extract_target_file_accepts_repository_relative_reference():
+    directive = "Update backend/main.py:141-161 and preserve unrelated code."
+    assert extract_target_file(directive) == "backend/main.py"
+
+
+def test_extract_target_file_rejects_traversal_reference():
+    assert extract_target_file("Update ../secrets.env:1-2") is None
+
+
+def test_normalize_generated_code_removes_fences_and_rejects_errors():
+    assert normalize_generated_code("```python\nprint('ok')\n```") == "print('ok')"
+    with pytest.raises(ValueError, match="empty code"):
+        normalize_generated_code("```python\n```")
+    with pytest.raises(RuntimeError, match="LLM failed"):
+        normalize_generated_code("[ERROR] LLM failed")
+
+
+@pytest.mark.asyncio
+async def test_implementer_updates_target_file_instead_of_creating_dummy_file(
+    monkeypatch,
+):
+    import agents
+
+    repo = MagicMock()
+    repo.default_branch = "main"
+    repo.get_branch.return_value.commit.sha = "base-sha"
+    source_file = MagicMock()
+    source_file.path = "backend/main.py"
+    source_file.sha = "file-sha"
+    source_file.decoded_content = b"def old_handler():\n    return 1\n"
+    repo.get_contents.return_value = source_file
+    repo.create_pull.return_value.number = 42
+    repo.create_pull.return_value.html_url = "https://github.com/example/repo/pull/42"
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+
+    prompts = {}
+
+    async def fake_llm(system_prompt, user_prompt):
+        prompts["system"] = system_prompt
+        prompts["user"] = user_prompt
+        return "```python\ndef new_handler():\n    return 2\n```"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", fake_llm)
+    state = {
+        "repo_name": "example/repo",
+        "idea": "Modify backend/main.py:141-161 to fix the handler.",
+        "issue_number": 12,
+        "iteration": 0,
+        "review": "",
+        "branch_name": "",
+        "target_file_path": "",
+        "pr_number": 0,
+    }
+
+    result = await agents.implementer_node(state)
+
+    repo.update_file.assert_called_once()
+    assert repo.update_file.call_args.kwargs["path"] == "backend/main.py"
+    assert repo.update_file.call_args.kwargs["sha"] == "file-sha"
+    repo.create_file.assert_not_called()
+    assert result["target_file_path"] == "backend/main.py"
+    assert "Current file contents" in prompts["user"]
+
+
+@pytest.mark.asyncio
+async def test_implementer_creates_explicit_missing_target_file(monkeypatch):
+    import agents
+    from github import GithubException
+
+    repo = MagicMock()
+    repo.default_branch = "main"
+    repo.get_branch.return_value.commit.sha = "base-sha"
+    repo.get_contents.side_effect = GithubException(404, "not found")
+    repo.create_pull.return_value.number = 43
+    repo.create_pull.return_value.html_url = "https://github.com/example/repo/pull/43"
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+
+    async def fake_llm(system_prompt, user_prompt):
+        assert "Create the referenced repository file" in system_prompt
+        assert "does not exist yet" in user_prompt
+        return "```python\nprint('new file')\n```"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", fake_llm)
+    state = {
+        "repo_name": "example/repo",
+        "idea": "Create backend/new_feature.py:1-4 for the missing feature.",
+        "issue_number": 13,
+        "iteration": 0,
+        "review": "",
+        "branch_name": "",
+        "target_file_path": "",
+        "pr_number": 0,
+    }
+
+    result = await agents.implementer_node(state)
+
+    repo.update_file.assert_not_called()
+    repo.create_file.assert_called_once()
+    assert repo.create_file.call_args.kwargs["path"] == "backend/new_feature.py"
+    assert result["target_file_path"] == "backend/new_feature.py"
 
 
 def test_get_all_groq_keys(monkeypatch):
@@ -19,6 +130,35 @@ def test_get_all_groq_keys(monkeypatch):
     assert "key-1" in keys
     assert "key-2" in keys
     assert len(keys) >= 3
+
+
+def test_extract_final_agent_content_rejects_missing_result():
+    with pytest.raises(EmptyAgentStreamError, match="no agent result"):
+        extract_final_agent_content(None)
+
+
+def test_extract_final_agent_content_rejects_missing_messages():
+    with pytest.raises(EmptyAgentStreamError, match="no messages"):
+        extract_final_agent_content({})
+
+
+def test_extract_final_agent_content_rejects_empty_message():
+    message = MagicMock(content="   ")
+    with pytest.raises(EmptyAgentStreamError, match="empty final message"):
+        extract_final_agent_content({"messages": [message]})
+
+
+def test_extract_final_agent_content_returns_content():
+    message = MagicMock(content="architectural response")
+    assert (
+        extract_final_agent_content({"messages": [message]}) == "architectural response"
+    )
+
+
+def test_extract_final_agent_content_rejects_malformed_truthy_messages():
+    for malformed in ({"unexpected": "shape"}, 1, "not-a-message-list"):
+        with pytest.raises(EmptyAgentStreamError, match="malformed messages"):
+            extract_final_agent_content({"messages": malformed})
 
 
 def test_should_implement():
@@ -54,6 +194,16 @@ async def test_broadcast_log_no_supabase():
 
     # This should run without raising any Exception
     await broadcast_log({"msg": "Test fallback logging", "type": "message"})
+
+
+def test_healthz_is_independent_of_supabase():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    response = TestClient(app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
 
 
 def test_healthz_supabase_not_configured(monkeypatch):
