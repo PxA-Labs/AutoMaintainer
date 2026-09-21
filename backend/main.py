@@ -30,6 +30,7 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 # Celery integration
 from celery_app import celery_app
@@ -260,19 +261,56 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 
-# Allow the Next.js frontend to connect to this API
-cors_origins_env = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 )
-allowed_origins = [
-    origin.strip() for origin in cors_origins_env.split(",") if origin.strip()
-]
 
+# Vercel preview deployments get a fresh subdomain per build, so they are matched
+# by regex instead of being enumerated in ALLOWED_ORIGINS.
+DEFAULT_ALLOWED_ORIGIN_REGEX = r"^https:\/\/.*\.vercel\.app$"
+
+
+def parse_allowed_origins(configured_origins: str | None) -> list[str]:
+    """Return safe, normalized CORS origins from a comma-separated setting."""
+    candidates = list(DEFAULT_ALLOWED_ORIGINS)
+    if configured_origins:
+        candidates.extend(origin.strip() for origin in configured_origins.split(","))
+
+    origins = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "ALLOWED_ORIGINS must contain comma-separated http(s) origins "
+                f"without paths or wildcards: {candidate!r}"
+            )
+        normalized = f"{parsed.scheme}://{parsed.netloc}"
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
+
+
+# ALLOWED_ORIGINS is the name used by render.yaml; CORS_ORIGINS is kept as an
+# alias so existing deployments keep working.
+ALLOWED_ORIGINS = parse_allowed_origins(
+    os.getenv("ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS")
+)
+
+# Allow the Next.js frontend to connect to this API. Origins are exact matches;
+# wildcard origins are intentionally rejected because credentials are enabled.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins else ["*"],
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"^https:\/\/.*\.vercel\.app$"),
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", DEFAULT_ALLOWED_ORIGIN_REGEX),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
