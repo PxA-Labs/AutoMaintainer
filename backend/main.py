@@ -1209,8 +1209,11 @@ def get_repo_tree(repo_name: str, branch_name: Optional[str] = None):
                 if item in ignored_dirs:
                     continue
                 item_path = os.path.join(path, item)
+
+                # Prevent symlink loops
                 if os.path.islink(item_path):
                     continue
+
                 is_dir = os.path.isdir(item_path)
                 node = {
                     "name": item,
@@ -1223,6 +1226,8 @@ def get_repo_tree(repo_name: str, branch_name: Optional[str] = None):
         except (OSError, PermissionError) as e:
             logger.warning(f"Error accessing path {path}: {e}")
             raise HTTPException(status_code=500, detail="Error accessing file system")
+
+        # Sort directories first, then files
         tree.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
         return tree
 
@@ -1292,6 +1297,7 @@ def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
         ".next",
     }
     results = []
+
     try:
         for root, dirs, files in os.walk(repo_dir):
             dirs[:] = [
@@ -1304,22 +1310,26 @@ def search_repo(repo_name: str, q: str, branch_name: Optional[str] = None):
                 if os.path.islink(file_path):
                     continue
                 try:
-                    with open(file_path, "r", encoding="utf-8") as handle:
-                        for line_number, line in enumerate(handle, start=1):
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        for i, line in enumerate(f):
                             if q.lower() in line.lower():
+                                rel_path = (
+                                    Path(file_path).relative_to(repo_dir).as_posix()
+                                )
                                 results.append(
                                     {
-                                        "file": Path(file_path)
-                                        .relative_to(repo_dir)
-                                        .as_posix(),
-                                        "line_number": line_number,
+                                        "file": rel_path,
+                                        "line_number": i + 1,
                                         "snippet": line.strip()[:200],
                                     }
                                 )
-                except (UnicodeDecodeError, OSError):
+                except UnicodeDecodeError:
                     pass
-    except OSError as e:
+                except Exception:
+                    pass
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
     return {"query": q, "results": results[:100]}
 
 
@@ -1346,18 +1356,23 @@ def get_repo_file(
 
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
+
     import os, stat
 
     try:
         fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         raise HTTPException(status_code=404, detail="File not found")
+
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise HTTPException(status_code=404, detail="File not found")
+
+        # Pass closefd=False so the finally block retains exclusive ownership of closing fd
         with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
-            return {"content": f.read()}
+            content = f.read()
+        return {"content": content}
     except UnicodeDecodeError:
         raise HTTPException(status_code=415, detail="Cannot read binary file")
     except HTTPException:
