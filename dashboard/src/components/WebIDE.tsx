@@ -11,6 +11,7 @@ import { motion } from "framer-motion";
 import Editor, { OnMount } from "@monaco-editor/react";
 import InlineAssist, { SelectionContext } from "./InlineAssist";
 import { useAuth } from "@/lib/auth";
+import { isCredentialSafeBackendUrl, INSECURE_BACKEND_MESSAGE } from "@/lib/config";
 
 interface MonacoRange {
   new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
@@ -544,12 +545,16 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
 export default function WebIDE({ repoUrl, accessToken }: WebIDEProps) {
   const { session } = useAuth();
   const token = accessToken ?? session?.access_token;
+  // Never attach the bearer token to a cleartext backend origin; it would be
+  // readable by anyone on the path.
+  const backendIsSecure = isCredentialSafeBackendUrl(getBackendUrl());
+
   // Memoized so it is referentially stable and can be a hook dependency.
   const authHeaders = useMemo<Record<string, string>>(() => {
     const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
+    if (token && backendIsSecure) headers.Authorization = `Bearer ${token}`;
     return headers;
-  }, [token]);
+  }, [token, backendIsSecure]);
 
   // Tree State
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -758,6 +763,10 @@ export default function WebIDE({ repoUrl, accessToken }: WebIDEProps) {
     handleContentChange(activeTab, updatedValue);
     setInlineAssist(null);
   };
+
+  useEffect(() => {
+    if (token && !backendIsSecure) setError(INSECURE_BACKEND_MESSAGE);
+  }, [token, backendIsSecure]);
 
   const treeRequestIdRef = useRef(0);
 

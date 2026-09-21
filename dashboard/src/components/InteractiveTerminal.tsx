@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "xterm/css/xterm.css";
+import { isCredentialSafeBackendUrl, INSECURE_BACKEND_MESSAGE } from "@/lib/config";
 
 interface InteractiveTerminalProps {
   repoUrl?: string;
@@ -64,12 +65,23 @@ export default function InteractiveTerminal({ repoUrl, accessToken }: Interactiv
       wsUrl += `?repo_url=${encodeURIComponent(repoUrl)}`;
     }
 
+    // The access token is sent over this socket, so refuse to open it at all
+    // on a cleartext origin rather than leaking the token on the wire.
+    if (!isCredentialSafeBackendUrl(wsUrl)) {
+      setError(INSECURE_BACKEND_MESSAGE);
+      return;
+    }
+
     const socket = new WebSocket(wsUrl);
     ws.current = socket;
 
     socket.onopen = () => {
       if (!accessToken) {
-        socket.close(1008, "Authentication required");
+        // 1000 (normal closure) rather than 1008: close() only accepts 1000 or
+        // 3000-4999 and throws InvalidAccessError otherwise, which would leave
+        // the socket open and skip the error state below. The server issues
+        // 1008 itself for policy violations.
+        socket.close(1000, "Authentication required");
         setError("Authentication required");
         return;
       }
