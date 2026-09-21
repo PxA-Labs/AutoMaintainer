@@ -1,39 +1,86 @@
 import os
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from litellm import completion
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
 import httpx
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Optional, Union
 import asyncio
-from github import Github
+from github import Github, GithubException
 import uuid
 import json
+import re
 import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from supabase import create_client, Client
+
+# Events & Emitter Abstraction
+from events import (
+    BaseEvent,
+    AgentPhase,
+    NodeTransitionEvent,
+    PlanCheckpointEvent,
+    TestResultEvent,
+    TelemetryEvent,
+    ErrorEvent,
+    EventEmitter,
+    NullEmitter,
+    StreamingEmitter,
+    SupabaseEmitter,
+    CompositeEmitter,
+)
 
 # Rate limiting
 from rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
 
 load_dotenv()
 current_run_id = ContextVar("current_run_id")
+current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
+    "current_emitter", default=None
+)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 gh = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+def _clean_env(val: str | None) -> str | None:
+    if not val:
+        return None
+    cleaned = val.strip().strip("'\"").strip()
+    return cleaned if cleaned else None
+
+
+SUPABASE_URL = _clean_env(os.getenv("SUPABASE_URL"))
+SUPABASE_SERVICE_KEY = _clean_env(os.getenv("SUPABASE_SERVICE_KEY"))
 supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-async def broadcast_log(message: dict):
+async def emit_event(event: BaseEvent) -> None:
+    """
+    Emit a strongly-typed domain event to the current emitter or fallback Supabase sink.
+    """
+    emitter = current_emitter.get(None)
+    if emitter is not None:
+        await emitter.emit(event)
+    elif supabase:
+        fallback_emitter = SupabaseEmitter(client=supabase)
+        await fallback_emitter.emit(event)
+
+
+async def broadcast_log(message: Union[dict, BaseEvent]):
+    if isinstance(message, BaseEvent):
+        await emit_event(message)
+        return
+
     run_id = current_run_id.get(None)
     if not run_id or not supabase:
         print("Log fallback:", message)
@@ -70,6 +117,41 @@ async def broadcast_log(message: dict):
         print(f"Supabase insert failed: {e}")
 
 
+TARGET_REFERENCE_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+):(?P<start>\d+)-(?P<end>\d+)"
+)
+
+
+def extract_target_file(directive: str) -> str | None:
+    """Extract the first safe repository-relative file reference from a directive."""
+    for match in TARGET_REFERENCE_RE.finditer(directive or ""):
+        path = match.group("path")
+        if path.startswith((".", "/")) or ".." in path.split("/"):
+            continue
+        return path
+    return None
+
+
+def normalize_generated_code(raw_code: str) -> str:
+    """Remove optional Markdown fences and reject empty/error model output."""
+    if not isinstance(raw_code, str):
+        raise ValueError("Implementer returned a non-text response.")
+
+    code = raw_code.strip()
+    if code.startswith("[ERROR]"):
+        raise RuntimeError(code)
+    if code.startswith("```"):
+        lines = code.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        code = "\n".join(lines).strip()
+    if not code:
+        raise ValueError("Implementer returned empty code.")
+    return code
+
+
 def get_all_groq_keys():
     keys = []
     primary = os.getenv("GROQ_API_KEY")
@@ -83,6 +165,7 @@ def get_all_groq_keys():
 
 
 import operator
+from collections.abc import Sequence
 
 
 class AgentState(TypedDict):
@@ -96,8 +179,33 @@ class AgentState(TypedDict):
     issue_number: int
     pr_number: int
     branch_name: str
+    target_file_path: str
     iteration: int
     log_messages: Annotated[list, operator.add]
+
+
+class EmptyAgentStreamError(RuntimeError):
+    """Raised when an MCP agent stream contains no usable final response."""
+
+
+def extract_final_agent_content(final_res) -> str:
+    """Return the final streamed message or raise a descriptive protocol error."""
+    if not isinstance(final_res, dict):
+        raise EmptyAgentStreamError("MCP agent stream returned no agent result.")
+
+    messages = final_res.get("messages")
+    if not messages:
+        raise EmptyAgentStreamError("MCP agent stream returned no messages.")
+    if isinstance(messages, (str, bytes, bytearray)) or not isinstance(
+        messages, Sequence
+    ):
+        raise EmptyAgentStreamError("MCP agent stream returned malformed messages.")
+
+    content = getattr(messages[-1], "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise EmptyAgentStreamError("MCP agent stream returned an empty final message.")
+
+    return content
 
 
 async def run_llm(
@@ -117,14 +225,56 @@ async def run_llm(
     except Exception as e:
         run_id = current_run_id.get(None)
         if run_id:
-            await broadcast_log(
-                {
-                    "agent": "System",
-                    "msg": f"[ERROR] LLM execution failed: {str(e)}",
-                    "color": "text-red-500",
-                }
+            await emit_event(
+                ErrorEvent(
+                    run_id=run_id,
+                    phase=AgentPhase.SYSTEM,
+                    error_code="LLM_EXECUTION_FAILED",
+                    message=f"LLM execution failed: {str(e)}",
+                    fatal=False,
+                )
             )
         raise
+
+
+async def stream_inline_assist(
+    prompt: str,
+    selected_code: str,
+    prefix_code: str,
+    suffix_code: str,
+    file_path: str,
+):
+    try:
+        manager = await get_rate_limit_manager()
+        async with manager.key_context(estimated_tokens=2000) as key_state:
+            llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=key_state.key)
+
+            system_prompt = (
+                "You are an expert AI code editor assisting a developer inline inside a code editor.\n"
+                "Your task is to produce targeted replacement code for the selected code according to the user instruction.\n"
+                "Output ONLY the raw code replacement directly without conversational commentary or markdown backtick wrappers."
+            )
+
+            user_prompt = (
+                f"File: {file_path}\n\n"
+                f"--- Preceding Context (up to 50 lines before) ---\n{prefix_code}\n\n"
+                f"--- Selected Code (Target to Replace) ---\n{selected_code}\n\n"
+                f"--- Following Context (up to 50 lines after) ---\n{suffix_code}\n\n"
+                f"--- User Instruction ---\n{prompt}"
+            )
+
+            async for chunk in llm.astream(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt),
+                ]
+            ):
+                if chunk.content:
+                    yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+            yield "data: [DONE]\n\n"
+    except Exception as e:
+        logger.exception(f"Error during stream_inline_assist for {file_path}: {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
 
 async def run_llm_with_tools(
@@ -180,17 +330,18 @@ async def run_llm_with_tools(
                                 await broadcast_log(
                                     {
                                         "agent": "GitNexus",
-                                        "msg": f"🔍 Searched code graph using '{tm.name}'...",
-                                        "color": "text-purple-400",
+                                        "msg": f"Searched code graph using '{tm.name}'...",
                                     }
                                 )
                         if "agent" in chunk:
                             final_res = chunk["agent"]
+                            messages = chunk["agent"].get("messages")
                             if (
-                                "messages" in chunk["agent"]
-                                and len(chunk["agent"]["messages"]) > 0
+                                isinstance(messages, Sequence)
+                                and not isinstance(messages, (str, bytes, bytearray))
+                                and messages
                             ):
-                                msg = chunk["agent"]["messages"][-1]
+                                msg = messages[-1]
                                 if (
                                     hasattr(msg, "usage_metadata")
                                     and msg.usage_metadata
@@ -198,17 +349,17 @@ async def run_llm_with_tools(
                                     tokens = msg.usage_metadata.get("total_tokens", 0)
                                     latency_ms = int((time.time() - start_t) * 1000)
                                     if run_id:
-                                        await broadcast_log(
-                                            {
-                                                "type": "ui_update",
-                                                "systemHealth": {
-                                                    "latency": latency_ms,
-                                                    "tokensUsed": tokens,
-                                                },
-                                            }
+                                        await emit_event(
+                                            TelemetryEvent(
+                                                run_id=run_id,
+                                                phase=AgentPhase.SYSTEM,
+                                                latency_ms=latency_ms,
+                                                tokens_used=tokens,
+                                                model_name="llama-3.3-70b-versatile",
+                                            )
                                         )
 
-                    return final_res["messages"][-1].content
+                    return extract_final_agent_content(final_res)
 
                 return await manager.execute_with_retry(
                     _call_with_tools, estimated_tokens=estimated_tokens
@@ -217,7 +368,7 @@ async def run_llm_with_tools(
         err_str = str(e)
         if "RateLimitError" in err_str or "429" in err_str:
             print(
-                f"⚠️ Groq Rate Limit Reached during Tool loop. Falling back to simple LLM prompt."
+                "Groq Rate Limit Reached during Tool loop. Falling back to simple LLM prompt."
             )
         else:
             import traceback
@@ -234,13 +385,13 @@ async def run_llm_with_tools(
             print(f"LLM execution completely failed: {e2}")
             run_id = current_run_id.get(None)
             if run_id:
-                asyncio.create_task(
-                    broadcast_log(
-                        {
-                            "agent": "System",
-                            "msg": f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
-                            "color": "text-red-500",
-                        }
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.SYSTEM,
+                        error_code="RATE_LIMIT_REACHED",
+                        message=f"LLM Rate Limit Reached: {str(e2)}. Please wait a minute.",
+                        fatal=False,
                     )
                 )
             return f"[ERROR] LLM execution failed: {e2}"
@@ -252,6 +403,18 @@ async def architect_node(state: AgentState):
     target_issue = state.get("target_issue")
     tree_content = ""
     readme_content = ""
+    run_id = current_run_id.get(None)
+
+    if run_id:
+        await emit_event(
+            NodeTransitionEvent(
+                run_id=run_id,
+                phase=AgentPhase.ARCHITECT,
+                from_node=None,
+                to_node="architect",
+                iteration=state.get("iteration", 0),
+            )
+        )
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "active"}})
 
@@ -277,12 +440,22 @@ async def architect_node(state: AgentState):
                 {
                     "agent": "Architect",
                     "msg": f"Targeting specific issue #{target_issue}: {issue.title}",
-                    "color": "text-rose-400",
                 }
             )
             new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
+            if run_id:
+                await emit_event(
+                    PlanCheckpointEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.ARCHITECT,
+                        plan_markdown=directive,
+                        files_to_modify=[],
+                        files_to_create=[],
+                    )
+                )
             return {
                 "architect_directive": directive,
+                "target_file_path": extract_target_file(directive) or "",
                 "log_messages": new_logs,
             }  # ARCHITECT EARLY RETURN
         except Exception as e:
@@ -290,9 +463,18 @@ async def architect_node(state: AgentState):
                 {
                     "agent": "Architect",
                     "msg": f"Failed to fetch issue #{target_issue}: {str(e)}",
-                    "color": "text-red-500",
                 }
             )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.ARCHITECT,
+                        error_code="FETCH_ISSUE_FAILED",
+                        message=f"Failed to fetch issue #{target_issue}: {str(e)}",
+                        fatal=False,
+                    )
+                )
 
     if gh:
         try:
@@ -365,15 +547,18 @@ async def architect_node(state: AgentState):
             await index_proc.communicate()
         except Exception as e:
             warn_msg = (
-                f"⚠️ GitNexus indexing failed (agents will use raw LLM context): {e}"
+                f"GitNexus indexing failed (agents will use raw LLM context): {e}"
             )
-            new_logs.append(
-                {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
-            )
-            run_id = current_run_id.get(None)
+            new_logs.append({"agent": "System", "msg": warn_msg})
             if run_id:
-                await broadcast_log(
-                    {"agent": "System", "msg": warn_msg, "color": "text-amber-400"}
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.SYSTEM,
+                        error_code="GITNEXUS_INDEXING_FAILED",
+                        message=warn_msg,
+                        fatal=False,
+                    )
                 )
             print(f"Failed to analyze repo with GitNexus: {e}")
 
@@ -382,16 +567,13 @@ async def architect_node(state: AgentState):
             if os.path.exists(gitnexus_dir):
                 try:
                     shutil.rmtree(gitnexus_dir)
-                    info_msg = "ℹ️ Cleaned up partial GitNexus cache directory."
-                    new_logs.append(
-                        {"agent": "System", "msg": info_msg, "color": "text-zinc-500"}
-                    )
+                    info_msg = "Cleaned up partial GitNexus cache directory."
+                    new_logs.append({"agent": "System", "msg": info_msg})
                     if run_id:
                         await broadcast_log(
                             {
                                 "agent": "System",
                                 "msg": info_msg,
-                                "color": "text-zinc-500",
                             }
                         )
                 except Exception as clean_err:
@@ -443,15 +625,23 @@ async def architect_node(state: AgentState):
                 {
                     "agent": "Architect",
                     "msg": f"AST parsing failed: {str(e)}",
-                    "color": "text-amber-500",
                 }
             )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.ARCHITECT,
+                        error_code="AST_PARSING_FAILED",
+                        message=f"AST parsing failed: {str(e)}",
+                        fatal=False,
+                    )
+                )
     else:
         new_logs.append(
             {
                 "agent": "Architect",
                 "msg": f"AST generation skipped: repo_dir {repo_dir} not found.",
-                "color": "text-amber-500",
             }
         )
 
@@ -460,6 +650,18 @@ async def architect_node(state: AgentState):
 
     directive = await run_llm_with_tools(system_prompt, user_prompt)
     state["architect_directive"] = directive
+    target_file = extract_target_file(directive)
+
+    if run_id:
+        await emit_event(
+            PlanCheckpointEvent(
+                run_id=run_id,
+                phase=AgentPhase.ARCHITECT,
+                plan_markdown=directive,
+                files_to_modify=[target_file] if target_file else [],
+                files_to_create=[],
+            )
+        )
 
     new_logs.append(
         {
@@ -476,7 +678,6 @@ async def architect_node(state: AgentState):
         {
             "agent": "Architect",
             "msg": f"Directive: {directive}",
-            "color": "text-rose-400",
         }
     )
     new_logs.append(
@@ -492,6 +693,7 @@ async def architect_node(state: AgentState):
     new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
     return {
         "architect_directive": state.get("architect_directive", ""),
+        "target_file_path": target_file or "",
         "log_messages": new_logs,
     }
 
@@ -501,6 +703,18 @@ async def brainstormer_node(state: AgentState):
     repo = state["repo_name"]
     directive = state.get("architect_directive", "")
     target_issue = state.get("target_issue")
+    run_id = current_run_id.get(None)
+
+    if run_id:
+        await emit_event(
+            NodeTransitionEvent(
+                run_id=run_id,
+                phase=AgentPhase.BRAINSTORMER,
+                from_node="architect",
+                to_node="brainstormer",
+                iteration=state.get("iteration", 0),
+            )
+        )
 
     if target_issue:
         state["idea"] = directive
@@ -510,7 +724,6 @@ async def brainstormer_node(state: AgentState):
             {
                 "agent": "Visionary",
                 "msg": f"Bypassing brainstorm. Focusing on Issue #{target_issue}",
-                "color": "text-emerald-400",
             }
         )
         new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "idle"}})
@@ -542,7 +755,6 @@ async def brainstormer_node(state: AgentState):
         {
             "agent": "Visionary",
             "msg": f"Proposed Feature: {idea}",
-            "color": "text-emerald-400",
         }
     )
 
@@ -558,7 +770,6 @@ async def brainstormer_node(state: AgentState):
                 {
                     "agent": "System",
                     "msg": f"Created GitHub Issue #{issue.number}",
-                    "color": "text-emerald-500",
                 }
             )
             new_logs.append(
@@ -576,9 +787,18 @@ async def brainstormer_node(state: AgentState):
                 {
                     "agent": "System",
                     "msg": f"Failed to create Issue: {str(e)}",
-                    "color": "text-red-500",
                 }
             )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.BRAINSTORMER,
+                        error_code="CREATE_ISSUE_FAILED",
+                        message=f"Failed to create Issue: {str(e)}",
+                        fatal=False,
+                    )
+                )
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "idle"}})
     return {
@@ -595,6 +815,18 @@ async def pm_node(state: AgentState):
     repo = state["repo_name"]
     issue_number = state.get("issue_number")
     target_issue = state.get("target_issue")
+    run_id = current_run_id.get(None)
+
+    if run_id:
+        await emit_event(
+            NodeTransitionEvent(
+                run_id=run_id,
+                phase=AgentPhase.PM,
+                from_node="brainstormer",
+                to_node="pm",
+                iteration=state.get("iteration", 0),
+            )
+        )
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "active"}})
     new_logs.append(
@@ -616,7 +848,6 @@ async def pm_node(state: AgentState):
             {
                 "agent": "Reviewer",
                 "msg": f"Decision: {decision}",
-                "color": "text-amber-400",
             }
         )
         new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
@@ -630,10 +861,7 @@ async def pm_node(state: AgentState):
     state["pm_decision"] = decision
 
     is_approved = decision.strip().upper().startswith("APPROVED")
-    msg_color = "text-amber-400" if is_approved else "text-red-400"
-    new_logs.append(
-        {"agent": "Reviewer", "msg": f"Decision: {decision}", "color": msg_color}
-    )
+    new_logs.append({"agent": "Reviewer", "msg": f"Decision: {decision}"})
 
     if gh and issue_number:
         try:
@@ -646,7 +874,6 @@ async def pm_node(state: AgentState):
                 {
                     "agent": "System",
                     "msg": f"Commented on Issue #{issue_number}",
-                    "color": "text-zinc-500",
                 }
             )
         except Exception as e:
@@ -654,9 +881,18 @@ async def pm_node(state: AgentState):
                 {
                     "agent": "System",
                     "msg": f"Failed to comment on Issue: {str(e)}",
-                    "color": "text-red-500",
                 }
             )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.PM,
+                        error_code="COMMENT_ISSUE_FAILED",
+                        message=f"Failed to comment on Issue: {str(e)}",
+                        fatal=False,
+                    )
+                )
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
     return {"pm_decision": decision, "log_messages": new_logs}
@@ -675,42 +911,86 @@ async def implementer_node(state: AgentState):
     idea = state["idea"]
     issue_number = state.get("issue_number")
     iteration = state.get("iteration", 0)
-    prev_code = state.get("code", "")
     review = state.get("review", "")
+    target_file = state.get("target_file_path") or extract_target_file(idea)
+    path = target_file or f"feature_issue_{issue_number}.py"
+    run_id = current_run_id.get(None)
 
-    if iteration > 0:
-        system_prompt = "You are the Implementer Agent. Your previous code was rejected by the Maintainer. Fix it based on their feedback. Output ONLY the fixed Python script."
-        user_prompt = f"Previous Code:\n{prev_code}\n\nMaintainer Feedback:\n{review}"
+    if run_id:
+        await emit_event(
+            NodeTransitionEvent(
+                run_id=run_id,
+                phase=AgentPhase.IMPLEMENTER,
+                from_node="pm" if iteration == 0 else "maintainer",
+                to_node="implementer",
+                iteration=iteration,
+            )
+        )
+
+    if not gh or not issue_number:
+        raise RuntimeError("Implementer requires GitHub access and an issue number.")
+
+    gh_repo = gh.get_repo(state["repo_name"])
+    default_branch = gh_repo.default_branch
+    source_ref = state.get("branch_name") if iteration > 0 else default_branch
+    original_content = ""
+    target_file_exists = False
+
+    if target_file:
+        try:
+            file = gh_repo.get_contents(target_file, ref=source_ref)
+            if isinstance(file, list):
+                raise ValueError(
+                    f"Implementer target is a directory, not a file: {target_file}"
+                )
+            original_content = file.decoded_content.decode("utf-8")
+            target_file_exists = True
+        except GithubException as error:
+            if error.status != 404:
+                raise
+            original_content = (
+                "(This file does not exist yet; create it from the task.)"
+            )
+
+        system_prompt = (
+            "You are the Implementer Agent. "
+            f"{'Modify the supplied repository file' if target_file_exists else 'Create the referenced repository file'} "
+            "to satisfy the task and Maintainer feedback. "
+            "Preserve unrelated code and formatting. Output ONLY the complete file contents, "
+            "without Markdown fences."
+        )
+        user_prompt = (
+            f"Task:\n{idea}\n\nRepository file: {target_file}\n\n"
+            f"Current file contents:\n{original_content}\n\n"
+            f"Maintainer feedback:\n{review or 'No feedback; implement the task.'}"
+        )
     else:
-        system_prompt = "You are the Implementer Agent. Write a tiny python script that implements the core logic of the idea. Keep it very short. Output ONLY the Python script."
-        user_prompt = f"Write code for: {idea}"
+        system_prompt = (
+            "You are the Implementer Agent. Create the smallest useful source file for the "
+            "approved task. Output ONLY the complete file contents, without Markdown fences."
+        )
+        user_prompt = f"Task:\n{idea}\n\nCreate the new file: {path}"
 
-    code = await run_llm_with_tools(system_prompt, user_prompt)
-    state["code"] = code
-
+    code = normalize_generated_code(
+        await run_llm_with_tools(system_prompt, user_prompt)
+    )
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "active"}})
-
-    if iteration > 0:
-        new_logs.append(
-            {
-                "agent": "Implementer",
-                "msg": f"Fixed code based on feedback (Iteration {iteration}).",
-                "color": "text-blue-400",
-            }
-        )
-    else:
-        new_logs.append(
-            {
-                "agent": "Implementer",
-                "msg": "Generated initial code implementation.",
-                "color": "text-blue-400",
-            }
-        )
+    new_logs.append(
+        {
+            "agent": "Implementer",
+            "msg": (
+                f"Updated {path} based on the task (Iteration {iteration})."
+                if target_file_exists
+                else f"Created new target file {path} (Iteration {iteration})."
+            ),
+        }
+    )
+    if iteration == 0:
         new_logs.append(
             {
                 "type": "ui_update",
                 "pipeline": {
-                    "id": f"#{issue_number}" if issue_number else "#NEW",
+                    "id": f"#{issue_number}",
                     "title": idea.replace("\n", " ")[:30] + "...",
                     "status": "implementing",
                     "agent": "Implementer",
@@ -718,115 +998,79 @@ async def implementer_node(state: AgentState):
             }
         )
 
-    if gh and issue_number:
-        try:
-            gh_repo = gh.get_repo(state["repo_name"])
-
-            code_to_commit = code
-            if "```python" in code:
-                code_to_commit = code.split("```python")[1].split("```")[0].strip()
-            elif "```" in code:
-                code_to_commit = code.split("```")[1].split("```")[0].strip()
-
-            path = f"feature_issue_{issue_number}.py"
-
-            if iteration == 0:
-                default_branch = gh_repo.default_branch
-                sb = gh_repo.get_branch(default_branch)
-                branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
-                state["branch_name"] = branch_name
-                gh_repo.create_git_ref(
-                    ref=f"refs/heads/{branch_name}", sha=sb.commit.sha
-                )
-
-                gh_repo.create_file(
-                    path=path,
-                    message=f"Implement Feature for Issue #{issue_number}",
-                    content=code_to_commit,
-                    branch=branch_name,
-                )
-
-                pr = gh_repo.create_pull(
-                    title=f"Implement Feature Request #{issue_number}",
-                    body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
-                    head=branch_name,
-                    base=default_branch,
-                )
-                state["pr_number"] = pr.number
-                new_logs.append(
-                    {
-                        "agent": "System",
-                        "msg": f"Created PR #{pr.number}: {pr.html_url}",
-                        "color": "text-emerald-500",
-                    }
-                )
-                new_logs.append(
-                    {
-                        "type": "ui_update",
-                        "activity": {
-                            "title": f"Opened PR #{pr.number}",
-                            "time": "Just now",
-                            "type": "merge",
-                        },
-                    }
-                )
-            else:
-                branch_name = state["branch_name"]
-                file = gh_repo.get_contents(path, ref=branch_name)
-                gh_repo.update_file(
-                    path=file.path,
-                    message=f"Fix: Address maintainer feedback (Iteration {iteration})",
-                    content=code_to_commit,
-                    sha=file.sha,
-                    branch=branch_name,
-                )
-                pr_number = state["pr_number"]
-                pr = gh_repo.get_pull(pr_number)
-                pr.create_issue_comment(
-                    f"I have pushed a new commit to address the feedback. (Iteration {iteration})"
-                )
-                new_logs.append(
-                    {
-                        "agent": "System",
-                        "msg": f"Pushed fix to PR #{pr_number}",
-                        "color": "text-emerald-500",
-                    }
-                )
-
-            # Local sync to update the workspace clone on disk
-            from workspace import get_safe_repo_dir
-
-            repo_dir = str(get_safe_repo_dir(state["repo_name"]))
-            if os.path.exists(repo_dir):
-                local_path = os.path.join(repo_dir, path)
-                try:
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    with open(local_path, "w", encoding="utf-8") as f:
-                        f.write(code_to_commit)
-                    new_logs.append(
-                        {
-                            "agent": "System",
-                            "msg": f"Synced generated code locally: {path}",
-                            "color": "text-zinc-500",
-                        }
-                    )
-                except Exception as local_err:
-                    print(f"Failed to sync code locally: {local_err}")
-
-        except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "System",
-                    "msg": f"Failed GitHub API Action: {str(e)}",
-                    "color": "text-red-500",
-                }
+    if iteration == 0:
+        sb = gh_repo.get_branch(default_branch)
+        branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
+        gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
+        if target_file and target_file_exists:
+            gh_repo.update_file(
+                path=target_file,
+                message=f"Implement fix for Issue #{issue_number}",
+                content=code,
+                sha=file.sha,
+                branch=branch_name,
             )
+        else:
+            gh_repo.create_file(
+                path=path,
+                message=(
+                    f"Implement fix for Issue #{issue_number}"
+                    if target_file
+                    else f"Implement Feature for Issue #{issue_number}"
+                ),
+                content=code,
+                branch=branch_name,
+            )
+        pr = gh_repo.create_pull(
+            title=f"Implement Issue #{issue_number}",
+            body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
+            head=branch_name,
+            base=default_branch,
+        )
+        pr_number = pr.number
+        new_logs.append(
+            {
+                "agent": "System",
+                "msg": f"Created PR #{pr_number}: {pr.html_url}",
+            }
+        )
+    else:
+        branch_name = state["branch_name"]
+        file = gh_repo.get_contents(path, ref=branch_name)
+        if isinstance(file, list):
+            raise ValueError(f"Implementer target is a directory, not a file: {path}")
+        gh_repo.update_file(
+            path=path,
+            message=f"Fix: Address maintainer feedback (Iteration {iteration})",
+            content=code,
+            sha=file.sha,
+            branch=branch_name,
+        )
+        pr_number = state["pr_number"]
+        gh_repo.get_pull(pr_number).create_issue_comment(
+            f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
+        )
+        new_logs.append(
+            {
+                "agent": "System",
+                "msg": f"Pushed fix to PR #{pr_number}",
+            }
+        )
+
+    from workspace import get_safe_repo_dir
+
+    repo_dir = get_safe_repo_dir(state["repo_name"])
+    if repo_dir.exists():
+        local_path = repo_dir / path
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(code, encoding="utf-8")
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "idle"}})
     return {
         "code": code,
-        "branch_name": state.get("branch_name", ""),
-        "pr_number": state.get("pr_number", 0),
+        "branch_name": branch_name,
+        "target_file_path": path,
+        "pr_number": pr_number,
         "log_messages": new_logs,
     }
 
@@ -837,6 +1081,18 @@ async def maintainer_node(state: AgentState):
     repo_name = state["repo_name"]
     pr_number = state.get("pr_number")
     iteration = state.get("iteration", 0)
+    run_id = current_run_id.get(None)
+
+    if run_id:
+        await emit_event(
+            NodeTransitionEvent(
+                run_id=run_id,
+                phase=AgentPhase.MAINTAINER,
+                from_node="implementer",
+                to_node="maintainer",
+                iteration=iteration,
+            )
+        )
 
     system_prompt = "You are the Maintainer. Review the code. Say 'LGTM' if it looks okay, or point out a flaw."
     review = await run_llm_with_tools(system_prompt, f"Review this code:\n{code}")
@@ -847,11 +1103,22 @@ async def maintainer_node(state: AgentState):
         {
             "agent": "Maintainer",
             "msg": f"Code Review: {review}",
-            "color": "text-purple-400",
         }
     )
 
     is_lgtm = "LGTM" in review.upper()
+
+    if run_id:
+        await emit_event(
+            TestResultEvent(
+                run_id=run_id,
+                phase=AgentPhase.MAINTAINER,
+                exit_code=0 if is_lgtm else 1,
+                passed_count=1 if is_lgtm else 0,
+                failed_count=0 if is_lgtm else 1,
+                tracebacks=[] if is_lgtm else [review],
+            )
+        )
 
     if gh and pr_number:
         try:
@@ -875,7 +1142,6 @@ async def maintainer_node(state: AgentState):
                     {
                         "agent": "System",
                         "msg": f"Successfully merged PR #{pr_number}!",
-                        "color": "text-emerald-500",
                     }
                 )
         except Exception as e:
@@ -883,9 +1149,18 @@ async def maintainer_node(state: AgentState):
                 {
                     "agent": "System",
                     "msg": f"Failed to review/merge PR: {str(e)}",
-                    "color": "text-red-500",
                 }
             )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.MAINTAINER,
+                        error_code="PR_REVIEW_MERGE_FAILED",
+                        message=f"Failed to review/merge PR: {str(e)}",
+                        fatal=False,
+                    )
+                )
 
     if not is_lgtm:
         state["iteration"] = iteration + 1
@@ -926,13 +1201,23 @@ app = workflow.compile()
 
 
 async def run_agent_loop(
-    repo_name: str, target_issue: int | None = None, run_id: str = None
+    repo_name: str,
+    target_issue: int | None = None,
+    run_id: str = None,
+    emitter: Optional[EventEmitter] = None,
 ):
     if not run_id:
         import uuid
 
         run_id = str(uuid.uuid4())
     current_run_id.set(run_id)
+
+    if emitter is not None:
+        current_emitter.set(emitter)
+    elif supabase:
+        current_emitter.set(SupabaseEmitter(client=supabase))
+    else:
+        current_emitter.set(NullEmitter())
 
     if supabase:
         try:
@@ -963,12 +1248,14 @@ async def run_agent_loop(
         error_msg = (
             "Invalid repository name. Please configure a valid Target Repository."
         )
-        await broadcast_log(
-            {
-                "agent": "System",
-                "msg": error_msg,
-                "color": "text-red-500",
-            }
+        await emit_event(
+            ErrorEvent(
+                run_id=run_id,
+                phase=AgentPhase.SYSTEM,
+                error_code="INVALID_REPOSITORY",
+                message=error_msg,
+                fatal=True,
+            )
         )
         return {"status": "failed", "error": error_msg}
 
@@ -983,6 +1270,7 @@ async def run_agent_loop(
         "issue_number": 0,
         "pr_number": 0,
         "branch_name": "",
+        "target_file_path": "",
         "iteration": 0,
         "log_messages": [],
     }
@@ -991,7 +1279,6 @@ async def run_agent_loop(
         {
             "agent": "System",
             "msg": f"Starting loop for repo: {repo_name}...",
-            "color": "text-zinc-500",
         }
     )
 
@@ -1008,9 +1295,7 @@ async def run_agent_loop(
             last_idx = len(state["log_messages"])
             final_state = dict(state)
 
-        await broadcast_log(
-            {"agent": "System", "msg": "Agent loop complete.", "color": "text-zinc-500"}
-        )
+        await broadcast_log({"agent": "System", "msg": "Agent loop complete."})
         if supabase:
             try:
                 await asyncio.to_thread(
@@ -1030,12 +1315,14 @@ async def run_agent_loop(
             "branch_name": (final_state or {}).get("branch_name") or "",
         }
     except asyncio.CancelledError:
-        await broadcast_log(
-            {
-                "agent": "System",
-                "msg": "Agent loop cancelled by user.",
-                "color": "text-red-500",
-            }
+        await emit_event(
+            ErrorEvent(
+                run_id=run_id,
+                phase=AgentPhase.SYSTEM,
+                error_code="RUN_CANCELLED",
+                message="Agent loop cancelled by user.",
+                fatal=True,
+            )
         )
         if supabase:
             try:
