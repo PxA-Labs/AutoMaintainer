@@ -11,16 +11,21 @@
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@supabase/auth-helpers-nextjs": "^0.15.0",
-    "@supabase/supabase-js": "^2.112.3",
+    "@supabase/supabase-js": "^2.116.0",
     "@xterm/addon-fit": "^0.11.0",
-    "framer-motion": "^13.1.1",
-    "lucide-react": "^1.33.0",
-    "next": "16.3.3",
-    "react": "19.2.8",
-    "react-dom": "19.2.4",
+    "framer-motion": "^13.4.0",
+    "lucide-react": "^1.43.0",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "react-syntax-highlighter": "^16.1.1",
     "server-only": "^0.0.1",
     "xterm": "^5.3.0"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "3.4.14"
+    }
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -29,7 +34,7 @@
     "@types/react-dom": "^19",
     "@types/react-syntax-highlighter": "^15.5.13",
     "eslint": "^9",
-    "eslint-config-next": "16.3.3",
+    "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

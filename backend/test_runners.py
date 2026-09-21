@@ -1,4 +1,6 @@
+import re
 import subprocess
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -133,8 +135,9 @@ async def test_local_runner_git_diff(temp_workspace):
     await runner.write_file("README.md", "# Modified Title\n")
 
     diff = await runner.get_git_diff()
-    assert "-# Test Repo" in diff
-    assert "+# Modified Title" in diff
+    plain_diff = re.sub(r"\x1b\[[0-9;]*m", "", diff)
+    assert "-# Test Repo" in plain_diff
+    assert "+# Modified Title" in plain_diff
 
 
 @pytest.mark.asyncio
