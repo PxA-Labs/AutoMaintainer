@@ -2,12 +2,24 @@ import pytest
 import json
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from main import app
+from main import app, get_current_user
 
 client = TestClient(app)
 
 
-def test_inline_assist_endpoint_streaming():
+@pytest.fixture
+def authenticated_user():
+    """/assist/inline requires authentication; stub the dependency."""
+
+    async def allow_test_user():
+        return {"org_id": "test-org", "user_id": "test-user"}
+
+    app.dependency_overrides[get_current_user] = allow_test_user
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_inline_assist_endpoint_streaming(authenticated_user):
     async def mock_stream_generator(
         prompt, selected_code, prefix_code, suffix_code, file_path
     ):
@@ -49,3 +61,27 @@ def test_inline_assist_endpoint_streaming():
             suffix_code="# Footer\n",
             file_path="src/hello.py",
         )
+
+
+def test_inline_assist_requires_authentication():
+    """Anonymous callers must not be able to consume Groq inference quota."""
+    payload = {
+        "repo_name": "owner/repo",
+        "file_path": "src/hello.py",
+        "prompt": "Refactor function",
+        "selected_code": "def hello(): pass",
+        "prefix_code": "",
+        "suffix_code": "",
+        "selection": {
+            "startLine": 1,
+            "startColumn": 1,
+            "endLine": 1,
+            "endColumn": 1,
+        },
+    }
+
+    with patch("agents.stream_inline_assist") as mock_assist:
+        response = client.post("/assist/inline", json=payload)
+
+    assert response.status_code != 200
+    mock_assist.assert_not_called()
