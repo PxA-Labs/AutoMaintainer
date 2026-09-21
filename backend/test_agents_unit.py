@@ -3,7 +3,9 @@ import asyncio
 import httpx
 from unittest.mock import MagicMock
 from agents import (
+    EmptyAgentStreamError,
     broadcast_log,
+    extract_final_agent_content,
     extract_target_file,
     get_all_groq_keys,
     normalize_generated_code,
@@ -130,6 +132,35 @@ def test_get_all_groq_keys(monkeypatch):
     assert len(keys) >= 3
 
 
+def test_extract_final_agent_content_rejects_missing_result():
+    with pytest.raises(EmptyAgentStreamError, match="no agent result"):
+        extract_final_agent_content(None)
+
+
+def test_extract_final_agent_content_rejects_missing_messages():
+    with pytest.raises(EmptyAgentStreamError, match="no messages"):
+        extract_final_agent_content({})
+
+
+def test_extract_final_agent_content_rejects_empty_message():
+    message = MagicMock(content="   ")
+    with pytest.raises(EmptyAgentStreamError, match="empty final message"):
+        extract_final_agent_content({"messages": [message]})
+
+
+def test_extract_final_agent_content_returns_content():
+    message = MagicMock(content="architectural response")
+    assert (
+        extract_final_agent_content({"messages": [message]}) == "architectural response"
+    )
+
+
+def test_extract_final_agent_content_rejects_malformed_truthy_messages():
+    for malformed in ({"unexpected": "shape"}, 1, "not-a-message-list"):
+        with pytest.raises(EmptyAgentStreamError, match="malformed messages"):
+            extract_final_agent_content({"messages": malformed})
+
+
 def test_should_implement():
     # PM Decision APPROVED -> implementer
     state_approved = {"pm_decision": "  APPROVED with fixes "}
@@ -163,6 +194,16 @@ async def test_broadcast_log_no_supabase():
 
     # This should run without raising any Exception
     await broadcast_log({"msg": "Test fallback logging", "type": "message"})
+
+
+def test_healthz_is_independent_of_supabase():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    response = TestClient(app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
 
 
 def test_healthz_supabase_not_configured(monkeypatch):

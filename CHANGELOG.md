@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **dashboard**: Comprehensive professional UI/UX redesign & architecture decomposition ([#245](https://github.com/PxA-Labs/AutoMaintainer/pull/245)) - @purvanshjoshi
 - Web-first SaaS architecture with multi-tenancy, Celery queue, GitHub App auth, and observability ([#167](https://github.com/PxA-Labs/AutoMaintainer/pull/167)) - @purvanshjoshi
 - **ci**: Implement industry-standard changelog sync, PR title linter, and release automation ([#176](https://github.com/PxA-Labs/AutoMaintainer/pull/176)) (closes [#158](https://github.com/PxA-Labs/AutoMaintainer/issues/158)) - @purvanshjoshi
 ### Architecture & Core Agent Platform
@@ -42,7 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Resolved Identified Bugs, Security Vulnerabilities, and Cross-Platform Issues ([#56](https://github.com/PxA-Labs/AutoMaintainer/pull/56)) - @purvanshjoshi
 - fix(security): Resolve CodeQL path traversal vulnerabilities ([#47](https://github.com/PxA-Labs/AutoMaintainer/pull/47)) - @purvanshjoshi
 
-### Bug Fixes & System Stability
+### Bug Fixes
+
+- Add signed GitHub webhook ingestion ([#216](https://github.com/PxA-Labs/AutoMaintainer/pull/216)) (closes [#215](https://github.com/PxA-Labs/AutoMaintainer/issues/215)) - @SriRamkunamsetty
+- **dashboard**: Handle selectedRunId reset on new run and guest auth prompt on start ([#247](https://github.com/PxA-Labs/AutoMaintainer/pull/247)) - @purvanshjoshi
+- **backend**: Include target host diagnostic in healthz_supabase error response ([#244](https://github.com/PxA-Labs/AutoMaintainer/pull/244)) - @purvanshjoshi
+ & System Stability
 
 - fix(deploy): configure static export out directory for Docker and Vercel ([#164](https://github.com/PxA-Labs/AutoMaintainer/pull/164)) - @purvanshjoshi
 - fix(vercel): add root package.json and vercel.json for monorepo auto-detection ([#163](https://github.com/PxA-Labs/AutoMaintainer/pull/163)) - @purvanshjoshi
@@ -98,6 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump docker/metadata-action from 5.7.0 to 6.2.0 ([#276](https://github.com/PxA-Labs/AutoMaintainer/pull/276)) - @dependabot[bot]
+- **deps**: Bump amannn/action-semantic-pull-request from 5.5.3 to 6.1.1 ([#264](https://github.com/PxA-Labs/AutoMaintainer/pull/264)) - @dependabot[bot]
+- **deps-dev**: Bump eslint-config-next from 16.3.3 to 16.3.4 in /dashboard ([#249](https://github.com/PxA-Labs/AutoMaintainer/pull/249)) - @dependabot[bot]
 - **deps**: Bump release-drafter/release-drafter from 6.4.0 to 7.7.0 ([#228](https://github.com/PxA-Labs/AutoMaintainer/pull/228)) - @dependabot[bot]
 - chore(deps-dev): bump eslint-config-next from 16.3.0 to 16.3.1 in /dashboard ([#155](https://github.com/PxA-Labs/AutoMaintainer/pull/155)) - @dependabot[bot]
 - chore(deps): bump next from 16.3.0 to 16.3.1 in /dashboard ([#150](https://github.com/PxA-Labs/AutoMaintainer/pull/150)) - @dependabot[bot]
@@ -132,6 +141,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
+
+---
+
+---
+
+---
+
+---
+
+---
+
+---
 
 ---
 
