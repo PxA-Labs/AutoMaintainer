@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback, FormEvent } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, FormEvent } from "react";
 import {
   ChevronRight, ChevronDown, File as FileIcon, FolderOpen, Folder,
   Save, Search, X, Trash2, FilePlus, FolderPlus, Sparkles,
@@ -10,6 +10,9 @@ import {
 import { motion } from "framer-motion";
 import Editor, { OnMount } from "@monaco-editor/react";
 import InlineAssist, { SelectionContext } from "./InlineAssist";
+import { useAuth } from "@/lib/auth";
+import { isCredentialSafeBackendUrl, INSECURE_BACKEND_MESSAGE } from "@/lib/config";
+
 interface MonacoRange {
   new (startLine: number, startColumn: number, endLine: number, endColumn: number): unknown;
 }
@@ -97,6 +100,7 @@ interface SearchResult {
 
 interface WebIDEProps {
   repoUrl: string;
+  accessToken?: string;
 }
 
 interface FileChange {
@@ -538,7 +542,20 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
   );
 }
 
-export default function WebIDE({ repoUrl }: WebIDEProps) {
+export default function WebIDE({ repoUrl, accessToken }: WebIDEProps) {
+  const { session } = useAuth();
+  const token = accessToken ?? session?.access_token;
+  // Never attach the bearer token to a cleartext backend origin; it would be
+  // readable by anyone on the path.
+  const backendIsSecure = isCredentialSafeBackendUrl(getBackendUrl());
+
+  // Memoized so it is referentially stable and can be a hook dependency.
+  const authHeaders = useMemo<Record<string, string>>(() => {
+    const headers: Record<string, string> = {};
+    if (token && backendIsSecure) headers.Authorization = `Bearer ${token}`;
+    return headers;
+  }, [token, backendIsSecure]);
+
   // Tree State
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -747,18 +764,32 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     setInlineAssist(null);
   };
 
+  useEffect(() => {
+    if (token && !backendIsSecure) setError(INSECURE_BACKEND_MESSAGE);
+  }, [token, backendIsSecure]);
+
+  const treeRequestIdRef = useRef(0);
+
   const fetchTree = useCallback(async () => {
+    // Repo and token can both change while a request is in flight, so only the
+    // newest request is allowed to write to state.
+    const requestId = ++treeRequestIdRef.current;
+    const isStale = () => requestId !== treeRequestIdRef.current;
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`);
+      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`, {
+        headers: authHeaders,
+      });
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
-      setTree(data);
+      if (!isStale()) setTree(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
+      if (!isStale()) {
+        setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
+      }
     } finally {
-      setLoadingTree(false);
+      if (!isStale()) setLoadingTree(false);
     }
-  }, [repoUrl]);
+  }, [repoUrl, authHeaders]);
 
   const clearInlineAssistState = useCallback(() => {
     clearPreviewDecorations();
@@ -766,8 +797,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   }, []);
 
   useEffect(() => {
-    let active = true;
-
     // Repository switch state isolation & Monaco cleanup
     if (monacoRef.current?.editor?.getModels) {
       const models = monacoRef.current.editor.getModels();
@@ -783,28 +812,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     setProposedChanges([]);
     clearInlineAssistState();
 
-    setLoadingTree(true);
     setError(null);
     setTree(null);
-
-    fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/tree`)
-      .then(res => {
-        if (!res.ok) throw new Error("Repository not found or API error");
-        return res.json();
-      })
-      .then(data => {
-        if (active) setTree(data);
-      })
-      .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
-      })
-      .finally(() => {
-        if (active) setLoadingTree(false);
-      });
-    return () => {
-      active = false;
-    };
   }, [repoUrl, clearInlineAssistState]);
+
+  // Load the tree via fetchTree so the request carries the Authorization
+  // header. Keyed on fetchTree, which changes when repoUrl or the access token
+  // does, so the tree reloads once a session becomes available.
+  useEffect(() => {
+    setLoadingTree(true);
+    fetchTree();
+  }, [fetchTree]);
 
 
 
@@ -822,7 +840,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       setLoadingFiles(prev => ({...prev, [path]: true}));
       const currentRepoUrl = repoUrl;
       try {
-        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
+        const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`, {
+          headers: authHeaders,
+        });
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
 
@@ -907,7 +927,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({ file_path: activeTab, content })
       });
       if (!res.ok) throw new Error("Failed to save");
@@ -923,7 +943,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     } finally {
       setIsSaving(false);
     }
-  }, [activeTab, editedContents, fileContents, repoUrl]);
+  }, [activeTab, editedContents, fileContents, repoUrl, authHeaders]);
 
   const handleContentChange = (path: string, newContent: string) => {
     setEditedContents(prev => ({...prev, [path]: newContent}));
@@ -960,7 +980,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file/create`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({ file_path: newPath, is_dir: isDir, content: "" })
       });
       if (!res.ok) throw new Error("Failed to create");
@@ -976,7 +996,8 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (!confirm(`Are you sure you want to delete ${path}? This will also push a commit to GitHub.`)) return;
     try {
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: authHeaders,
       });
       if (!res.ok) throw new Error("Failed to delete");
       if (openTabs.includes(path)) closeTab({ stopPropagation: () => {} }, path);
@@ -1013,7 +1034,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     try {
-      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`);
+      const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/search?q=${encodeURIComponent(searchQuery)}`, {
+        headers: authHeaders,
+      });
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
       setSearchResults(data.results);
@@ -1033,7 +1056,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       // Call backend to create PR
       const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/propose-changes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
           title,
           description,

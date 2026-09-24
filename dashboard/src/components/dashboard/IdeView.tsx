@@ -5,6 +5,7 @@ import { Terminal, Code } from "lucide-react";
 import WebIDE from "@/components/WebIDE";
 import dynamic from "next/dynamic";
 import type { LogEntry } from "@/lib/hooks/use-agent-run";
+import { useAuth } from "@/lib/auth";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -21,13 +22,17 @@ interface IdeViewProps {
 
 export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
   const [terminalMode, setTerminalMode] = useState<"logs" | "pty">("logs");
+  // The repository and terminal endpoints are authorized with the Supabase
+  // access token, so both children need the current session token.
+  const { session } = useAuth();
+  const accessToken = session?.access_token;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Monaco WebIDE container */}
       <div className="flex-1 min-h-0">
         {user ? (
-          <WebIDE repoUrl={repoUrl} />
+          <WebIDE repoUrl={repoUrl} accessToken={accessToken} />
         ) : (
           <div className="flex items-center justify-center h-full bg-zinc-950 text-zinc-500 text-sm">
             Sign in to access the Web IDE
@@ -76,7 +81,7 @@ export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
         ) : (
           <div className="flex-1 min-h-0">
             {user ? (
-              <InteractiveTerminal repoUrl={repoUrl} />
+              <InteractiveTerminal repoUrl={repoUrl} accessToken={accessToken} />
             ) : (
               <div className="flex items-center justify-center h-full text-zinc-500 text-xs">
                 Sign in to access the Interactive Terminal

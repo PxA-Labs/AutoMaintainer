@@ -3,6 +3,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { Sparkles, Check, X, Loader2, Play, Code2, Zap, FileCheck, HelpCircle } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 export interface SelectionContext {
   startLine: number;
@@ -42,6 +43,8 @@ export default function InlineAssist({
   getBackendUrl,
   repoUrl,
 }: InlineAssistProps) {
+  // /assist/inline is authenticated because it consumes shared Groq quota.
+  const { session } = useAuth();
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +117,12 @@ export default function InlineAssist({
       const backendUrl = getBackendUrl();
       const res = await fetch(`${backendUrl}/assist/inline`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token
+            ? { Authorization: `Bearer ${session.access_token}` }
+            : {}),
+        },
         signal: controller.signal,
         body: JSON.stringify({
           repo_name: repoUrl,
