@@ -82,6 +82,7 @@ export function getLanguageFromPath(path: string | null): string {
   return languageMap[ext] || "plaintext";
 }
 
+
 interface TreeNode {
   name: string;
   path: string;
@@ -632,9 +633,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     clearPreviewDecorations();
 
-    const selection = editor.getSelection();
     const model = editor.getModel();
     if (!model) return;
+
+    const selection = editor.getSelection();
 
     const startLine = selection ? selection.startLineNumber : 1;
     const endLine = selection ? selection.endLineNumber : startLine;
@@ -690,6 +692,11 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor as unknown as MonacoEditorInstance;
     monacoRef.current = monaco as unknown as MonacoInstance;
+    editor.onDidDispose(() => {
+      clearPreviewDecorations();
+      editorRef.current = null;
+      monacoRef.current = null;
+    });
 
     // Register Cmd+K / Ctrl+K keybinding in Monaco
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
@@ -714,7 +721,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   };
 
   const handleAcceptInlineAssist = (replacementCode: string) => {
-    if (!editorRef.current || !monacoRef.current || !inlineAssist || !activeTab) return;
+    const currentTab = activeTabRef.current;
+    if (!editorRef.current || !monacoRef.current || !inlineAssist || !currentTab) return;
+
+    if (inlineAssist.filePath !== currentTab) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
     if (inlineAssist.filePath !== activeTab) {
       clearInlineAssistState();
@@ -723,9 +737,14 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
     const editor = editorRef.current;
     const monaco = monacoRef.current;
-    const { selectionContext } = inlineAssist;
+    const model = editor.getModel();
+    if (!model) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
 
-    clearPreviewDecorations();
+    const { selectionContext } = inlineAssist;
 
     const range = new monaco.Range(
       selectionContext.startLine,
@@ -733,6 +752,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       selectionContext.endLine,
       selectionContext.endColumn
     );
+
+    const currentSelectedCode = model.getValueInRange(range);
+    if (currentSelectedCode !== selectionContext.selectedCode) {
+      clearPreviewDecorations();
+      setInlineAssist(null);
+      return;
+    }
+
+    clearPreviewDecorations();
 
     editor.executeEdits("inline-assist", [
       {
@@ -743,7 +771,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     ]);
 
     const updatedValue = editor.getValue();
-    handleContentChange(activeTab, updatedValue);
+    handleContentChange(currentTab, updatedValue);
     setInlineAssist(null);
   };
 
@@ -758,6 +786,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     } finally {
       setLoadingTree(false);
     }
+
   }, [repoUrl]);
 
   const clearInlineAssistState = useCallback(() => {
@@ -825,7 +854,6 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
         const res = await fetch(`${getBackendUrl()}/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
         if (!res.ok) throw new Error("File not found");
         const data = await res.json();
-
         // Guard against race conditions
         setOpenTabs(currentTabs => {
           if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {

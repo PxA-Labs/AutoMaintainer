@@ -1,8 +1,8 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { Sparkles, Check, X, Loader2, Play, Code2, Zap, FileCheck, HelpCircle } from "lucide-react";
+import { Sparkles, Check, X, Loader2, Play, Code2, Zap, FileCheck } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 export interface SelectionContext {
   startLine: number;
@@ -29,7 +29,6 @@ const QUICK_ACTIONS = [
   { label: "Refactor for Performance", icon: Zap, prompt: "Refactor this code for better performance and readability." },
   { label: "Add Docstrings", icon: FileCheck, prompt: "Add clear docstrings and comments explaining this code." },
   { label: "Write Unit Tests", icon: Code2, prompt: "Generate unit tests for this code snippet." },
-  { label: "Explain Code", icon: HelpCircle, prompt: "Explain what this code snippet does and suggest improvements." },
 ];
 
 export default function InlineAssist({
@@ -42,6 +41,7 @@ export default function InlineAssist({
   getBackendUrl,
   repoUrl,
 }: InlineAssistProps) {
+  const { session } = useAuth();
   const [prompt, setPrompt] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,9 +112,14 @@ export default function InlineAssist({
 
     try {
       const backendUrl = getBackendUrl();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+
       const res = await fetch(`${backendUrl}/assist/inline`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         signal: controller.signal,
         body: JSON.stringify({
           repo_name: repoUrl,
@@ -163,7 +168,7 @@ export default function InlineAssist({
             const dataStr = trimmed.slice(6);
             if (dataStr === "[DONE]") break;
 
-            let parsed: any;
+            let parsed: { error?: string; content?: string };
             try {
               parsed = JSON.parse(dataStr);
             } catch {
@@ -192,18 +197,21 @@ export default function InlineAssist({
         setSuggestion(finalCode);
         onUpdatePreview?.(finalCode);
       }
-    } catch (err: any) {
-      if (err.name === "AbortError" || controller.signal.aborted) {
+    } catch (err: unknown) {
+      const isAbort = (err as { name?: string })?.name === "AbortError" || controller.signal.aborted;
+      if (isAbort) {
         // Silently ignore aborts
         return;
       }
-      setError(err.message || "Failed to generate inline edit");
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage || "Failed to generate inline edit");
+      setSuggestion(null);
       onUpdatePreview?.(null);
     } finally {
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
+        setIsLoading(false);
       }
-      setIsLoading(false);
     }
   };
 
@@ -233,6 +241,7 @@ export default function InlineAssist({
           </span>
           <button
             onClick={handleCancelAndClose}
+            aria-label="Close inline assist"
             className="text-zinc-400 hover:text-white p-1 rounded-md hover:bg-zinc-800 transition-colors"
           >
             <X className="w-3.5 h-3.5" />
