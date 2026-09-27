@@ -51,6 +51,7 @@ export function DashboardShell() {
     pipeline,
     activity,
     agentStatus,
+    branchName,
     addLog,
     resetState: resetLogsState,
   } = useLogs(effectiveRunId);
@@ -174,7 +175,12 @@ export function DashboardShell() {
         {/* Main View Switcher */}
         <main className="flex-1 flex flex-col overflow-hidden">
           {activeTab === "ide" ? (
-            <IdeView user={user} repoUrl={runState.repoUrl} logs={logs} />
+            <IdeView
+              user={user}
+              repoUrl={runState.repoUrl}
+              logs={logs}
+              branchName={branchName}
+            />
           ) : activeTab === "gitnexus" ? (
             <CodeGraph repoUrl={runState.repoUrl} />
           ) : activeTab === "runs" ? (

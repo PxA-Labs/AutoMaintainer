@@ -12,6 +12,7 @@ interface LogsState {
   pipeline: any[];
   activity: any[];
   agentStatus: Record<string, string>;
+  branchName: string | null;
 }
 
 const DEFAULT_AGENT_STATUS: Record<string, string> = {
@@ -39,6 +40,9 @@ export function useLogs(activeRunId: string | null) {
   const [activity, setActivity] = useState<any[]>([]);
   const [agentStatus, setAgentStatus] =
     useState<Record<string, string>>(DEFAULT_AGENT_STATUS);
+  // Branch the Implementer is working on, broadcast over the realtime log
+  // stream so the WebIDE can read and write the same branch as the agent PR.
+  const [branchName, setBranchName] = useState<string | null>(null);
 
   const addLog = useCallback((entry: LogEntry) => {
     setLogs((prev) => [...prev, entry]);
@@ -50,6 +54,7 @@ export function useLogs(activeRunId: string | null) {
     setActivity([]);
     setAgentStatus(DEFAULT_AGENT_STATUS);
     setSystemHealth({ latency: 0, tokensUsed: 0 });
+    setBranchName(null);
   }, []);
 
   // Main realtime log subscription + history replay
@@ -109,6 +114,7 @@ export function useLogs(activeRunId: string | null) {
         }
         if (msgData.agentStatus)
           setAgentStatus((prev) => ({ ...prev, ...msgData.agentStatus }));
+        if (msgData.branchName) setBranchName(msgData.branchName);
         if (msgData.pipeline) {
           setPipeline((prev) => {
             const exists = prev.find((p) => p.id === msgData.pipeline.id);
@@ -251,6 +257,7 @@ export function useLogs(activeRunId: string | null) {
     pipeline,
     activity,
     agentStatus,
+    branchName,
   };
 
   return { ...state, addLog, resetState };

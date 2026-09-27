@@ -17,9 +17,10 @@ interface IdeViewProps {
   user: any;
   repoUrl: string;
   logs: LogEntry[];
+  branchName: string | null;
 }
 
-export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
+export function IdeView({ user, repoUrl, logs, branchName }: IdeViewProps) {
   const [terminalMode, setTerminalMode] = useState<"logs" | "pty">("logs");
 
   return (
@@ -27,7 +28,7 @@ export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
       {/* Monaco WebIDE container */}
       <div className="flex-1 min-h-0">
         {user ? (
-          <WebIDE repoUrl={repoUrl} />
+          <WebIDE repoUrl={repoUrl} branchName={branchName} />
         ) : (
           <div className="flex items-center justify-center h-full bg-zinc-950 text-zinc-500 text-sm">
             Sign in to access the Web IDE
