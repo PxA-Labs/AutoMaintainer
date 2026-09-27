@@ -37,6 +37,42 @@ export function getBackendUrl(): string {
 }
 
 /**
+ * Loopback hosts, where cleartext transport is expected during local
+ * development and carries no meaningful interception risk.
+ */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
+}
+
+/**
+ * Whether bearer credentials may be sent to this backend URL.
+ *
+ * Requires TLS (https/wss) for anything other than a loopback host, so an
+ * access token is never transmitted in cleartext to a remote backend -- which
+ * is reachable today by pointing NEXT_PUBLIC_BACKEND_URL at an http:// origin.
+ * Returns true for unparseable input so callers fail on the request itself
+ * rather than on URL parsing.
+ */
+export function isCredentialSafeBackendUrl(backendUrl: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(backendUrl);
+    if (protocol === "https:" || protocol === "wss:") return true;
+    return isLoopbackHost(hostname);
+  } catch {
+    return true;
+  }
+}
+
+export const INSECURE_BACKEND_MESSAGE =
+  "Refusing to send credentials over an unencrypted connection. " +
+  "Configure NEXT_PUBLIC_BACKEND_URL with an https:// origin.";
+
+/**
  * Parse a target issue string into a number or null.
  * Accepts formats like "123", "#123", or empty string (null).
  */

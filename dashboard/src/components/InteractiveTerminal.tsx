@@ -4,12 +4,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "xterm/css/xterm.css";
+import { isCredentialSafeBackendUrl, INSECURE_BACKEND_MESSAGE } from "@/lib/config";
 
 interface InteractiveTerminalProps {
   repoUrl?: string;
+  accessToken?: string;
 }
 
-export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProps) {
+export default function InteractiveTerminal({ repoUrl, accessToken }: InteractiveTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -63,24 +65,48 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
       wsUrl += `?repo_url=${encodeURIComponent(repoUrl)}`;
     }
 
+    // The access token is sent over this socket, so refuse to open it at all
+    // on a cleartext origin rather than leaking the token on the wire.
+    if (!isCredentialSafeBackendUrl(wsUrl)) {
+      setError(INSECURE_BACKEND_MESSAGE);
+      return;
+    }
+
     const socket = new WebSocket(wsUrl);
     ws.current = socket;
 
     socket.onopen = () => {
-      setIsConnected(true);
-      setError(null);
-      
-      // Initial resize
-      if (terminalInstance.current) {
-        const { cols, rows } = terminalInstance.current;
-        socket.send(JSON.stringify({ type: "resize", cols, rows }));
+      if (!accessToken) {
+        // 1000 (normal closure) rather than 1008: close() only accepts 1000 or
+        // 3000-4999 and throws InvalidAccessError otherwise, which would leave
+        // the socket open and skip the error state below. The server issues
+        // 1008 itself for policy violations.
+        socket.close(1000, "Authentication required");
+        setError("Authentication required");
+        return;
       }
+      socket.send(JSON.stringify({ type: "auth", access_token: accessToken }));
     };
 
     socket.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        term.write(event.data);
+      if (typeof event.data !== "string") return;
+
+      try {
+        const controlMessage = JSON.parse(event.data);
+        if (controlMessage?.type === "authenticated") {
+          setIsConnected(true);
+          setError(null);
+          if (terminalInstance.current && socket.readyState === WebSocket.OPEN) {
+            const { cols, rows } = terminalInstance.current;
+            socket.send(JSON.stringify({ type: "resize", cols, rows }));
+          }
+          return;
+        }
+      } catch {
+        // Terminal output is plain text and is expected to fail JSON parsing.
       }
+
+      term.write(event.data);
     };
 
     socket.onerror = () => {
@@ -117,7 +143,7 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
       socket.close();
       term.dispose();
     };
-  }, [repoUrl, reconnectKey]);
+  }, [repoUrl, accessToken, reconnectKey]);
 
   return (
     <div className="flex flex-col h-full w-full bg-[#1e1e1e] border-l border-zinc-800">
