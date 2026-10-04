@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump langchain from 1.4.2 to 1.4.3 in /backend ([#305](https://github.com/PxA-Labs/AutoMaintainer/pull/305)) - @dependabot[bot]
 - **deps**: Pin backend dependencies for reproducible installs ([#204](https://github.com/PxA-Labs/AutoMaintainer/pull/204)) (closes [#121](https://github.com/PxA-Labs/AutoMaintainer/issues/121)) - @SriRamkunamsetty
 - **deps**: Bump actions/setup-python from 5.4.0 to 7.0.0 ([#285](https://github.com/PxA-Labs/AutoMaintainer/pull/285)) - @dependabot[bot]
 - **deps**: Bump docker/metadata-action from 5.7.0 to 6.2.0 ([#276](https://github.com/PxA-Labs/AutoMaintainer/pull/276)) - @dependabot[bot]
@@ -143,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitNexus Code Intelligence**: AST-aware knowledge graph and symbol indexer enabling whole-repo semantic context.
 - **Pro Monaco WebIDE**: In-browser VSCode-grade editor with multi-file tabs, syntax highlighting, and interactive terminal (xterm.js).
 - **Automated GitHub Integration**: Native issue reading, PR generation, CI verification loops, and automated branch mergers.
+
+---
 
 ---
 
