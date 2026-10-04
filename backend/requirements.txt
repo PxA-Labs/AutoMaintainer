@@ -503,7 +503,7 @@ uuid-utils==0.17.1
     # via
     #   langchain-core
     #   langsmith
-uvicorn==0.53.0
+uvicorn==0.54.0
     # via
     #   -r requirements.in
     #   mcp
