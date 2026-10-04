@@ -67,7 +67,7 @@ click-repl==0.4.0
     # via celery
 coverage[toml]==7.16.1
     # via pytest-cov
-cryptography==50.0.1
+cryptography==50.0.2
     # via
     #   -r requirements.in
     #   pyjwt
