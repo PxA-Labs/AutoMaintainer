@@ -201,7 +201,7 @@ langgraph-sdk==0.4.4
     # via langgraph
 langsmith==0.13.0
     # via langchain-core
-litellm==1.102.0
+litellm==1.103.2
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
