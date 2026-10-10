@@ -84,8 +84,10 @@ fastapi==0.142.2
     # via -r requirements.in
 fastuuid==0.14.0
     # via litellm
-filelock==4.0.1
-    # via huggingface-hub
+filelock==3.32.7
+    # via
+    #   huggingface-hub
+    #   litellm
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -134,7 +136,9 @@ httpx-sse==0.4.3
 httpx2==2.13.0
     # via langsmith
 huggingface-hub==1.32.0
-    # via tokenizers
+    # via
+    #   litellm
+    #   tokenizers
 hyperframe==6.1.0
     # via h2
 idna==3.20
@@ -201,7 +205,7 @@ langgraph-sdk==0.4.4
     # via langgraph
 langsmith==0.13.0
     # via langchain-core
-litellm==1.103.2
+litellm==1.104.1
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
@@ -303,6 +307,7 @@ packaging==26.3
     #   kombu
     #   langchain-core
     #   langsmith
+    #   litellm
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-sqlalchemy
     #   pytest
@@ -390,6 +395,7 @@ pyyaml==6.0.3
     # via
     #   huggingface-hub
     #   langchain-core
+    #   litellm
 realtime==2.31.0
     # via supabase
 redis==8.1.0
