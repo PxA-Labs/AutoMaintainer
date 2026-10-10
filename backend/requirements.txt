@@ -310,7 +310,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-postgrest==2.31.0
+postgrest==2.32.0
     # via supabase
 prometheus-client==0.26.0
     # via opentelemetry-exporter-prometheus
@@ -390,7 +390,7 @@ pyyaml==6.0.3
     # via
     #   huggingface-hub
     #   langchain-core
-realtime==2.31.0
+realtime==2.32.0
     # via supabase
 redis==8.1.0
     # via -r requirements.in
@@ -429,15 +429,15 @@ starlette==1.6.0
     #   fastapi
     #   mcp
     #   sse-starlette
-storage3==2.31.0
+storage3==2.32.0
     # via supabase
 strenum==0.4.15
     # via supabase-functions
-supabase==2.31.0
+supabase==2.32.0
     # via -r requirements.in
-supabase-auth==2.31.0
+supabase-auth==2.32.0
     # via supabase
-supabase-functions==2.31.0
+supabase-functions==2.32.0
     # via supabase
 tenacity==9.1.4
     # via langchain-core
