@@ -3,6 +3,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { Sparkles, Check, X, Loader2, Play, Code2, Zap, FileCheck, HelpCircle } from "lucide-react";
+import { authedFetch } from "@/lib/api";
 
 export interface SelectionContext {
   startLine: number;
@@ -21,7 +22,6 @@ export interface InlineAssistProps {
   onClose: () => void;
   onAccept: (replacementCode: string) => void;
   onUpdatePreview?: (suggestion: string | null) => void;
-  getBackendUrl: () => string;
   repoUrl: string;
 }
 
@@ -39,7 +39,6 @@ export default function InlineAssist({
   onClose,
   onAccept,
   onUpdatePreview,
-  getBackendUrl,
   repoUrl,
 }: InlineAssistProps) {
   const [prompt, setPrompt] = useState("");
@@ -111,8 +110,7 @@ export default function InlineAssist({
     onUpdatePreview?.("");
 
     try {
-      const backendUrl = getBackendUrl();
-      const res = await fetch(`${backendUrl}/assist/inline`, {
+      const res = await authedFetch(`/assist/inline`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,

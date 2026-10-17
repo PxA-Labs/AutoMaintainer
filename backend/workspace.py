@@ -4,6 +4,10 @@ import tempfile
 from pathlib import Path
 from fastapi import HTTPException
 
+# Top-level entries inside a repository that are never served or written
+# through the filesystem API.
+DENIED_TOP_LEVEL = {".git"}
+
 
 def get_base_workspace_dir() -> Path:
     """Returns the base directory for cloned repositories and local workspaces.
@@ -62,6 +66,15 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
     norm_path = os.path.normpath(clean_path)
     if norm_path.startswith("..") or os.path.isabs(norm_path):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
+
+    # The repository metadata directory is not application content. `.git/config`
+    # can carry the credentials used for the clone, and `.git/` exposes full
+    # history regardless of what the working tree shows.
+    first_component = norm_path.replace("\\", "/").split("/")[0]
+    if first_component.lower() in DENIED_TOP_LEVEL:
+        raise HTTPException(
+            status_code=403, detail="Access to this path is not allowed"
+        )
 
     repo_base_str = os.path.abspath(str(repo_dir))
     target_full_str = os.path.abspath(os.path.join(repo_base_str, norm_path))

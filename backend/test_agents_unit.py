@@ -1,6 +1,4 @@
 import pytest
-import asyncio
-import httpx
 from unittest.mock import MagicMock
 from agents import (
     broadcast_log,
@@ -266,30 +264,17 @@ def test_workspace_helpers(tmp_path, monkeypatch):
         pass
 
 
-@pytest.mark.asyncio
-async def test_start_and_stop_concurrency(monkeypatch):
+def test_legacy_unauthenticated_routes_are_removed():
+    """/start-legacy and /stop-legacy bypassed auth entirely.
+
+    They accepted any caller, skipped Celery and the runs table, and spent the
+    shared GROQ_API_KEY on an arbitrary repo_name. /start and /stop supersede
+    them. This guards against reintroduction.
+    """
     import main
 
-    async def mock_agent_loop(repo, issue, run_id):
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            pass
+    paths = {getattr(route, "path", None) for route in main.app.routes}
 
-    monkeypatch.setattr(main, "run_agent_loop", mock_agent_loop)
-
-    transport = httpx.ASGITransport(app=main.app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        res_start = await client.post("/start-legacy", json={"repo_name": "test/repo"})
-        assert res_start.status_code == 200
-        run_id = res_start.json()["run_id"]
-
-        assert run_id in main.active_tasks
-
-        res_stop = await client.post("/stop-legacy", json={"run_id": run_id})
-        assert res_stop.status_code == 200
-        assert res_stop.json()["status"] == "stopped"
-
-        res_stop_again = await client.post("/stop-legacy", json={"run_id": run_id})
-        assert res_stop_again.status_code == 200
-        assert res_stop_again.json()["status"] == "not_running"
+    assert "/start-legacy" not in paths
+    assert "/stop-legacy" not in paths
+    assert "/start" in paths and "/stop" in paths

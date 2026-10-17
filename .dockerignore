@@ -1,7 +1,22 @@
-node_modules/
-.next/
-out/
-venv/
-__pycache__/
-.env
-.DS_Store
+# Secrets: patterns must be recursive. A bare `.env` matches only the context
+# root, which silently let backend/.env into the image layer.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Dependencies and virtualenvs (host-built, wrong platform for the image)
+**/node_modules
+**/venv
+**/.venv
+**/__pycache__
+**/*.pyc
+
+# Build output: the frontend is built inside stage 1, never copied from host
+**/.next
+**/out
+**/.pytest_cache
+
+# VCS and local noise
+.git
+.gitignore
+**/.DS_Store

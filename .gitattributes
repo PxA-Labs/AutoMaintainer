@@ -1,1 +1,7 @@
 *.png filter=lfs diff=lfs merge=lfs -text
+
+# Docker reads these line-by-line and does not strip a trailing CR, so a CRLF
+# checkout turns every ignore pattern into "<pattern>\r", which matches nothing.
+.dockerignore text eol=lf
+Dockerfile text eol=lf
+*.sh text eol=lf

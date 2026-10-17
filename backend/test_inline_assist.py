@@ -2,9 +2,17 @@ import pytest
 import json
 from unittest.mock import patch
 from fastapi.testclient import TestClient
-from main import app
+from main import app, get_org_id
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def authenticated():
+    """/assist/inline streams LLM output on a shared key, so it requires auth."""
+    app.dependency_overrides[get_org_id] = lambda: "test-org-id"
+    yield
+    app.dependency_overrides.pop(get_org_id, None)
 
 
 def test_inline_assist_endpoint_streaming():
