@@ -6,6 +6,7 @@ from fastapi import (
     HTTPException,
     Depends,
     Header,
+    Request,
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,10 +29,12 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 # Celery integration
 from celery_app import celery_app
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
+from github_app import handle_github_webhook
 
 # Observability
 from observability import (
@@ -317,23 +320,86 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AutoMaintainer Backend", lifespan=lifespan)
 
-# Allow the Next.js frontend to connect to this API
-cors_origins_env = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000",
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 )
-allowed_origins = [
-    origin.strip() for origin in cors_origins_env.split(",") if origin.strip()
-]
 
+# Vercel preview deployments get a fresh subdomain per build, so they are matched
+# by regex instead of being enumerated in ALLOWED_ORIGINS.
+DEFAULT_ALLOWED_ORIGIN_REGEX = r"^https:\/\/.*\.vercel\.app$"
+
+
+def parse_allowed_origins(configured_origins: str | None) -> list[str]:
+    """Return safe, normalized CORS origins from a comma-separated setting."""
+    candidates = list(DEFAULT_ALLOWED_ORIGINS)
+    if configured_origins:
+        candidates.extend(origin.strip() for origin in configured_origins.split(","))
+
+    origins = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "ALLOWED_ORIGINS must contain comma-separated http(s) origins "
+                f"without paths or wildcards: {candidate!r}"
+            )
+        normalized = f"{parsed.scheme}://{parsed.netloc}"
+        if normalized not in origins:
+            origins.append(normalized)
+    return origins
+
+
+# ALLOWED_ORIGINS is the name used by render.yaml; CORS_ORIGINS is kept as an
+# alias so existing deployments keep working.
+ALLOWED_ORIGINS = parse_allowed_origins(
+    os.getenv("ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS")
+)
+
+# Allow the Next.js frontend to connect to this API. Origins are exact matches;
+# wildcard origins are intentionally rejected because credentials are enabled.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins if allowed_origins else ["*"],
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"^https:\/\/.*\.vercel\.app$"),
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", DEFAULT_ALLOWED_ORIGIN_REGEX),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request):
+    """Receive and persist signed GitHub App webhook deliveries."""
+    from agents import supabase as agents_supabase
+
+    if not os.getenv("GITHUB_WEBHOOK_SECRET"):
+        raise HTTPException(
+            status_code=503, detail="GitHub webhook secret is not configured"
+        )
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    raw_body = await request.body()
+    try:
+        return await handle_github_webhook(
+            raw_body,
+            dict(request.headers),
+            agents_supabase,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("GitHub webhook processing failed")
+        raise HTTPException(status_code=500, detail="Failed to queue GitHub webhook")
 
 
 @app.get("/healthz")
@@ -580,10 +646,10 @@ async def stop_agents(
         # Cancel specific run
         run_id = req.run_id
 
-        # Verify ownership
+        # Verify ownership before touching anything
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, status, celery_task_id")
+            .select("id, status, org_id")
             .eq("id", run_id)
             .eq("org_id", org_id)
             .single()
@@ -593,34 +659,23 @@ async def stop_agents(
         if not result.data:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        run = result.data
-
-        if run["status"] not in ("queued", "running"):
+        if result.data["status"] not in ("queued", "running"):
             return {
                 "status": "not_running",
                 "run_id": run_id,
-                "current_status": run["status"],
+                "current_status": result.data["status"],
             }
 
-        # Revoke Celery task
-        celery_task_id = run.get("celery_task_id")
-        if celery_task_id:
-            celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
-
-        # Update status
-        await asyncio.to_thread(
-            lambda: sb.table("runs")
-            .update(
-                {
-                    "status": "cancelled",
-                    "error_message": "Cancelled by user",
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
+        # Delegate to cancel_run_task -- it revokes the Celery task,
+        # updates status to 'cancelled', AND releases the repo lock.
+        # Calling the task function directly (not .delay()) runs it
+        # synchronously here since it's just DB reads/writes plus a
+        # control.revoke() call, not agent work.
+        outcome = await asyncio.to_thread(cancel_run_task, run_id)
+        if not outcome.get("success"):
+            raise HTTPException(
+                status_code=500, detail=outcome.get("error", "Cancellation failed")
             )
-            .eq("id", run_id)
-            .execute()
-        )
 
         return {"status": "cancelled", "run_id": run_id}
 
@@ -628,7 +683,7 @@ async def stop_agents(
         # Cancel all running runs for org
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
-            .select("id, celery_task_id")
+            .select("id")
             .eq("org_id", org_id)
             .in_("status", ["queued", "running"])
             .execute()
@@ -638,35 +693,22 @@ async def stop_agents(
         cancelled_count = 0
 
         for run in runs:
-            celery_task_id = run.get("celery_task_id")
-            if celery_task_id:
-                celery_app.control.revoke(
-                    celery_task_id, terminate=True, signal="SIGTERM"
+            outcome = await asyncio.to_thread(cancel_run_task, run["id"])
+            if outcome.get("success"):
+                cancelled_count += 1
+            else:
+                logger.warning(
+                    f"Failed to cancel run {run['id']} during bulk stop: "
+                    f"{outcome.get('error')}"
                 )
-
-            await asyncio.to_thread(
-                lambda r=run: sb.table("runs")
-                .update(
-                    {
-                        "status": "cancelled",
-                        "error_message": "Cancelled by user (bulk)",
-                        "completed_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                )
-                .eq("id", r["id"])
-                .execute()
-            )
-            cancelled_count += 1
 
         return {"status": "cancelled", "count": cancelled_count}
 
 
-# Keep backward compatibility for in-memory tasks (deprecated)
 @app.post("/assist/inline")
 async def inline_assist(
     req: InlineAssistRequest,
-    org_id: str = Depends(get_org_id),
+    user: dict = Depends(get_current_user),
 ):
     from agents import stream_inline_assist
 
@@ -966,9 +1008,11 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     # client (websocat, curl, python-websockets) omits it by default. It also
     # matched by substring, so "huggingface.co" accepted
     # https://huggingface.co.attacker.net. Require an exact match against the
-    # configured origin allowlist; set CORS_ORIGINS to use a different port.
+    # configured allowlist; set ALLOWED_ORIGINS to permit another origin. The
+    # CORS preview-deployment regex is deliberately NOT honoured here -- an
+    # interactive shell should not be reachable from arbitrary preview hosts.
     origin = websocket.headers.get("origin")
-    if not origin or origin not in allowed_origins:
+    if not origin or origin not in ALLOWED_ORIGINS:
         await websocket.close(code=1008)
         return
 
@@ -1272,7 +1316,7 @@ def get_repo_file(
 async def get_admin_metrics(
     org_id: str = Depends(get_org_id), user_id: str = Depends(get_user_id)
 ):
-    """Get system-wide metrics for admin dashboard."""
+    """Get metrics for the caller's organization admin dashboard."""
     from agents import supabase as agents_supabase
 
     sb = agents_supabase
@@ -1392,6 +1436,7 @@ async def get_admin_metrics(
                 "active": active_orgs,
                 "byPlan": plan_dist,
             },
+            "organizations": orgs,
             "runs": {
                 "total": total_runs,
                 "running": running_runs,
@@ -1411,9 +1456,9 @@ async def get_admin_metrics(
                 "public": 0,
             },
             "system": {
-                "supabaseHealthy": True,  # Would check actual health
-                "activeConnections": 0,
-                "queueDepth": 0,
+                "supabaseHealthy": True,
+                "activeConnections": None,
+                "queueDepth": None,
             },
         }
     except Exception as e:

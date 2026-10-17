@@ -1,9 +1,21 @@
 """
 Celery Application Configuration for AutoMaintainer
 Provides durable, scalable task queue for agent runs.
+
+Worker auto-restart has two layers:
+1. Celery-level (configured below): worker_max_tasks_per_child and
+   worker_max_memory_per_child recycle a *child process* after it's
+   done too much work or grown too large -- guards against memory
+   leaks in long agent runs.
+2. Process-supervisor level (outside this file): if the whole worker
+   *daemon* crashes, something outside Python needs to bring it back
+   -- e.g. `Restart=always` in a systemd unit, or a Docker/Kubernetes
+   restart policy. That's infra config, not something celery_app.py
+   can express.
 """
 
 import os
+from urllib.parse import urlparse
 
 try:
     from celery import Celery
@@ -52,6 +64,34 @@ except ImportError:
 # Redis connection
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
+
+def redis_configured() -> bool:
+    """
+    True only when a real REDIS_URL was provided via the environment.
+    Used by start_agent_task/cancel_agent_task in tasks.py to decide
+    between queuing through Celery and running inline -- the
+    "zero-overhead fallback for local single-process development"
+    acceptance criterion. We deliberately don't default this to the
+    localhost fallback URL above: an unset REDIS_URL should mean
+    "no broker configured", not "assume localhost is running".
+    """
+    return bool(os.getenv("REDIS_URL"))
+
+
+def _redis_ssl_options():
+    """
+    Celery/kombu expects SSL options as a dict (or None to disable).
+    We only enable them when the URL scheme is rediss:// -- e.g.
+    managed Redis providers (AWS ElastiCache, Upstash, Redis Cloud)
+    that require TLS in production.
+    """
+    if urlparse(REDIS_URL).scheme != "rediss":
+        return None
+    return {
+        "ssl_cert_reqs": os.getenv("REDIS_SSL_CERT_REQS", "required"),
+    }
+
+
 # Celery app
 celery_app = Celery(
     "automaintainer", broker=REDIS_URL, backend=REDIS_URL, include=["tasks"]
@@ -66,6 +106,13 @@ celery_app.conf.update(
     # Timezone
     timezone="UTC",
     enable_utc=True,
+    # SSL support -- only applied when REDIS_URL uses rediss://
+    broker_use_ssl=_redis_ssl_options(),
+    redis_backend_use_ssl=_redis_ssl_options(),
+    # Connection pooling -- caps concurrent broker connections per worker
+    # process instead of opening a fresh one per task.
+    broker_pool_limit=int(os.getenv("CELERY_BROKER_POOL_LIMIT", "10")),
+    broker_connection_retry_on_startup=True,
     # Task routing
     task_routes={
         "tasks.run_agent_loop_task": {"queue": "agent_runs"},
@@ -82,6 +129,7 @@ celery_app.conf.update(
     # Worker configuration
     worker_prefetch_multiplier=1,  # One task per worker for long-running agent runs
     worker_max_tasks_per_child=10,  # Restart worker after 10 tasks to prevent memory leaks
+    worker_max_memory_per_child=512_000,  # Restart worker if it exceeds ~512MB RSS
     worker_disable_rate_limits=False,
     # Task execution
     task_acks_late=True,  # Acknowledge after completion (not before)

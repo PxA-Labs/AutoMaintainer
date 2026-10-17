@@ -1,13 +1,16 @@
 import pytest
 from unittest.mock import MagicMock
 from agents import (
+    EmptyAgentStreamError,
     broadcast_log,
+    extract_final_agent_content,
     extract_target_file,
     get_all_groq_keys,
     normalize_generated_code,
     should_implement,
     should_iterate,
 )
+from main import parse_allowed_origins
 from workspace import get_base_workspace_dir, get_safe_repo_dir, get_safe_target_path
 from fastapi import HTTPException
 
@@ -114,6 +117,47 @@ async def test_implementer_creates_explicit_missing_target_file(monkeypatch):
     assert result["target_file_path"] == "backend/new_feature.py"
 
 
+def test_parse_allowed_origins_includes_defaults_and_configured_values():
+    origins = parse_allowed_origins(
+        "https://dashboard.example.com, https://dashboard.example.com/"
+    )
+
+    assert origins == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://dashboard.example.com",
+    ]
+
+
+def test_parse_allowed_origins_rejects_wildcards_and_paths():
+    with pytest.raises(ValueError, match="without paths or wildcards"):
+        parse_allowed_origins("*")
+
+    with pytest.raises(ValueError, match="without paths or wildcards"):
+        parse_allowed_origins("https://dashboard.example.com/app")
+
+
+def test_cors_preflight_uses_exact_configured_origins():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    client = TestClient(app)
+    request_headers = {
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    }
+    response = client.options("/start", headers=request_headers)
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+    request_headers["Origin"] = "http://localhost.evil.test"
+    rejected = client.options("/start", headers=request_headers)
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
+
+
 def test_get_all_groq_keys(monkeypatch):
     # Test with GROQ_API_KEY and additional numbered keys
     monkeypatch.setenv("GROQ_API_KEY", "primary-key")
@@ -126,6 +170,35 @@ def test_get_all_groq_keys(monkeypatch):
     assert "key-1" in keys
     assert "key-2" in keys
     assert len(keys) >= 3
+
+
+def test_extract_final_agent_content_rejects_missing_result():
+    with pytest.raises(EmptyAgentStreamError, match="no agent result"):
+        extract_final_agent_content(None)
+
+
+def test_extract_final_agent_content_rejects_missing_messages():
+    with pytest.raises(EmptyAgentStreamError, match="no messages"):
+        extract_final_agent_content({})
+
+
+def test_extract_final_agent_content_rejects_empty_message():
+    message = MagicMock(content="   ")
+    with pytest.raises(EmptyAgentStreamError, match="empty final message"):
+        extract_final_agent_content({"messages": [message]})
+
+
+def test_extract_final_agent_content_returns_content():
+    message = MagicMock(content="architectural response")
+    assert (
+        extract_final_agent_content({"messages": [message]}) == "architectural response"
+    )
+
+
+def test_extract_final_agent_content_rejects_malformed_truthy_messages():
+    for malformed in ({"unexpected": "shape"}, 1, "not-a-message-list"):
+        with pytest.raises(EmptyAgentStreamError, match="malformed messages"):
+            extract_final_agent_content({"messages": malformed})
 
 
 def test_should_implement():
@@ -161,6 +234,16 @@ async def test_broadcast_log_no_supabase():
 
     # This should run without raising any Exception
     await broadcast_log({"msg": "Test fallback logging", "type": "message"})
+
+
+def test_healthz_is_independent_of_supabase():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    response = TestClient(app).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}
 
 
 def test_healthz_supabase_not_configured(monkeypatch):

@@ -1,14 +1,28 @@
 """
 Celery Tasks for AutoMaintainer
 Durable, scalable task execution for agent runs and maintenance.
+
+Schema dependency: cancel_agent_task() revokes the exact running Celery
+task and release_repo_lock() frees the distributed lock, both of which
+need the `runs` table to have a `celery_task_id` column (text, nullable)
+in addition to the existing `repository_id`. If that column doesn't
+exist yet, add it in a migration before deploying this.
 """
 
 import os
 import asyncio
+import threading
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
+
+from redis_locks import (
+    acquire_repo_lock,
+    release_repo_lock,
+    is_redis_available,
+    write_heartbeat,
+)
 
 try:
     from celery import shared_task
@@ -44,16 +58,13 @@ except ImportError:
 from supabase import create_client, Client
 
 from agents import run_agent_loop, broadcast_log
+from github_app import sync_installation_repositories
 
 logger = logging.getLogger(__name__)
 
 # Supabase client for tasks (service role)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = (
-    os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")
-    or os.getenv("SUPABASE_KEY")
-)
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 task_supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
@@ -66,15 +77,16 @@ def get_supabase() -> Client:
     if task_supabase:
         return task_supabase
     url = os.getenv("SUPABASE_URL")
-    key = (
-        os.getenv("SUPABASE_SERVICE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
-        or os.getenv("SUPABASE_KEY")
-    )
-    if url and key:
-        task_supabase = create_client(url, key)
-        return task_supabase
-    raise RuntimeError("No Supabase client available")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url:
+        raise RuntimeError("SUPABASE_URL is required for worker persistence")
+    if not key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_KEY is required for worker persistence; "
+            "anonymous keys are not supported"
+        )
+    task_supabase = create_client(url, key)
+    return task_supabase
 
 
 async def update_run_status(run_id: str, status: str, **kwargs) -> None:
@@ -193,6 +205,29 @@ def run_agent_loop_task(
     Celery task to run the agent loop.
     This replaces the in-memory asyncio.Task approach.
     """
+    # Distributed lock: refuse to run if another run already owns this
+    # repository. self.retry() here (instead of just failing) means a
+    # queued run waits its turn rather than erroring out.
+    if not acquire_repo_lock(repository_id, run_id):
+        logger.info(
+            f"Repo {repo_name} (id={repository_id}) is locked by another run; "
+            f"retrying run {run_id} later"
+        )
+        raise self.retry(countdown=30, max_retries=60)
+
+    # Heartbeat thread: proves this specific task is alive in near-real-time,
+    # independent of how often the agent loop itself writes to the DB.
+    # cleanup_stale_runs (or any external monitor) can check this Redis key
+    # instead of relying solely on infrequent DB timestamp updates.
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat_loop():
+        while not heartbeat_stop.wait(20):
+            write_heartbeat(run_id)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
     # Create new event loop for this task
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -200,8 +235,12 @@ def run_agent_loop_task(
     try:
         logger.info(f"Starting agent run {run_id} for repo {repo_name}")
 
-        # Update status to running
-        loop.run_until_complete(update_run_status(run_id, "running"))
+        # Update status to running, and record the Celery task id so
+        # cancel_agent_task() can later call control.revoke() on the
+        # exact task, not just flip a DB flag.
+        loop.run_until_complete(
+            update_run_status(run_id, "running", celery_task_id=self.request.id)
+        )
 
         # Record usage event
         loop.run_until_complete(
@@ -336,6 +375,9 @@ def run_agent_loop_task(
         raise
 
     finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
+        release_repo_lock(repository_id, run_id)
         loop.close()
 
 
@@ -428,24 +470,51 @@ def sync_repositories(self):
         result = loop.run_until_complete(
             asyncio.to_thread(
                 lambda: sb.table("github_installations")
-                .select("id, org_id, account_login, access_token")
+                .select("id, org_id, account_login")
                 .is_("suspended_at", "null")
                 .execute()
             )
         )
 
         installations = result.data or []
-        synced_count = 0
+        repositories_synced = 0
+        errors = []
 
         for install in installations:
-            # This would use GitHub App token to fetch repos
-            # Implementation depends on GitHub App integration (next task)
-            logger.info(
-                f"Would sync repos for installation {install['id']} ({install['account_login']})"
-            )
-            synced_count += 1
+            installation_id = install["id"]
+            account_login = install["account_login"]
+            try:
+                synced = loop.run_until_complete(
+                    sync_installation_repositories(
+                        sb, installation_id, install["org_id"]
+                    )
+                )
+                repositories_synced += synced
+                logger.info(
+                    "Synced %s repositories for installation %s (%s)",
+                    synced,
+                    installation_id,
+                    account_login,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to sync installation %s (%s)",
+                    installation_id,
+                    account_login,
+                )
+                errors.append(
+                    {
+                        "installation_id": installation_id,
+                        "account_login": account_login,
+                        "error": str(exc),
+                    }
+                )
 
-        return {"installations_processed": synced_count}
+        return {
+            "installations_processed": len(installations),
+            "repositories_synced": repositories_synced,
+            "errors": errors,
+        }
 
     except Exception as e:
         logger.exception(f"Sync repositories failed: {e}")
@@ -470,11 +539,12 @@ def cancel_run_task(self, run_id: str):
     try:
         sb = get_supabase()
 
-        # Get run details
+        # Get run details, including the fields needed to actually stop
+        # the worker (celery_task_id) and free the repo lock (repository_id)
         result = loop.run_until_complete(
             asyncio.to_thread(
                 lambda: sb.table("runs")
-                .select("org_id, status")
+                .select("org_id, status, repository_id, celery_task_id")
                 .eq("id", run_id)
                 .single()
                 .execute()
@@ -491,6 +561,15 @@ def cancel_run_task(self, run_id: str):
                 "error": f"Run not cancellable (status: {run['status']})",
             }
 
+        # Actually stop the Celery worker task, not just flag the DB.
+        # SIGTERM lets the task's `finally` block run (lock release,
+        # heartbeat thread stop) before the process is recycled.
+        celery_task_id = run.get("celery_task_id")
+        if celery_task_id:
+            from celery_app import celery_app  # local import avoids circular import
+
+            celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")
+
         # Update status
         loop.run_until_complete(
             update_run_status(run_id, "cancelled", error_message="Cancelled by user")
@@ -506,6 +585,12 @@ def cancel_run_task(self, run_id: str):
             )
         )
 
+        # Free the repo lock immediately rather than waiting for the
+        # terminated task's own `finally` block, which may not run
+        # reliably under a hard SIGTERM.
+        if run.get("repository_id"):
+            release_repo_lock(run["repository_id"], run_id)
+
         return {"success": True}
 
     except Exception as e:
@@ -513,6 +598,54 @@ def cancel_run_task(self, run_id: str):
         return {"success": False, "error": str(e)}
     finally:
         loop.close()
+
+
+def start_agent_task(run_id: str, config_payload: dict) -> dict:
+    """
+    Entry point matching the Epic #158 spec: start_agent_task(run_id, config_payload).
+
+    config_payload is expected to contain: repo_name, org_id, user_id,
+    repository_id, github_installation_id, and optionally
+    target_issue_number, mode.
+
+    Decoupling from the FastAPI handler: when Redis is configured and
+    reachable, this enqueues onto the agent_runs queue and returns
+    immediately with a task_id -- the actual agent loop executes in a
+    separate Celery worker process. When Redis is NOT configured (local
+    single-process dev), it falls back to calling the same task function
+    directly, which Celery executes eagerly in-process with zero queue
+    overhead, so `/start` still works without standing up Redis.
+    """
+    kwargs = dict(
+        run_id=run_id,
+        repo_name=config_payload["repo_name"],
+        org_id=config_payload["org_id"],
+        user_id=config_payload["user_id"],
+        repository_id=config_payload["repository_id"],
+        github_installation_id=config_payload["github_installation_id"],
+        target_issue_number=config_payload.get("target_issue_number"),
+        mode=config_payload.get("mode", "autonomous"),
+    )
+
+    if CELERY_AVAILABLE and is_redis_available():
+        async_result = run_agent_loop_task.delay(**kwargs)
+        return {"success": True, "queued": True, "task_id": async_result.id}
+
+    # Zero-overhead fallback: calling the task object directly (instead of
+    # .delay()) runs it synchronously in this process -- no broker needed.
+    result = run_agent_loop_task(**kwargs)
+    return {"success": True, "queued": False, "result": result}
+
+
+def cancel_agent_task(run_id: str) -> dict:
+    """
+    Entry point matching the Epic #158 spec: cancel_agent_task(run_id).
+    Thin wrapper -- cancel_run_task already does the real work (revoke
+    the Celery task, update DB status to 'cancelled', release the lock).
+    Kept as a separate name so callers can depend on the spec's exact
+    function name without caring whether cancellation is itself a task.
+    """
+    return cancel_run_task(run_id)
 
 
 # Celery signal handlers for monitoring

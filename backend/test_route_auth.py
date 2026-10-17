@@ -16,6 +16,10 @@ PUBLIC_PATHS = {
     "/healthz",
     "/healthz/supabase",
     "/healthz/observability",
+    # GitHub cannot present a Supabase token. This route is authenticated by
+    # HMAC instead: it rejects the request when GITHUB_WEBHOOK_SECRET is unset
+    # and verifies X-Hub-Signature-256 over the raw body with compare_digest.
+    "/webhooks/github",
     # FastAPI's generated documentation.
     "/openapi.json",
     "/docs",

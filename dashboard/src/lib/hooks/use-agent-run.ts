@@ -69,6 +69,19 @@ export function useAgentRun(
       return;
     }
 
+    // The backend authorizes run controls with the Supabase access token, so a
+    // signed-in user without an active session cannot start or stop a run.
+    if (!session?.access_token) {
+      log(
+        "Your session has expired. Please sign in again before starting or stopping an agent run.",
+        "text-red-400"
+      );
+      options?.onRequireAuth?.();
+      return;
+    }
+
+    const authHeader = `Bearer ${session.access_token}`;
+
     if (!isRunning) {
       if (
         !repoUrl ||
@@ -103,9 +116,7 @@ export function useAgentRun(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: session?.access_token
-              ? `Bearer ${session.access_token}`
-              : "",
+            Authorization: authHeader,
           },
           body: JSON.stringify({
             repo_name: repoUrl,
@@ -120,13 +131,14 @@ export function useAgentRun(
               : `Backend returned HTTP ${res.status}.`;
           throw new Error(detail);
         }
-        if (data.run_id) {
-          setActiveRunId(data.run_id);
-          log(
-            `Agent run queued: ${data.run_id.substring(0, 8)}...`,
-            "text-emerald-500"
-          );
+        if (!data.run_id) {
+          throw new Error("Backend did not return a run identifier");
         }
+        setActiveRunId(data.run_id);
+        log(
+          `Agent run queued: ${data.run_id.substring(0, 8)}...`,
+          "text-emerald-500"
+        );
       } catch (err) {
         console.error(err);
         log(
@@ -140,29 +152,31 @@ export function useAgentRun(
       log("Agent Loop Halted.", "text-red-500");
       try {
         const backendUrl = getBackendUrl();
-        if (activeRunId) {
-          await fetch(`${backendUrl}/stop`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: session?.access_token
-                ? `Bearer ${session.access_token}`
-                : "",
-            },
-            body: JSON.stringify({ run_id: activeRunId }),
-          });
-        } else {
-          await fetch(`${backendUrl}/stop`, {
-            method: "POST",
-            headers: {
-              Authorization: session?.access_token
-                ? `Bearer ${session.access_token}`
-                : "",
-            },
-          });
+        const res = activeRunId
+          ? await fetch(`${backendUrl}/stop`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: authHeader,
+              },
+              body: JSON.stringify({ run_id: activeRunId }),
+            })
+          : await fetch(`${backendUrl}/stop`, {
+              method: "POST",
+              headers: { Authorization: authHeader },
+            });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(
+            typeof data.detail === "string"
+              ? data.detail
+              : `Backend returned HTTP ${res.status}.`
+          );
         }
       } catch (err) {
         console.error("Failed to stop agents:", err);
+        log(`Failed to stop the agent run. (${err})`, "text-red-400");
       }
     }
   }, [isRunning, repoUrl, targetIssue, activeRunId, user, session, log, options]);

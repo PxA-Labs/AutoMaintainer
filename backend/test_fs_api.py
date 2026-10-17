@@ -86,14 +86,6 @@ def test_repo_endpoints_reject_anonymous(
     )
 
 
-def test_inline_assist_rejects_anonymous(anonymous):
-    response = client.post(
-        "/assist/inline",
-        json={"prompt": "hi", "file_path": "a.py", "selected_code": ""},
-    )
-    assert response.status_code == 401
-
-
 # --- Functional behaviour, exercised as an authorized caller. ---
 
 
