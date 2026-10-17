@@ -88,4 +88,19 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
     if not real_target.startswith(real_repo + os.path.sep):
         raise HTTPException(status_code=403, detail="Invalid file path")
 
+    # Re-check the denylist against the RESOLVED path. The check above only saw
+    # the path the caller sent, and symlink resolution happens after it, so a
+    # symlink committed to the repository (leak -> .git/config) would otherwise
+    # pass: it is not named ".git", yet it resolves inside .git and stays within
+    # real_repo. Repository contents are tenant-controlled, and the write routes
+    # share this helper, so the same gap would allow overwriting .git/config
+    # (core.hooksPath) and turning the next server-side git call into RCE.
+    resolved_first = (
+        os.path.relpath(real_target, real_repo).replace("\\", "/").split("/")[0]
+    )
+    if resolved_first.lower() in DENIED_TOP_LEVEL:
+        raise HTTPException(
+            status_code=403, detail="Access to this path is not allowed"
+        )
+
     return Path(real_target)

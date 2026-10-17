@@ -211,6 +211,9 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
             "user_id": os.getenv(
                 "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
             ),
+            "org_id": os.getenv(
+                "AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"
+            ),
             "email": "dev@localhost",
         }
 
@@ -231,7 +234,34 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
     if not user:
         return None
 
-    return {"user_id": user.id, "email": user.email}
+    # A valid token is not sufficient. get_current_user also requires an
+    # organization_members row and 403s without one; the terminal must not be
+    # weaker than the HTTP routes. This endpoint spawns a shell whose child
+    # inherits os.environ, including SUPABASE_SERVICE_KEY (which bypasses RLS)
+    # and GITHUB_TOKEN, so a self-registered account with no org must not reach
+    # it.
+    try:
+        membership = await asyncio.to_thread(
+            lambda: supabase.table("organization_members")
+            .select("org_id")
+            .eq("user_id", user.id)
+            .order("joined_at")
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"Failed to resolve org membership for {user.id}: {e}")
+        return None
+
+    if not membership or not membership.data:
+        return None
+
+    return {
+        "user_id": user.id,
+        "org_id": membership.data["org_id"],
+        "email": user.email,
+    }
 
 
 async def require_repo_access(

@@ -125,3 +125,39 @@ def test_file_endpoint_blocks_git_metadata(setup_dummy_repo, authorized, denied)
         f"{denied} returned {response.status_code}; repository metadata "
         "must not be readable through the filesystem API"
     )
+
+
+def _can_symlink(tmp_target, tmp_link):
+    """Windows needs Developer Mode or elevation to create symlinks."""
+    try:
+        os.symlink(tmp_target, tmp_link)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_symlink_cannot_escape_git_denylist(setup_dummy_repo, authorized):
+    """A symlink committed to the repo must not reach .git.
+
+    The denylist is checked before symlink resolution, so a tenant-controlled
+    link (leak -> .git/config) would otherwise resolve inside .git while still
+    passing the containment check, leaking the clone credentials.
+    """
+    repo_name = setup_dummy_repo
+    repo_dir = get_safe_repo_dir(repo_name)
+
+    config = os.path.join(repo_dir, ".git", "config")
+    with open(config, "w") as f:
+        f.write("[remote]\n\turl = https://x-access-token:SECRET@github.com/o/r\n")
+
+    link = os.path.join(repo_dir, "leak")
+    if not _can_symlink(config, link):
+        pytest.skip("symlink creation not permitted on this host")
+
+    response = client.get(f"/repo/{repo_name}/file?file_path=leak")
+
+    assert response.status_code == 403, (
+        f"symlink into .git returned {response.status_code}; "
+        "resolved path must be re-checked against the denylist"
+    )
+    assert "SECRET" not in response.text
