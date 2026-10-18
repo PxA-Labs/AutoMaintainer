@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { getAccessToken } from "@/lib/api";
 import "xterm/css/xterm.css";
 
 interface InteractiveTerminalProps {
@@ -63,58 +64,88 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
       wsUrl += `?repo_url=${encodeURIComponent(repoUrl)}`;
     }
 
-    const socket = new WebSocket(wsUrl);
-    ws.current = socket;
+    // The handshake carries a Supabase token as a subprotocol: browsers cannot
+    // set an Authorization header on a WebSocket, and a query parameter would
+    // be recorded in proxy and server access logs.
+    let socket: WebSocket | null = null;
+    let cancelled = false;
 
-    socket.onopen = () => {
-      setIsConnected(true);
-      setError(null);
-      
-      // Initial resize
-      if (terminalInstance.current) {
-        const { cols, rows } = terminalInstance.current;
-        socket.send(JSON.stringify({ type: "resize", cols, rows }));
-      }
-    };
-
-    socket.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        term.write(event.data);
-      }
-    };
-
-    socket.onerror = () => {
-      setError("WebSocket connection error");
-      setIsConnected(false);
-    };
-
-    socket.onclose = () => {
-      setIsConnected(false);
-      setError("Disconnected");
-      term.write("\r\n\x1b[31m[Process Exited / Connection Closed]\x1b[0m\r\n");
-    };
+    const isOpen = () => socket !== null && socket.readyState === WebSocket.OPEN;
 
     // Handle user input
     term.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(data);
+      if (isOpen()) {
+        socket!.send(data);
       }
     });
 
     // Handle window resize
     const handleResize = () => {
-      if (fitAddon.current && terminalInstance.current && socket.readyState === WebSocket.OPEN) {
+      if (fitAddon.current && terminalInstance.current && isOpen()) {
         fitAddon.current.fit();
         const { cols, rows } = terminalInstance.current;
-        socket.send(JSON.stringify({ type: "resize", cols, rows }));
+        socket!.send(JSON.stringify({ type: "resize", cols, rows }));
       }
     };
 
     window.addEventListener("resize", handleResize);
 
+    (async () => {
+      const token = await getAccessToken();
+      if (cancelled) return;
+
+      if (!token) {
+        setIsConnected(false);
+        setError("Sign in required");
+        term.write("\r\n\x1b[31m[You must be signed in to use the terminal]\x1b[0m\r\n");
+        return;
+      }
+
+      const opened = new WebSocket(wsUrl, ["bearer", token]);
+      socket = opened;
+      ws.current = opened;
+
+      opened.onopen = () => {
+        setIsConnected(true);
+        setError(null);
+
+        // Initial resize
+        if (terminalInstance.current) {
+          const { cols, rows } = terminalInstance.current;
+          opened.send(JSON.stringify({ type: "resize", cols, rows }));
+        }
+      };
+
+      opened.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          term.write(event.data);
+        }
+      };
+
+      opened.onerror = () => {
+        setError("WebSocket connection error");
+        setIsConnected(false);
+      };
+
+      opened.onclose = (event) => {
+        setIsConnected(false);
+        // 1008 is the policy-violation close the backend sends when the
+        // handshake is rejected: bad origin, missing or expired token, or the
+        // terminal is not enabled in this environment.
+        if (event.code === 1008) {
+          setError("Not authorized");
+          term.write("\r\n\x1b[31m[Connection refused: not authorized for this terminal]\x1b[0m\r\n");
+          return;
+        }
+        setError("Disconnected");
+        term.write("\r\n\x1b[31m[Process Exited / Connection Closed]\x1b[0m\r\n");
+      };
+    })();
+
     return () => {
+      cancelled = true;
       window.removeEventListener("resize", handleResize);
-      socket.close();
+      socket?.close();
       term.dispose();
     };
   }, [repoUrl, reconnectKey]);

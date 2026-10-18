@@ -10,13 +10,6 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Vercel](https://img.shields.io/badge/Vercel-Deployed-black?logo=vercel)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPxA-Labs%2FAutoMaintainer&root-directory=dashboard)
-
-<p align="center">
-  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPxA-Labs%2FAutoMaintainer&root-directory=dashboard">
-    <img src="https://vercel.com/button" alt="Deploy with Vercel"/>
-  </a>
-</p>
 
 </div>
 
@@ -32,6 +25,7 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 >
 > During this major migration phase:
 > * **The platform is currently unstable and active workflows may be temporarily non-operational or experience breaking changes.**
+> * **Do not expose a deployment to the public internet yet.** Several API routes are still unauthenticated while the multi-tenant control plane lands, including an interactive terminal endpoint. Run AutoMaintainer locally or on a trusted network until the authentication migration is complete. The one-click deploy button was removed for this reason.
 > * Core systems being actively overhauled include:
 >   - **Multi-Tenant SaaS Control Plane:** Migrating from single-user local state to organization-scoped data isolation and Row Level Security (RLS).
 >   - **Durable Task Queue:** Replacing in-memory asyncio task execution with Celery + Redis distributed workers and retry mechanisms.
