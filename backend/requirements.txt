@@ -191,7 +191,7 @@ langchain-protocol==0.0.19
     # via
     #   langchain-core
     #   langgraph-sdk
-langgraph==1.2.15
+langgraph==1.2.16
     # via
     #   -r requirements.in
     #   langchain
