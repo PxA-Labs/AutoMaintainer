@@ -14,8 +14,7 @@ from github import Github
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from typing import Optional, Dict, List, Annotated
-from agents import run_agent_loop, broadcast_log
+from typing import Optional, List, Annotated
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
 import json
@@ -57,8 +56,6 @@ from observability import (
 logger = logging.getLogger(__name__)
 
 gitnexus_process = None
-active_tasks: Dict[str, asyncio.Task] = {}
-tasks_lock = asyncio.Lock()
 
 
 # --- Pydantic Models ---
@@ -194,6 +191,98 @@ async def validate_repo_access(
         )
 
     return result.data["id"], result.data["github_installation_id"]
+
+
+async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
+    """Validate a Supabase access token presented on a WebSocket handshake.
+
+    Browsers cannot set an Authorization header when opening a WebSocket, so
+    the token travels as a subprotocol: ``new WebSocket(url, ["bearer", tok])``.
+    A query parameter is deliberately not used -- query strings are recorded in
+    proxy and server access logs.
+
+    Returns the caller's identity, or None if the handshake is not authorized.
+    """
+    from agents import supabase
+
+    if os.getenv("AUTH_DEV_BYPASS", "").strip().lower() == "true":
+        logger.warning("AUTH_DEV_BYPASS is enabled - all requests are trusted!")
+        return {
+            "user_id": os.getenv(
+                "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
+            ),
+            "org_id": os.getenv(
+                "AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"
+            ),
+            "email": "dev@localhost",
+        }
+
+    protocols = websocket.scope.get("subprotocols") or []
+    if len(protocols) < 2 or protocols[0] != "bearer":
+        return None
+
+    access_token = protocols[1].strip()
+    if not access_token or not supabase:
+        return None
+
+    try:
+        user_response = await asyncio.to_thread(supabase.auth.get_user, access_token)
+    except Exception:
+        return None
+
+    user = getattr(user_response, "user", None)
+    if not user:
+        return None
+
+    # A valid token is not sufficient. get_current_user also requires an
+    # organization_members row and 403s without one; the terminal must not be
+    # weaker than the HTTP routes. This endpoint spawns a shell whose child
+    # inherits os.environ, including SUPABASE_SERVICE_KEY (which bypasses RLS)
+    # and GITHUB_TOKEN, so a self-registered account with no org must not reach
+    # it.
+    try:
+        membership = await asyncio.to_thread(
+            lambda: supabase.table("organization_members")
+            .select("org_id")
+            .eq("user_id", user.id)
+            .order("joined_at")
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"Failed to resolve org membership for {user.id}: {e}")
+        return None
+
+    if not membership or not membership.data:
+        return None
+
+    return {
+        "user_id": user.id,
+        "org_id": membership.data["org_id"],
+        "email": user.email,
+    }
+
+
+async def require_repo_access(
+    repo_name: str,
+    org_id: str = Depends(get_org_id),
+    user_id: str = Depends(get_user_id),
+) -> str:
+    """Authenticate the caller and authorize them for ``repo_name``.
+
+    Declared as a dependency so it works on both ``def`` and ``async def``
+    handlers: FastAPI resolves ``repo_name`` from the path and awaits this
+    before the endpoint runs. Returns the caller's org_id so handlers can
+    scope filesystem and database access to the tenant.
+    """
+    from agents import supabase as agents_supabase
+
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    await validate_repo_access(repo_name, org_id, user_id, agents_supabase)
+    return org_id
 
 
 @asynccontextmanager
@@ -646,56 +735,6 @@ async def stop_agents(
         return {"status": "cancelled", "count": cancelled_count}
 
 
-# Keep backward compatibility for in-memory tasks (deprecated)
-@app.post("/start-legacy")
-async def start_agents_legacy(req: StartRequest):
-    """Legacy endpoint using in-memory tasks. Deprecated."""
-    run_id = str(uuid.uuid4())
-    task = asyncio.create_task(run_agent_loop(req.repo_name, req.target_issue, run_id))
-
-    async with tasks_lock:
-        active_tasks[run_id] = task
-
-    def on_task_done(t):
-        async def remove_task():
-            async with tasks_lock:
-                active_tasks.pop(run_id, None)
-
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(remove_task())
-        except RuntimeError:
-            pass
-
-    task.add_done_callback(on_task_done)
-    return {"status": "started", "run_id": run_id, "deprecated": True}
-
-
-@app.post("/stop-legacy")
-async def stop_agents_legacy(req: Optional[StopRequest] = None):
-    """Legacy endpoint using in-memory tasks. Deprecated."""
-    async with tasks_lock:
-        if req and req.run_id:
-            task = active_tasks.get(req.run_id)
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                active_tasks.pop(req.run_id, None)
-                return {"status": "stopped", "run_id": req.run_id}
-            return {"status": "not_running", "run_id": req.run_id}
-        else:
-            stopped_any = False
-            for r_id, task in list(active_tasks.items()):
-                if not task.done():
-                    task.cancel()
-                    stopped_any = True
-            active_tasks.clear()
-            return {"status": "stopped" if stopped_any else "not_running"}
-
-
 @app.post("/assist/inline")
 async def inline_assist(
     req: InlineAssistRequest,
@@ -724,7 +763,11 @@ async def inline_assist(
 
 
 @app.post("/repo/{repo_name:path}/file")
-async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
+async def update_repo_file(
+    repo_name: str,
+    payload: FileUpdateRequest,
+    org_id: str = Depends(require_repo_access),
+):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if (
@@ -764,7 +807,11 @@ async def update_repo_file(repo_name: str, payload: FileUpdateRequest):
 
 
 @app.post("/repo/{repo_name:path}/file/create")
-async def create_repo_file(repo_name: str, payload: FileCreateRequest):
+async def create_repo_file(
+    repo_name: str,
+    payload: FileCreateRequest,
+    org_id: str = Depends(require_repo_access),
+):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if (
@@ -809,7 +856,10 @@ async def create_repo_file(repo_name: str, payload: FileCreateRequest):
 
 @app.delete("/repo/{repo_name:path}/file")
 async def delete_repo_file(
-    repo_name: str, file_path: str, commit_message: Optional[str] = None
+    repo_name: str,
+    file_path: str,
+    commit_message: Optional[str] = None,
+    org_id: str = Depends(require_repo_access),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -873,6 +923,14 @@ async def propose_changes(
     """
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
+
+    # Authenticated is not authorized: confirm this repo belongs to the
+    # caller's org before opening a PR against it.
+    from agents import supabase as agents_supabase
+
+    if not agents_supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    await validate_repo_access(repo_name, org_id, user_id, agents_supabase)
 
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -965,16 +1023,35 @@ async def propose_changes(
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    origin = websocket.headers.get("origin")
-    if origin and not (
-        origin.startswith("http://localhost")
-        or "huggingface.co" in origin
-        or origin.startswith("http://127.0.0.1")
+    # Secure by default. This endpoint hands out an interactive shell with the
+    # server's privileges, so production must opt in deliberately even though
+    # the handshake is now authenticated.
+    if (
+        os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
+        and os.getenv("ENABLE_TERMINAL", "").strip().lower() != "true"
     ):
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
+    # Fail closed. The previous guard was `if origin and not (...)`, which
+    # skipped the check entirely when Origin was absent -- every non-browser
+    # client (websocat, curl, python-websockets) omits it by default. It also
+    # matched by substring, so "huggingface.co" accepted
+    # https://huggingface.co.attacker.net. Require an exact match against the
+    # configured allowlist; set ALLOWED_ORIGINS to permit another origin. The
+    # CORS preview-deployment regex is deliberately NOT honoured here -- an
+    # interactive shell should not be reachable from arbitrary preview hosts.
+    origin = websocket.headers.get("origin")
+    if not origin or origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=1008)
+        return
+
+    user = await authenticate_websocket(websocket)
+    if not user:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept(subprotocol="bearer")
 
     cwd = None
     if repo_url:
@@ -1106,7 +1183,10 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 
 
 @app.get("/repo/{repo_name:path}/tree")
-def get_repo_tree(repo_name: str):
+def get_repo_tree(
+    repo_name: str,
+    org_id: str = Depends(require_repo_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
 
     if not os.path.exists(repo_dir):
@@ -1158,7 +1238,11 @@ def get_repo_tree(repo_name: str):
 
 
 @app.get("/repo/{repo_name:path}/search")
-def search_repo(repo_name: str, q: str):
+def search_repo(
+    repo_name: str,
+    q: str,
+    org_id: str = Depends(require_repo_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
 
     if not repo_dir.exists():
@@ -1212,7 +1296,11 @@ def search_repo(repo_name: str, q: str):
 
 
 @app.get("/repo/{repo_name:path}/file")
-def get_repo_file(repo_name: str, file_path: str):
+def get_repo_file(
+    repo_name: str,
+    file_path: str,
+    org_id: str = Depends(require_repo_access),
+):
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
 
@@ -1248,17 +1336,10 @@ def get_repo_file(repo_name: str, file_path: str):
             pass
 
 
-# Serve the static Next.js frontend if the out directory exists
-if os.path.exists("../dashboard/out"):
-    app.mount(
-        "/", StaticFiles(directory="../dashboard/out", html=True), name="dashboard"
-    )
-elif os.path.exists("dashboard/out"):  # In docker container
-    app.mount("/", StaticFiles(directory="dashboard/out", html=True), name="dashboard")
-
-
 # --- Admin Endpoints ---
-# These require admin role (checked via RLS policies in Supabase)
+# Admin role is checked in-handler below. Note the backend uses the Supabase
+# SERVICE ROLE key, which bypasses Row Level Security, so every query here
+# must scope itself to the caller's org explicitly. RLS is not a backstop.
 
 
 @app.get("/admin/metrics")
@@ -1454,3 +1535,21 @@ async def get_admin_runs(
     )
 
     return {"runs": result.data or []}
+
+
+# ---------------------------------------------------------------------------
+# Static frontend -- MUST be the last thing registered on the app.
+#
+# Starlette matches routes in registration order and Mount("/") matches every
+# path. Mounting before the API routes are declared silently shadows them:
+# /admin/metrics returned the SPA's 404 page instead of JSON whenever
+# dashboard/out existed, which is always true inside the Docker image.
+# Keep this block at the bottom of the module.
+# ---------------------------------------------------------------------------
+# Serve the static Next.js frontend if the out directory exists
+if os.path.exists("../dashboard/out"):
+    app.mount(
+        "/", StaticFiles(directory="../dashboard/out", html=True), name="dashboard"
+    )
+elif os.path.exists("dashboard/out"):  # In docker container
+    app.mount("/", StaticFiles(directory="dashboard/out", html=True), name="dashboard")
