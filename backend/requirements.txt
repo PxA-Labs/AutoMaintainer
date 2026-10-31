@@ -368,7 +368,7 @@ pyjwt[crypto]==2.15.1
     #   supabase-auth
 pynacl==1.6.2
     # via pygithub
-pytest==9.1.1
+pytest==9.2.0
     # via
     #   -r requirements.in
     #   pytest-asyncio
