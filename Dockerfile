@@ -7,7 +7,7 @@ COPY dashboard/ ./
 RUN npm run build
 
 # Stage 2: Build the Python backend and serve everything
-FROM python:3.11-slim
+FROM python:3.15-slim
 WORKDIR /app
 
 # Install Node.js v22, git, and globally install gitnexus
