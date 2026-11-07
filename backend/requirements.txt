@@ -31,12 +31,6 @@ attrs==26.1.0
     #   referencing
 billiard==4.3.0
     # via celery
-boto3==1.43.98
-    # via litellm
-botocore==1.43.98
-    # via
-    #   boto3
-    #   s3transfer
 celery==5.6.3
     # via -r requirements.in
 certifi==2026.7.22
@@ -85,9 +79,7 @@ fastapi==0.142.2
 fastuuid==0.14.0
     # via litellm
 filelock==3.32.7
-    # via
-    #   huggingface-hub
-    #   litellm
+    # via huggingface-hub
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -136,9 +128,7 @@ httpx-sse==0.4.3
 httpx2==2.13.0
     # via langsmith
 huggingface-hub==1.32.0
-    # via
-    #   litellm
-    #   tokenizers
+    # via tokenizers
 hyperframe==6.1.0
     # via h2
 idna==3.20
@@ -156,10 +146,6 @@ jinja2==3.1.6
     # via litellm
 jiter==0.17.0
     # via openai
-jmespath==1.1.0
-    # via
-    #   boto3
-    #   botocore
 jsonpatch==1.33
     # via langchain-core
 jsonpointer==3.1.1
@@ -205,7 +191,7 @@ langgraph-sdk==0.4.8
     # via langgraph
 langsmith==0.13.0
     # via langchain-core
-litellm==1.105.1
+litellm==1.83.0
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
@@ -307,7 +293,6 @@ packaging==26.3
     #   kombu
     #   langchain-core
     #   langsmith
-    #   litellm
     #   opentelemetry-instrumentation
     #   opentelemetry-instrumentation-sqlalchemy
     #   pytest
@@ -353,9 +338,7 @@ pydantic==2.14.1
 pydantic-core==2.50.1
     # via pydantic
 pydantic-settings==2.15.0
-    # via
-    #   litellm
-    #   mcp
+    # via mcp
 pygithub==2.10.0
     # via -r requirements.in
 pygments==2.21.0
@@ -374,16 +357,14 @@ pytest==9.1.1
     #   pytest-asyncio
     #   pytest-cov
     #   pytest-mock
-pytest-asyncio==1.4.0
+pytest-asyncio==1.4.1.post1
     # via -r requirements.in
 pytest-cov==7.1.0
     # via -r requirements.in
 pytest-mock==3.16.0
     # via -r requirements.in
 python-dateutil==2.9.0.post0
-    # via
-    #   botocore
-    #   celery
+    # via celery
 python-dotenv==1.2.4
     # via
     #   -r requirements.in
@@ -395,7 +376,6 @@ pyyaml==6.0.3
     # via
     #   huggingface-hub
     #   langchain-core
-    #   litellm
 realtime==2.32.0
     # via supabase
 redis==8.1.0
@@ -419,8 +399,6 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-s3transfer==0.19.2
-    # via boto3
 six==1.17.0
     # via python-dateutil
 sniffio==1.3.1
@@ -469,7 +447,6 @@ truststore==0.10.4
     #   httpx2
 typing-extensions==4.16.0
     # via
-    #   anyio
     #   click-repl
     #   fastapi
     #   groq
@@ -503,7 +480,6 @@ tzlocal==5.4.4
     # via celery
 urllib3==2.8.0
     # via
-    #   botocore
     #   pygithub
     #   requests
 uuid-utils==0.17.1
