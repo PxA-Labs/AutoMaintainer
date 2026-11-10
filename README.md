@@ -90,6 +90,9 @@ GITHUB_TOKEN="your_github_token_here"
 SUPABASE_URL="https://your-project.supabase.co"
 SUPABASE_SERVICE_KEY="your_supabase_service_role_key"
 REDIS_URL="redis://localhost:6379/0"
+# Optional: the Web IDE terminal is off by default in every environment.
+# Enabling it gives authenticated org members a shell on the backend host.
+# ENABLE_TERMINAL="true"
 ```
 
 **Frontend Environment (`dashboard/.env.local`):**
