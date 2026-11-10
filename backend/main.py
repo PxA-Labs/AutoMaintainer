@@ -1018,18 +1018,40 @@ async def propose_changes(
         raise HTTPException(status_code=500, detail=f"Failed to propose changes: {e}")
 
 
-# --- Terminal WebSocket (unchanged) ---
+# --- Terminal WebSocket ---
+
+# Only these variables reach the interactive shell. Everything else in the
+# server's environment (SUPABASE_SERVICE_KEY, GITHUB_TOKEN, LLM API keys,
+# database URLs, ...) is withheld, so a terminal session can't read them.
+_TERMINAL_ENV_ALLOWLIST = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ")
+
+
+def _terminal_enabled() -> bool:
+    """The terminal is opt-in in every environment.
+
+    Keying the default on ENVIRONMENT=production left it enabled in any
+    deployment that never set ENVIRONMENT -- including the shipped Dockerfile.
+    """
+    return os.getenv("ENABLE_TERMINAL", "").strip().lower() == "true"
+
+
+def _terminal_child_env() -> dict:
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k in _TERMINAL_ENV_ALLOWLIST or k.startswith("LC_")
+    }
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["TERM"] = "xterm-256color"
+    return env
 
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    # Secure by default. This endpoint hands out an interactive shell with the
-    # server's privileges, so production must opt in deliberately even though
-    # the handshake is now authenticated.
-    if (
-        os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
-        and os.getenv("ENABLE_TERMINAL", "").strip().lower() != "true"
-    ):
+    # Secure by default. This endpoint hands out an interactive shell on the
+    # server, so every deployment must opt in explicitly even though the
+    # handshake is authenticated.
+    if not _terminal_enabled():
         await websocket.close(code=1008)
         return
 
@@ -1134,8 +1156,7 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         if pid == 0:
             if cwd:
                 os.chdir(cwd)
-            os.environ["TERM"] = "xterm-256color"
-            os.execv("/bin/bash", ["/bin/bash"])
+            os.execve("/bin/bash", ["/bin/bash"], _terminal_child_env())
         else:
 
             async def read_from_pty():

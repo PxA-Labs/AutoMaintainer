@@ -35,6 +35,17 @@ def no_dev_bypass(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def terminal_enabled(monkeypatch):
+    """Opt in by default so the origin/token/org checks below are exercised.
+
+    Without this, every rejection test would pass trivially on the
+    disabled-by-default gate instead of the check it claims to cover.
+    """
+    monkeypatch.setenv("ENABLE_TERMINAL", "true")
+    yield
+
+
 def test_terminal_websocket_origin_security():
     # Connection is rejected for an unsupported origin.
     with pytest.raises(WebSocketDisconnect) as excinfo:
@@ -98,10 +109,20 @@ def test_terminal_websocket_rejects_malformed_subprotocol():
         assert excinfo.value.code == 1008, f"{protocols} was not rejected"
 
 
-def test_terminal_websocket_refused_in_production(monkeypatch, authenticated):
-    """An interactive shell requires explicit opt-in in production."""
-    monkeypatch.setenv("ENVIRONMENT", "production")
+@pytest.mark.parametrize("environment", [None, "development", "production"])
+def test_terminal_websocket_disabled_unless_opted_in(
+    monkeypatch, authenticated, environment
+):
+    """The shell is opt-in everywhere, not just when ENVIRONMENT=production.
+
+    Regression guard: the shipped Dockerfile never sets ENVIRONMENT, so a
+    production-only gate left the terminal enabled on real deployments.
+    """
     monkeypatch.delenv("ENABLE_TERMINAL", raising=False)
+    if environment is None:
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("ENVIRONMENT", environment)
 
     with pytest.raises(WebSocketDisconnect) as excinfo:
         with client.websocket_connect(
@@ -112,6 +133,27 @@ def test_terminal_websocket_refused_in_production(monkeypatch, authenticated):
             pass
 
     assert excinfo.value.code == 1008
+
+
+def test_terminal_child_env_withholds_server_secrets(monkeypatch):
+    """The spawned shell must not inherit service credentials."""
+    for secret in (
+        "SUPABASE_SERVICE_KEY",
+        "GITHUB_TOKEN",
+        "GROQ_API_KEY",
+        "DATABASE_URL",
+        "REDIS_URL",
+    ):
+        monkeypatch.setenv(secret, "s3cret")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+
+    env = main._terminal_child_env()
+
+    assert "s3cret" not in env.values()
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert env["TERM"] == "xterm-256color"
 
 
 def test_terminal_websocket_allows_authenticated_caller(authenticated):
