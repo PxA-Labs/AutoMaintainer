@@ -1631,13 +1631,28 @@ def get_merge_policy() -> str:
     return policy
 
 
+_NO_PATCH_NOTE = "(binary file or diff too large to display)"
+
+
 def _pr_diff_text(pr) -> str:
     """Unified diff of the PR against its base, file by file."""
     parts = []
     for f in pr.get_files():
-        patch = f.patch or "(binary file or diff too large to display)"
+        patch = f.patch or _NO_PATCH_NOTE
         parts.append(f"--- {f.filename} ({f.status})\n{patch}")
     return "\n\n".join(parts) or "(empty diff)"
+
+
+def _review_diff_incomplete(diff_text: str | None) -> bool:
+    """True when the Maintainer could not see the whole PR diff.
+
+    The prompt cuts the diff at MAX_REVIEW_DIFF_CHARS, and GitHub omits the
+    patch of binary or very large files; an approval of such a partial view
+    must not auto-merge.
+    """
+    return diff_text is None or (
+        len(diff_text) > MAX_REVIEW_DIFF_CHARS or _NO_PATCH_NOTE in diff_text
+    )
 
 
 def _ci_checks_passed(gh_repo, sha: str) -> tuple[bool, str]:
@@ -1826,6 +1841,9 @@ async def maintainer_node(state: AgentState):
             if should_merge and not commented:
                 # Never merge a change whose review is not visible on the PR.
                 should_merge, reason = False, "the review comment could not be posted"
+            if should_merge and _review_diff_incomplete(diff_text):
+                # The Maintainer approved a change it did not see in full.
+                should_merge, reason = False, "the reviewed diff was incomplete"
 
             if should_merge:
                 _merge_pr(pr, pr_number, head_sha)

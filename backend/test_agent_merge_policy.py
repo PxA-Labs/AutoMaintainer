@@ -181,6 +181,26 @@ async def test_failed_review_comment_blocks_auto_merge(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["auto", "ci"])
+@pytest.mark.parametrize(
+    "patch", ["+x = 2\n" * 5000, None], ids=["truncated", "patch-omitted"]
+)
+async def test_incomplete_review_diff_blocks_auto_merge(monkeypatch, policy, patch):
+    monkeypatch.setenv("MERGE_POLICY", policy)
+    repo, pr, seen = _setup(
+        monkeypatch,
+        statuses=[("ci/build", "success")],
+        check_runs=[("tests", "completed", "success")],
+    )
+    pr.get_files.return_value = [
+        SimpleNamespace(filename="app.py", status="modified", patch=patch)
+    ]
+    result = await agents.maintainer_node(_state())
+    pr.merge.assert_not_called()
+    assert result["merge_status"] == "awaiting_human_review"
+
+
+@pytest.mark.asyncio
 async def test_merge_exception_is_reported_as_failure(monkeypatch):
     monkeypatch.setenv("MERGE_POLICY", "auto")
     repo, pr, _ = _setup(monkeypatch)
