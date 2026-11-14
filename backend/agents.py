@@ -157,6 +157,18 @@ _NOT_FILE_NAMES = {
 }  # fmt: skip
 
 
+# Extensions accepted for a directory-less "name.ext:N" reference, where
+# host:port tokens ("redis.cache:6379") would otherwise look like files.
+_KNOWN_FILE_EXTENSIONS = {
+    "py", "pyi", "js", "mjs", "cjs", "jsx", "ts", "tsx", "vue", "svelte",
+    "go", "rs", "rb", "java", "kt", "kts", "scala", "swift", "c", "h", "cc",
+    "cpp", "cxx", "hpp", "cs", "php", "lua", "dart", "ex", "exs", "erl", "r",
+    "sh", "bash", "zsh", "ps1", "sql", "html", "htm", "css", "scss", "sass",
+    "less", "json", "yml", "yaml", "toml", "ini", "cfg", "conf", "xml", "md",
+    "mdx", "rst", "txt", "env", "lock", "gradle", "tf", "proto", "graphql",
+}  # fmt: skip
+
+
 def _is_safe_target_path(path: str) -> bool:
     if path.startswith((".", "/")) or ".." in path.split("/"):
         return False
@@ -176,8 +188,17 @@ def extract_target_file(directive: str) -> str | None:
     """
     text = directive or ""
     for match in TARGET_REFERENCE_RE.finditer(text):
-        if _is_safe_target_path(match.group("path")):
-            return match.group("path")
+        path = match.group("path")
+        if (
+            "/" not in path
+            and "#L" not in match.group(0)
+            and path.rsplit(".", 1)[1].lower() not in _KNOWN_FILE_EXTENSIONS
+        ):
+            # "redis.cache:6379", "api.v2:10": a bare host:port or dotted
+            # name, not a file. Directory paths and #L anchors are unambiguous.
+            continue
+        if _is_safe_target_path(path):
+            return path
     candidates = [
         m.group("path")
         for m in _BACKTICK_PATH_RE.finditer(text)

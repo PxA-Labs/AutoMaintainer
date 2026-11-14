@@ -44,6 +44,10 @@ from agents import (
         ("Rename `main.py` (see `Node.js` docs)", "main.py"),
         ("See https://x.org/a?file=src/app.py#L10-L20 and fix b.py:1", "b.py"),
         ("Call foo.local:8080 from client.js:4-9", "client.js"),
+        ("Point redis.cache:6379 at worker.py:12", "worker.py"),
+        ("Fix nginx.conf:80", "nginx.conf"),
+        ("See config/api.v2:10", "config/api.v2"),  # has a directory
+        ("See api.v2#L10", "api.v2"),  # GitHub anchors are unambiguous
     ],
 )
 def test_extract_target_file_formats(directive, expected):
@@ -64,6 +68,8 @@ def test_extract_target_file_formats(directive, expected):
         "See https://x.org/a?path~src/app.py:10",
         "Point the client at foo.local:8080",
         "Clone into ~/src/app.py:3",
+        "Point the cache at redis.cache:6379",
+        "Bump api.v2:10 to v3",
     ],
 )
 def test_extract_target_file_rejects_non_targets(directive):
