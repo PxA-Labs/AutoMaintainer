@@ -1018,18 +1018,130 @@ async def propose_changes(
         raise HTTPException(status_code=500, detail=f"Failed to propose changes: {e}")
 
 
-# --- Terminal WebSocket (unchanged) ---
+# --- Terminal WebSocket ---
+#
+# Policy: disabled unless ENABLE_TERMINAL=true (in every environment), and even
+# then only for Supabase user ids listed in TERMINAL_ADMIN_USER_IDS. The shell
+# gets a minimal allowlisted environment, and a requested repo is authorized
+# against the caller's org before its clone is used as the working directory.
+#
+# LIMITATION: the env scrub is defense in depth, not isolation. The shell runs
+# as the same OS user as the API server, so it can still read
+# /proc/<server pid>/environ, backend/.env and every tenant's clone. Do not set
+# ENABLE_TERMINAL on shared or hosted deployments until the shell runs as a
+# separate unprivileged user or in a sandbox.
+
+# Only these variables reach the interactive shell. Everything else in the
+# server's environment (SUPABASE_SERVICE_KEY, GITHUB_TOKEN, GITHUB_APP_*,
+# GROQ_API_KEY*, database/Redis URLs, ...) is withheld. An allowlist rather
+# than a denylist, so a newly added secret is withheld by default.
+_TERMINAL_ENV_ALLOWLIST = frozenset(
+    {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TZ"}
+)
+# Windows needs these for cmd.exe and most programs to start at all. None of
+# them carries a secret.
+_TERMINAL_ENV_ALLOWLIST_WIN32 = frozenset(
+    {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE"}
+)
+
+# "owner/repo", or a github.com URL to it (what the dashboard sends).
+_TERMINAL_REPO_RE = re.compile(
+    r"(?:https?://(?:www\.)?github\.com/)?"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?"
+)
+
+
+def _terminal_enabled() -> bool:
+    """The terminal is opt-in in every environment.
+
+    Keying the default on ENVIRONMENT=production left it enabled in any
+    deployment that never set ENVIRONMENT -- including the shipped Dockerfile.
+    """
+    return os.getenv("ENABLE_TERMINAL", "").strip().lower() == "true"
+
+
+def _terminal_admin_ids() -> set[str]:
+    raw = os.getenv("TERMINAL_ADMIN_USER_IDS", "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _terminal_user_allowed(user_id: str) -> bool:
+    """Deployment-level allowlist; empty means nobody.
+
+    Org roles cannot gate this: organizations are self-serve, so every signup
+    is the owner of its own org.
+    """
+    return bool(user_id) and str(user_id) in _terminal_admin_ids()
+
+
+def _terminal_child_env(windows: bool = False) -> dict:
+    allowed = _TERMINAL_ENV_ALLOWLIST | (
+        _TERMINAL_ENV_ALLOWLIST_WIN32 if windows else frozenset()
+    )
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k.upper() in allowed or k.startswith("LC_")
+    }
+    if not windows:
+        env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["TERM"] = "xterm-256color"
+    return env
+
+
+def _parse_terminal_repo(repo_url: str) -> Optional[str]:
+    match = _TERMINAL_REPO_RE.fullmatch(repo_url)
+    if not match or {match.group(1), match.group(2)} & {".", ".."}:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def _use_winpty() -> bool:
+    return sys.platform == "win32"
+
+
+async def _authorize_terminal_cwd(
+    repo_url: str, user: dict
+) -> tuple[bool, Optional[str]]:
+    """Return (allowed, cwd) for the requested repo.
+
+    An unparseable repo, or one outside the caller's org, refuses the
+    connection rather than silently falling back to another directory.
+    """
+    if not repo_url:
+        return True, None
+
+    repo_name = _parse_terminal_repo(repo_url)
+    if not repo_name:
+        return False, None
+
+    from agents import supabase as agents_supabase
+
+    if not agents_supabase:
+        return False, None
+    try:
+        await validate_repo_access(
+            repo_name, user.get("org_id"), user.get("user_id"), agents_supabase
+        )
+    except Exception:
+        # HTTPException(404), or PostgREST raising on .single() with no row.
+        return False, None
+
+    try:
+        repo_dir = get_safe_repo_dir(repo_name)
+    except HTTPException:
+        return False, None
+    real_dir = os.path.realpath(str(repo_dir))
+    real_base = os.path.realpath(str(get_base_workspace_dir()))
+    if real_dir.startswith(real_base + os.path.sep) and os.path.isdir(real_dir):
+        return True, real_dir
+    # Authorized but not cloned yet: open the shell without a repo cwd.
+    return True, None
 
 
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    # Secure by default. This endpoint hands out an interactive shell with the
-    # server's privileges, so production must opt in deliberately even though
-    # the handshake is now authenticated.
-    if (
-        os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
-        and os.getenv("ENABLE_TERMINAL", "").strip().lower() != "true"
-    ):
+    if not _terminal_enabled():
         await websocket.close(code=1008)
         return
 
@@ -1047,41 +1159,30 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         return
 
     user = await authenticate_websocket(websocket)
-    if not user:
+    if not user or not _terminal_user_allowed(user.get("user_id")):
+        await websocket.close(code=1008)
+        return
+
+    allowed, cwd = await _authorize_terminal_cwd(repo_url, user)
+    if not allowed:
         await websocket.close(code=1008)
         return
 
     await websocket.accept(subprotocol="bearer")
 
-    cwd = None
-    if repo_url:
-        match = re.search(
-            r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+?)(?:\.git)?$",
-            repo_url,
-        )
-        if match:
-            owner, repo = match.group(1), match.group(2)
-            repo_name = f"{owner}/{repo}"
-            try:
-                repo_dir = get_safe_repo_dir(repo_name)
-                base_dir = get_base_workspace_dir()
-                real_dir = os.path.realpath(str(repo_dir))
-                real_base = os.path.realpath(str(base_dir))
-                if (
-                    real_dir.startswith(real_base + os.path.sep)
-                    and os.path.exists(real_dir)
-                    and os.path.isdir(real_dir)
-                ):
-                    cwd = real_dir
-            except HTTPException:
-                pass
-
-    if sys.platform == "win32":
-        import pywinpty
+    if _use_winpty():
+        # The module is `winpty`, from the `pywinpty` package.
+        import winpty
 
         cols, rows = 80, 24
-        pty = pywinpty.PTY(cols, rows)
-        pid = pty.spawn(pywinpty.winpty.get_default_cmd(), cwd=cwd)
+        pty = winpty.PTY(cols, rows)
+        child_env = _terminal_child_env(windows=True)
+        shell = child_env.get("COMSPEC") or "cmd.exe"
+        # pywinpty takes the environment as "K=V\0K=V\0" and returns a bool;
+        # the child's pid is exposed separately as pty.pid.
+        env_block = "".join(f"{k}={v}\0" for k, v in child_env.items())
+        pty.spawn(shell, cwd=cwd, env=env_block)
+        pid = pty.pid
 
         async def read_from_pty():
             while True:
@@ -1108,10 +1209,6 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
             pass
         finally:
             read_task.cancel()
-            try:
-                pty.close()
-            except Exception:
-                pass
             if pid:
                 try:
                     import signal
@@ -1130,12 +1227,13 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         import struct
         import signal
 
+        # Computed before fork(): the child should only exec.
+        child_env = _terminal_child_env()
         pid, fd = pty.fork()
         if pid == 0:
             if cwd:
                 os.chdir(cwd)
-            os.environ["TERM"] = "xterm-256color"
-            os.execv("/bin/bash", ["/bin/bash"])
+            os.execve("/bin/bash", ["/bin/bash"], child_env)
         else:
 
             async def read_from_pty():
