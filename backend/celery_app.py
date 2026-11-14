@@ -146,7 +146,9 @@ celery_app.conf.update(
         },
         "sync-repositories": {
             "task": "tasks.sync_repositories",
-            "schedule": crontab(hour="*/6"),  # Every 6 hours
+            # minute=0 is required: crontab's minute defaults to "*", so
+            # hour="*/6" alone fired every minute of those hours (240/day).
+            "schedule": crontab(minute=0, hour="*/6"),  # Once every 6 hours
         },
     },
     # Monitoring
