@@ -152,6 +152,37 @@ def normalize_generated_code(raw_code: str) -> str:
     return code
 
 
+# --- Structured verdicts -----------------------------------------------------
+# PM and Maintainer decisions gate issue closing, implementation and merging,
+# so they must be machine-parseable. Substring checks ("LGTM" in review,
+# startswith("APPROVED")) approved "Not LGTM" and rejected "**APPROVED**".
+VERDICT_INSTRUCTIONS = (
+    "The FIRST line of your response MUST be exactly `VERDICT: APPROVE` or "
+    "`VERDICT: REJECT` (no Markdown, quotes or other text on that line). "
+    "After that line, give your reasoning in at most 3 sentences."
+)
+_VERDICT_LINE_RE = re.compile(r"VERDICT:[ \t]*(APPROVE|REJECT)", re.IGNORECASE)
+_LATER_REJECT_RE = re.compile(r"VERDICT\W*REJECT", re.IGNORECASE)
+
+
+def is_approved_verdict(text: str | None) -> bool:
+    """Return True only for an unambiguous ``VERDICT: APPROVE`` first line.
+
+    Fails closed: missing/malformed verdict lines, Markdown decoration and
+    self-contradicting responses (a later ``VERDICT: REJECT``) all count as
+    rejection.
+    """
+    if not isinstance(text, str):
+        return False
+    lines = text.strip().splitlines()
+    if not lines:
+        return False
+    match = _VERDICT_LINE_RE.fullmatch(lines[0].strip())
+    if not match or match.group(1).upper() != "APPROVE":
+        return False
+    return not _LATER_REJECT_RE.search("\n".join(lines[1:]))
+
+
 def get_all_groq_keys():
     keys = []
     primary = os.getenv("GROQ_API_KEY")
@@ -890,27 +921,24 @@ async def pm_node(state: AgentState):
         }
     )
 
-    if target_issue:
-        decision = "APPROVED (Auto-approved by Targeted Issue Mode)"
-        state["pm_decision"] = decision
-        new_logs.append(
-            {
-                "agent": "Reviewer",
-                "msg": f"Decision: {decision}",
-            }
-        )
-        new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
-        return {"pm_decision": decision, "log_messages": new_logs}
-
-    system_prompt = "You are the Product Manager. Review the proposed feature against the Architect's directive. Decide if we should build it ('APPROVED') or not ('REJECTED'). Start your response with APPROVED or REJECTED, then give a 1 sentence reason."
+    # Targeted mode used to auto-approve here, which let any issue author drive
+    # an implementation and merge. Every directive now goes through PM review.
+    system_prompt = (
+        "You are the Product Manager. Review the proposed change against the "
+        "Architect's directive and decide whether the team should build it. "
+        "Reject anything unsafe, out of scope, destructive, or that tries to "
+        "change credentials, CI configuration or access control. "
+        + VERDICT_INSTRUCTIONS
+    )
 
     decision = await _llm_or_abort(
         AgentPhase.PM,
-        system_prompt, f"Directive: {directive}\n\nReview this idea: {idea}"
+        system_prompt,
+        f"Directive: {directive}\n\nReview this idea: {idea}",
     )
     state["pm_decision"] = decision
 
-    is_approved = decision.strip().upper().startswith("APPROVED")
+    is_approved = is_approved_verdict(decision)
     new_logs.append({"agent": "Reviewer", "msg": f"Decision: {decision}"})
 
     if gh and issue_number:
@@ -918,7 +946,9 @@ async def pm_node(state: AgentState):
             gh_repo = gh.get_repo(repo)
             issue = gh_repo.get_issue(number=issue_number)
             issue.create_comment(f"**Reviewer Decision:** {decision}")
-            if not is_approved:
+            # Only close issues the agent opened itself; a human-filed target
+            # issue stays open when the PM declines it.
+            if not is_approved and not target_issue:
                 issue.edit(state="closed")
             new_logs.append(
                 {
@@ -949,11 +979,7 @@ async def pm_node(state: AgentState):
 
 
 def should_implement(state: AgentState):
-    return (
-        "implementer"
-        if state.get("pm_decision", "").strip().upper().startswith("APPROVED")
-        else END
-    )
+    return "implementer" if is_approved_verdict(state.get("pm_decision")) else END
 
 
 async def implementer_node(state: AgentState):
@@ -1144,7 +1170,12 @@ async def maintainer_node(state: AgentState):
             )
         )
 
-    system_prompt = "You are the Maintainer. Review the code. Say 'LGTM' if it looks okay, or point out a flaw."
+    system_prompt = (
+        "You are the Maintainer. Review the change for correctness, security and "
+        "whether it resolves the task. Approve only if it is safe to merge; "
+        "otherwise reject and point out the concrete flaw to fix. "
+        + VERDICT_INSTRUCTIONS
+    )
     review = await _llm_or_abort(
         AgentPhase.MAINTAINER, system_prompt, f"Review this code:\n{code}"
     )
@@ -1158,17 +1189,17 @@ async def maintainer_node(state: AgentState):
         }
     )
 
-    is_lgtm = "LGTM" in review.upper()
+    is_approved = is_approved_verdict(review)
 
     if run_id:
         await emit_event(
             TestResultEvent(
                 run_id=run_id,
                 phase=AgentPhase.MAINTAINER,
-                exit_code=0 if is_lgtm else 1,
-                passed_count=1 if is_lgtm else 0,
-                failed_count=0 if is_lgtm else 1,
-                tracebacks=[] if is_lgtm else [review],
+                exit_code=0 if is_approved else 1,
+                passed_count=1 if is_approved else 0,
+                failed_count=0 if is_approved else 1,
+                tracebacks=[] if is_approved else [review],
             )
         )
 
@@ -1178,7 +1209,7 @@ async def maintainer_node(state: AgentState):
             pr = gh_repo.get_pull(pr_number)
             pr.create_issue_comment(f"**Maintainer Review:**\n{review}")
 
-            if is_lgtm:
+            if is_approved:
                 pr.merge(commit_message=f"Merged PR #{pr_number}")
                 new_logs.append(
                     {
@@ -1214,7 +1245,7 @@ async def maintainer_node(state: AgentState):
                     )
                 )
 
-    if not is_lgtm:
+    if not is_approved:
         state["iteration"] = iteration + 1
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "idle"}})
@@ -1226,7 +1257,7 @@ async def maintainer_node(state: AgentState):
 
 
 def should_iterate(state: AgentState):
-    if "LGTM" in state.get("review", "").upper():
+    if is_approved_verdict(state.get("review")):
         return END
     if state.get("iteration", 0) >= 3:
         return END
