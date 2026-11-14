@@ -188,6 +188,31 @@ class EmptyAgentStreamError(RuntimeError):
     """Raised when an MCP agent stream contains no usable final response."""
 
 
+class LLMExecutionError(RuntimeError):
+    """Raised when no LLM path (MCP tools or plain completion) produced a response.
+
+    Callers must treat this as a hard failure; error text must never be used as
+    if it were model output (issue bodies, PM decisions, code, reviews).
+    """
+
+
+class PipelineAbortError(RuntimeError):
+    """Raised by a graph node to stop the whole run with a clear, user-facing error.
+
+    ``run_agent_loop`` converts it into a fatal ``ErrorEvent`` and a ``failed`` run.
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        phase: AgentPhase = AgentPhase.SYSTEM,
+    ):
+        super().__init__(message)
+        self.error_code = error_code
+        self.phase = phase
+
+
 def extract_final_agent_content(final_res) -> str:
     """Return the final streamed message or raise a descriptive protocol error."""
     if not isinstance(final_res, dict):
@@ -405,7 +430,20 @@ async def run_llm_with_tools(
                         fatal=False,
                     )
                 )
-            return f"[ERROR] LLM execution failed: {e2}"
+            raise LLMExecutionError(f"LLM execution failed: {e2}") from e2
+
+
+async def _llm_or_abort(phase: AgentPhase, system_prompt: str, user_prompt: str):
+    """Call the LLM for a graph node; an LLM outage ends the run instead of
+    leaking error strings into GitHub issues, PM decisions or commits."""
+    try:
+        return await run_llm_with_tools(system_prompt, user_prompt)
+    except LLMExecutionError as e:
+        raise PipelineAbortError(
+            "LLM_EXECUTION_FAILED",
+            f"{phase.value.capitalize()} could not get an LLM response: {e}",
+            phase,
+        ) from e
 
 
 async def architect_node(state: AgentState):
@@ -659,7 +697,7 @@ async def architect_node(state: AgentState):
     system_prompt = 'You are the Principal Architect. Analyze the provided repository root file structure, AST structure, and README context. Assess the current state of the project (is it working, what tech stack is it using) and give a strict 2-sentence directive on what the team should build or fix next. You MUST explicitly include precise file paths and start–end line ranges (e.g., "file.py:10-25") for any delegated changes. Ensure these exact line-number citations are present in the generated directive.'
     user_prompt = f"Repo: {repo}\n\nFiles:\n{tree_content}\n\nREADME:\n{readme_content[:1000]}\n\n{ast_context_str}\n\nGenerate the architect_directive."
 
-    directive = await run_llm_with_tools(system_prompt, user_prompt)
+    directive = await _llm_or_abort(AgentPhase.ARCHITECT, system_prompt, user_prompt)
     state["architect_directive"] = directive
     target_file = extract_target_file(directive)
 
@@ -747,7 +785,7 @@ async def brainstormer_node(state: AgentState):
     system_prompt = "You are the Visionary Agent. Your job is to brainstorm one single, highly innovative feature that fulfills the Architect's directive."
     user_prompt = f"Architect Directive:\n{directive}\n\nBrainstorm a new feature for {repo}. Keep it under 3 sentences."
 
-    idea = await run_llm_with_tools(system_prompt, user_prompt)
+    idea = await _llm_or_abort(AgentPhase.BRAINSTORMER, system_prompt, user_prompt)
     state["idea"] = idea
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "active"}})
@@ -866,7 +904,8 @@ async def pm_node(state: AgentState):
 
     system_prompt = "You are the Product Manager. Review the proposed feature against the Architect's directive. Decide if we should build it ('APPROVED') or not ('REJECTED'). Start your response with APPROVED or REJECTED, then give a 1 sentence reason."
 
-    decision = await run_llm_with_tools(
+    decision = await _llm_or_abort(
+        AgentPhase.PM,
         system_prompt, f"Directive: {directive}\n\nReview this idea: {idea}"
     )
     state["pm_decision"] = decision
@@ -983,7 +1022,7 @@ async def implementer_node(state: AgentState):
         user_prompt = f"Task:\n{idea}\n\nCreate the new file: {path}"
 
     code = normalize_generated_code(
-        await run_llm_with_tools(system_prompt, user_prompt)
+        await _llm_or_abort(AgentPhase.IMPLEMENTER, system_prompt, user_prompt)
     )
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "active"}})
     new_logs.append(
@@ -1106,7 +1145,9 @@ async def maintainer_node(state: AgentState):
         )
 
     system_prompt = "You are the Maintainer. Review the code. Say 'LGTM' if it looks okay, or point out a flaw."
-    review = await run_llm_with_tools(system_prompt, f"Review this code:\n{code}")
+    review = await _llm_or_abort(
+        AgentPhase.MAINTAINER, system_prompt, f"Review this code:\n{code}"
+    )
     state["review"] = review
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "active"}})
@@ -1211,6 +1252,45 @@ workflow.add_conditional_edges("maintainer", should_iterate)
 app = workflow.compile()
 
 
+async def _fail_run(
+    run_id: str,
+    error_code: str,
+    message: str,
+    phase: AgentPhase,
+    final_state: dict | None,
+) -> dict:
+    """Emit a fatal ErrorEvent, mark the run failed and build the failed result."""
+    await emit_event(
+        ErrorEvent(
+            run_id=run_id,
+            phase=phase,
+            error_code=error_code,
+            message=message,
+            fatal=True,
+        )
+    )
+    await broadcast_log({"agent": "System", "msg": f"Run failed: {message}"})
+    if supabase:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("runs")
+                .update({"status": "failed"})
+                .eq("id", run_id)
+                .execute()
+            )
+        except Exception as e:
+            print(f"Failed to update run status in Supabase: {e}")
+    state = final_state or {}
+    return {
+        "status": "failed",
+        "error": message,
+        "error_code": error_code,
+        "issue_number": state.get("issue_number") or 0,
+        "pr_number": state.get("pr_number") or 0,
+        "branch_name": state.get("branch_name") or "",
+    }
+
+
 async def run_agent_loop(
     repo_name: str,
     target_issue: int | None = None,
@@ -1301,7 +1381,6 @@ async def run_agent_loop(
             new_msgs = state["log_messages"][last_idx:]
             for msg in new_msgs:
                 await broadcast_log(msg)
-                await asyncio.sleep(0.5)
 
             last_idx = len(state["log_messages"])
             final_state = dict(state)
@@ -1325,6 +1404,16 @@ async def run_agent_loop(
             "pr_number": (final_state or {}).get("pr_number") or 0,
             "branch_name": (final_state or {}).get("branch_name") or "",
         }
+    except PipelineAbortError as e:
+        return await _fail_run(run_id, e.error_code, str(e), e.phase, final_state)
+    except Exception as e:
+        # Any other node failure (GitHub API error, bug, ...) must still end the
+        # run visibly instead of leaving it "running" with no terminal event.
+        logger.exception("Agent loop failed for run %s", run_id)
+        return await _fail_run(
+            run_id, "RUN_FAILED", f"Agent loop failed: {e}", AgentPhase.SYSTEM,
+            final_state,
+        )
     except asyncio.CancelledError:
         await emit_event(
             ErrorEvent(
