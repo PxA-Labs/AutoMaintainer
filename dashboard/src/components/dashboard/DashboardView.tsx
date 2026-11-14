@@ -22,6 +22,11 @@ export function DashboardView({
   agentStatus,
   logs,
 }: DashboardViewProps) {
+  // Derived from realtime agent status rather than a hardcoded headline.
+  const activeAgents = Object.values(agentStatus).filter(
+    (status) => status && status !== "idle"
+  ).length;
+
   return (
     <div className="flex-1 flex flex-col overflow-y-auto custom-scrollbar p-6 space-y-6">
       {/* 3-Column Metrics Overview */}
@@ -41,7 +46,7 @@ export function DashboardView({
             Autonomous Engineering Crew
           </h2>
           <span className="text-[11px] text-zinc-500 font-mono">
-            5 Active Specialists
+            {activeAgents} active
           </span>
         </div>
         <AgentGrid agentStatus={agentStatus} />

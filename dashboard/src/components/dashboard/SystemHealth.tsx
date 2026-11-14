@@ -23,7 +23,7 @@ export function SystemHealth({ latency, tokensUsed }: SystemHealthProps) {
           <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
           System Health
         </h3>
-        <span className="text-[11px] font-mono text-zinc-500">Live Telemetry</span>
+        <span className="text-[11px] font-mono text-zinc-500">Selected run</span>
       </div>
 
       <div className="flex-1 flex flex-col justify-center space-y-4">
@@ -65,12 +65,6 @@ export function SystemHealth({ latency, tokensUsed }: SystemHealthProps) {
               style={{ width: `${Math.max(tokenPercent, 2)}%` }}
             />
           </div>
-        </div>
-
-        {/* Model status */}
-        <div className="pt-2 border-t border-zinc-800/40 flex items-center justify-between text-[11px] text-zinc-500 font-mono">
-          <span>Engine</span>
-          <span className="text-zinc-400">Llama-3-70b (Cloud)</span>
         </div>
       </div>
     </div>
