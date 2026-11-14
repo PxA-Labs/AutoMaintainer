@@ -31,18 +31,19 @@ attrs==26.1.0
     #   referencing
 billiard==4.3.0
     # via celery
-boto3==1.43.98
+boto3==1.43.123
     # via litellm
-botocore==1.43.98
+botocore==1.43.123
     # via
     #   boto3
     #   s3transfer
 celery==5.6.3
     # via -r requirements.in
-certifi==2026.7.22
+certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
+    #   litellm
     #   requests
 cffi==2.1.1
     # via
@@ -205,7 +206,7 @@ langgraph-sdk==0.4.8
     # via langgraph
 langsmith==0.13.0
     # via langchain-core
-litellm==1.105.1
+litellm==1.106.5
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
@@ -479,6 +480,7 @@ typing-extensions==4.16.0
     #   langchain-mcp-adapters
     #   langchain-protocol
     #   langsmith
+    #   litellm
     #   mcp
     #   openai
     #   opentelemetry-api
