@@ -15,7 +15,6 @@ from agents import (
     normalize_generated_code,
 )
 
-
 # --- extract_target_file -------------------------------------------------
 
 
@@ -247,7 +246,9 @@ async def test_missing_target_issue_aborts(offline, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_directive_without_file_target_fails_run_before_issue(offline, monkeypatch):
+async def test_directive_without_file_target_fails_run_before_issue(
+    offline, monkeypatch
+):
     async def llm(s, u, estimated_tokens=3000):
         return "Improve the developer experience overall."
 

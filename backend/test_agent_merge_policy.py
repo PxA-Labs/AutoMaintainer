@@ -123,7 +123,10 @@ async def test_ci_policy_merges_when_all_checks_green(monkeypatch):
     repo, pr, _ = _setup(
         monkeypatch,
         statuses=[("ci/build", "success")],
-        check_runs=[("tests", "completed", "success"), ("lint", "completed", "skipped")],
+        check_runs=[
+            ("tests", "completed", "success"),
+            ("lint", "completed", "skipped"),
+        ],
     )
     result = await agents.maintainer_node(_state())
     repo.get_commit.assert_called_once_with("headsha")

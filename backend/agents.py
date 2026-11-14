@@ -318,9 +318,7 @@ def untrusted_block(label: str, content, max_chars: int | None = None) -> str:
     # Escape look-alike tags so the content cannot close the block early.
     text = _UNTRUSTED_TAG_RE.sub(r"&lt;\1\2", text)
     safe_label = re.sub(r"[^\w .#/-]", "", label)
-    return (
-        f'<untrusted-data source="{safe_label}">\n{text}\n</untrusted-data>'
-    )
+    return f'<untrusted-data source="{safe_label}">\n{text}\n</untrusted-data>'
 
 
 def get_all_groq_keys():
@@ -897,7 +895,10 @@ async def architect_node(state: AgentState):
             }
         )
 
-    system_prompt = 'You are the Principal Architect. Analyze the provided repository root file structure, AST structure, and README context. Assess the current state of the project (is it working, what tech stack is it using) and give a strict 2-sentence directive on what the team should build or fix next. You MUST explicitly include precise file paths and start–end line ranges (e.g., "file.py:10-25") for any delegated changes. Ensure these exact line-number citations are present in the generated directive. ' + UNTRUSTED_DATA_NOTICE
+    system_prompt = (
+        'You are the Principal Architect. Analyze the provided repository root file structure, AST structure, and README context. Assess the current state of the project (is it working, what tech stack is it using) and give a strict 2-sentence directive on what the team should build or fix next. You MUST explicitly include precise file paths and start–end line ranges (e.g., "file.py:10-25") for any delegated changes. Ensure these exact line-number citations are present in the generated directive. '
+        + UNTRUSTED_DATA_NOTICE
+    )
     user_prompt = (
         f"Repo: {repo}\n\n"
         f"Files:\n{untrusted_block('repository file list', tree_content)}\n\n"
@@ -1452,7 +1453,9 @@ def _merge_pr(pr, pr_number: int) -> None:
         result = pr.merge(commit_message=f"Merged PR #{pr_number}")
     except Exception as e:
         raise PipelineAbortError(
-            "MERGE_FAILED", f"Failed to merge PR #{pr_number}: {e}", AgentPhase.MAINTAINER
+            "MERGE_FAILED",
+            f"Failed to merge PR #{pr_number}: {e}",
+            AgentPhase.MAINTAINER,
         ) from e
     if not getattr(result, "merged", False):
         raise PipelineAbortError(
@@ -1818,7 +1821,10 @@ async def run_agent_loop(
         # run visibly instead of leaving it "running" with no terminal event.
         logger.exception("Agent loop failed for run %s", run_id)
         return await _fail_run(
-            run_id, "RUN_FAILED", f"Agent loop failed: {e}", AgentPhase.SYSTEM,
+            run_id,
+            "RUN_FAILED",
+            f"Agent loop failed: {e}",
+            AgentPhase.SYSTEM,
             final_state,
         )
     except asyncio.CancelledError:

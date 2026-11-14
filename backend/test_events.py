@@ -579,7 +579,8 @@ async def test_agent_emitted_events_have_no_css_formatting():
         state["code"] = res_imp["code"]
 
     with patch("agents.gh", mock_gh), patch(
-        "agents.run_llm_with_tools", AsyncMock(return_value="VERDICT: APPROVE\nLooks good.")
+        "agents.run_llm_with_tools",
+        AsyncMock(return_value="VERDICT: APPROVE\nLooks good."),
     ):
         # 5. Maintainer Node
         res_maint = await maintainer_node(state)
