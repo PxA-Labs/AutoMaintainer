@@ -18,6 +18,7 @@ anyio==4.15.1
     #   httpx
     #   httpx2
     #   langsmith
+    #   litellm
     #   mcp
     #   openai
     #   sse-starlette
@@ -83,8 +84,6 @@ distro==1.9.0
     #   openai
 fastapi==0.162.0
     # via -r requirements.in
-fastuuid==0.14.0
-    # via litellm
 filelock==3.32.7
     # via
     #   huggingface-hub
@@ -128,6 +127,7 @@ httpx[http2]==0.28.1
     #   mcp
     #   openai
     #   postgrest
+    #   realtime
     #   storage3
     #   supabase
     #   supabase-auth
@@ -206,7 +206,7 @@ langgraph-sdk==0.4.8
     # via langgraph
 langsmith==0.13.0
     # via langchain-core
-litellm==1.106.5
+litellm==1.109.1
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
@@ -316,7 +316,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-postgrest==2.32.0
+postgrest==2.34.1
     # via supabase
 prometheus-client==0.26.0
     # via opentelemetry-exporter-prometheus
@@ -397,7 +397,7 @@ pyyaml==6.0.3
     #   huggingface-hub
     #   langchain-core
     #   litellm
-realtime==2.32.0
+realtime==2.34.1
     # via supabase
 redis==8.1.0
     # via -r requirements.in
@@ -436,15 +436,13 @@ starlette==1.6.0
     #   fastapi
     #   mcp
     #   sse-starlette
-storage3==2.32.0
+storage3==2.34.1
     # via supabase
-strenum==0.4.15
-    # via supabase-functions
-supabase==2.32.0
+supabase==2.34.1
     # via -r requirements.in
-supabase-auth==2.32.0
+supabase-auth==2.34.1
     # via supabase
-supabase-functions==2.32.0
+supabase-functions==2.34.1
     # via supabase
 tenacity==9.1.4
     # via langchain-core
@@ -470,7 +468,6 @@ truststore==0.10.4
     #   httpx2
 typing-extensions==4.16.0
     # via
-    #   anyio
     #   click-repl
     #   fastapi
     #   groq
