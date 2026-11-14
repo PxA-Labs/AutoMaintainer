@@ -1,19 +1,73 @@
 """
 Rate Limit Manager for AutoMaintainer
 Provides token bucket rate limiting with multi-key rotation for Groq API.
+
+Event-loop independence: Celery tasks each run on a fresh event loop
+(asyncio.run / new_event_loop), while the manager is a process-wide
+singleton. So nothing here may depend on a particular loop: key health is
+derived lazily from timestamps at selection time (no background recovery
+task) and the internal lock is a threading.Lock guarding purely
+synchronous critical sections.
 """
 
 import os
+import re
 import time
 import asyncio
 import logging
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
-from collections import deque
 from contextlib import asynccontextmanager
 import threading
 
 logger = logging.getLogger(__name__)
+
+# How long a key is benched after repeated key-attributable errors.
+UNHEALTHY_COOLDOWN_SECONDS = 120.0
+UNHEALTHY_AFTER_CONSECUTIVE_ERRORS = 3
+
+_STATUS_IN_MESSAGE = re.compile(
+    r"(?:error code|status(?: code)?)\s*[:=]?\s*(\d{3})", re.I
+)
+
+
+class RequestExceedsBudgetError(ValueError):
+    """A single request needs more tokens than any key's per-minute budget."""
+
+
+def classify_key_error(error: Exception) -> Optional[str]:
+    """
+    Decide whether an error says something about the API key itself.
+
+    Returns "rate_limit", "auth" or "server" for errors that should count
+    against the key's health, or None for everything else (bad prompts,
+    context-length errors, tool/MCP failures, parsing bugs...), which would
+    fail identically on any key and must not bench healthy keys.
+    """
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    msg = str(error).lower()
+    if not isinstance(status, int):
+        match = _STATUS_IN_MESSAGE.search(msg)
+        status = int(match.group(1)) if match else None
+
+    if (
+        status == 429
+        or "rate limit" in msg
+        or "rate_limit" in msg
+        or "too many requests" in msg
+    ):
+        return "rate_limit"
+    if status in (401, 403) or "invalid api key" in msg or "invalid_api_key" in msg:
+        return "auth"
+    if (isinstance(status, int) and status >= 500) or type(error).__name__ in (
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+    ):
+        return "server"
+    return None
 
 
 @dataclass
@@ -30,12 +84,22 @@ class APIKeyState:
     token_tokens: float = field(default=6000.0)
     last_refill: float = field(default_factory=time.time)
 
-    # Health tracking
+    # Health tracking. A key is unhealthy while time.time() < unhealthy_until;
+    # it recovers on its own once that passes, whichever loop/task asks.
     consecutive_errors: int = 0
     last_error_time: float = 0
-    is_healthy: bool = True
+    unhealthy_until: float = 0.0
     total_requests: int = 0
     total_tokens: int = 0
+
+    @property
+    def is_healthy(self) -> bool:
+        if self.unhealthy_until and time.time() >= self.unhealthy_until:
+            # Cooldown elapsed: give the key a fresh start.
+            self.unhealthy_until = 0.0
+            self.consecutive_errors = 0
+            logger.info(f"Key {self.name} auto-recovered after cooldown")
+        return not self.unhealthy_until
 
     def refill(self, now: float = None):
         """Refill token buckets based on elapsed time."""
@@ -72,32 +136,41 @@ class APIKeyState:
         self.total_requests += 1
         self.total_tokens += max(tokens_used, 0)
 
-    def record_error(self, error: Exception):
-        """Record an error and potentially mark unhealthy."""
-        self.consecutive_errors += 1
-        self.last_error_time = time.time()
+    def record_error(self, error: Exception) -> bool:
+        """
+        Record an error against this key and potentially mark it unhealthy.
 
-        # Check for rate limit errors
-        error_str = str(error).lower()
-        if "rate limit" in error_str or "429" in error_str:
+        Returns True if the error was attributable to the key (rate limit,
+        auth or server error) and was counted, False if it was ignored.
+        """
+        kind = classify_key_error(error)
+        if kind is None:
+            return False
+
+        now = time.time()
+        self.consecutive_errors += 1
+        self.last_error_time = now
+
+        if kind == "rate_limit":
             # Drain request bucket on rate limit
             self.request_tokens = 0
             logger.warning(
                 f"Rate limit hit for key {self.name}, draining request bucket"
             )
 
-        # Mark unhealthy after 3 consecutive errors
-        if self.consecutive_errors >= 3:
-            self.is_healthy = False
+        if self.consecutive_errors >= UNHEALTHY_AFTER_CONSECUTIVE_ERRORS:
+            self.unhealthy_until = now + UNHEALTHY_COOLDOWN_SECONDS
             logger.error(
-                f"Key {self.name} marked unhealthy after {self.consecutive_errors} errors"
+                f"Key {self.name} marked unhealthy for {UNHEALTHY_COOLDOWN_SECONDS:.0f}s "
+                f"after {self.consecutive_errors} {kind} errors"
             )
+        return True
 
     def record_success(self):
         """Record successful request."""
         self.consecutive_errors = 0
-        if not self.is_healthy:
-            self.is_healthy = True
+        if self.unhealthy_until:
+            self.unhealthy_until = 0.0
             logger.info(f"Key {self.name} recovered, marked healthy")
 
     def time_until_ready(self, estimated_tokens: int = 1000) -> float:
@@ -105,6 +178,8 @@ class APIKeyState:
         self.refill()
         if self.can_make_request(estimated_tokens):
             return 0.0
+        if not self.is_healthy:
+            return max(self.unhealthy_until - time.time(), 0.0)
 
         # Time to get 1 request token
         req_wait = 0
@@ -130,13 +205,14 @@ class RateLimitManager:
     def __init__(self):
         self.keys: List[APIKeyState] = []
         self.current_key_index: int = 0
-        self._lock = asyncio.Lock()
+        # threading.Lock, not asyncio.Lock: the critical sections below never
+        # await, and an asyncio.Lock can end up bound to an event loop that a
+        # previous Celery task already closed.
+        self._lock = threading.Lock()
         self._initialized = False
-        self._health_check_task: Optional[asyncio.Task] = None
 
         # Configuration
         self.min_healthy_keys = 1
-        self.recovery_check_interval = 30  # seconds
         self.default_request_rpm = int(os.getenv("GROQ_REQUESTS_PER_MINUTE", "30"))
         self.default_token_rpm = int(os.getenv("GROQ_TOKENS_PER_MINUTE", "6000"))
 
@@ -170,33 +246,13 @@ class RateLimitManager:
 
         logger.info(f"RateLimitManager initialized with {len(self.keys)} API keys")
         self._initialized = True
-
-        # Start health check background task
-        self._health_check_task = asyncio.create_task(self._health_check_loop())
-
-    async def _health_check_loop(self):
-        """Periodically check and recover unhealthy keys."""
-        while True:
-            await asyncio.sleep(self.recovery_check_interval)
-            async with self._lock:
-                for key_state in self.keys:
-                    if not key_state.is_healthy:
-                        # Check if enough time has passed since last error
-                        if time.time() - key_state.last_error_time > 120:  # 2 minutes
-                            key_state.is_healthy = True
-                            key_state.consecutive_errors = 0
-                            logger.info(
-                                f"Key {key_state.name} auto-recovered after cooldown"
-                            )
+        # No background recovery task: it would be bound to the event loop of
+        # whichever task initialized us and die with it. APIKeyState.is_healthy
+        # recovers keys lazily from their unhealthy_until timestamp instead.
 
     async def shutdown(self):
-        """Clean up background tasks."""
-        if self._health_check_task:
-            self._health_check_task.cancel()
-            try:
-                await self._health_check_task
-            except asyncio.CancelledError:
-                pass
+        """Kept for API compatibility; there are no background tasks to stop."""
+        return None
 
     def _get_next_healthy_key(
         self, estimated_tokens: int = 1000
@@ -226,17 +282,27 @@ class RateLimitManager:
         if not self._initialized:
             await self.initialize()
 
+        # A bucket never holds more than tokens_per_minute, so a bigger
+        # request can never be served: fail now rather than wait out the
+        # whole timeout.
+        budget = max((k.tokens_per_minute for k in self.keys), default=0)
+        if estimated_tokens > budget:
+            raise RequestExceedsBudgetError(
+                f"Request needs ~{estimated_tokens} tokens but the per-minute "
+                f"budget is {budget} (GROQ_TOKENS_PER_MINUTE); shrink the "
+                f"request or raise the budget"
+            )
+
         start_time = time.time()
 
         while True:
-            async with self._lock:
+            with self._lock:
                 key = self._get_next_healthy_key(estimated_tokens)
                 if key:
                     key.consume(estimated_tokens)
                     return key
 
-            # All keys busy - wait for the fastest one
-            async with self._lock:
+                # All keys busy - wait for the fastest one
                 wait_times = [
                     (k.time_until_ready(estimated_tokens), k)
                     for k in self.keys
@@ -244,7 +310,7 @@ class RateLimitManager:
                 ]
 
             if not wait_times:
-                # No healthy keys at all
+                # No healthy keys at all (they recover after their cooldown)
                 raise RuntimeError("No healthy API keys available")
 
             min_wait, _ = min(wait_times, key=lambda x: x[0])
@@ -281,11 +347,12 @@ class RateLimitManager:
 
             except Exception as e:
                 last_error = e
+                # Only rate-limit/auth/server errors count against the key.
                 key.record_error(e)
                 logger.warning(f"Attempt {attempt + 1} failed with key {key.name}: {e}")
 
                 # If rate limited, wait a bit before retry
-                if "429" in str(e) or "rate limit" in str(e).lower():
+                if classify_key_error(e) == "rate_limit":
                     await asyncio.sleep(2**attempt)  # Exponential backoff
 
         raise last_error
