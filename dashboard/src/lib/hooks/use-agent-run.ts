@@ -1,11 +1,26 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { getBackendUrl, parseTargetIssue } from "@/lib/config";
 import { useAuth } from "@/lib/auth";
+import { isTerminalRunStatus } from "@/lib/run-status";
+
+/** How often the active run's status is polled from GET /status/{run_id}. */
+export const RUN_STATUS_POLL_MS = 5000;
+
+/**
+ * idle      - no run is tracked
+ * starting  - POST /start is in flight (no run_id yet, so Stop is impossible)
+ * running   - the backend confirmed a run_id and it is queued/running
+ * stopping  - POST /stop is in flight; we stay "running" until it succeeds
+ */
+export type RunPhase = "idle" | "starting" | "running" | "stopping";
 
 interface AgentRunState {
+  phase: RunPhase;
   isRunning: boolean;
+  /** True while a start or stop request is in flight; the control is disabled. */
+  isPending: boolean;
   activeRunId: string | null;
   repoUrl: string;
   targetIssue: string;
@@ -34,16 +49,31 @@ interface UseAgentRunOptions {
   onStart?: () => void;
 }
 
+async function readDetail(res: Response): Promise<string> {
+  const data = await res.json().catch(() => ({}));
+  return typeof data?.detail === "string"
+    ? data.detail
+    : `Backend returned HTTP ${res.status}.`;
+}
+
 export function useAgentRun(
   onLog: (entry: LogEntry) => void,
   options?: UseAgentRunOptions
 ) {
   const { user, session } = useAuth();
-  const [isRunning, setIsRunning] = useState(false);
+  const [phase, setPhase] = useState<RunPhase>("idle");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [repoUrl, setRepoUrl] = useState("owner/repo");
   const [targetIssue, setTargetIssue] = useState("");
   const [isEditingRepo, setIsEditingRepo] = useState(false);
+
+  // The phase is mirrored in a ref so that two clicks delivered in the same
+  // frame (before React re-renders) cannot both see "idle" and start two runs.
+  const phaseRef = useRef<RunPhase>("idle");
+  const updatePhase = useCallback((next: RunPhase) => {
+    phaseRef.current = next;
+    setPhase(next);
+  }, []);
 
   const log = useCallback(
     (msg: string, color: string, agent = "System") => {
@@ -59,10 +89,57 @@ export function useAgentRun(
 
   const resetRun = useCallback(() => {
     setActiveRunId(null);
-    setIsRunning(false);
-  }, []);
+    updatePhase("idle");
+  }, [updatePhase]);
+
+  const accessToken = session?.access_token ?? null;
+
+  // Sync with the backend: once a run is known, poll its status so the UI
+  // reflects runs that complete, fail, or are cancelled elsewhere.
+  useEffect(() => {
+    if (!activeRunId || !accessToken) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `${getBackendUrl()}/status/${encodeURIComponent(activeRunId)}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (cancelled || !res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (isTerminalRunStatus(data?.status)) {
+          // Do not interrupt an in-flight stop: its own handler settles the phase.
+          if (phaseRef.current === "running") {
+            updatePhase("idle");
+            log(
+              `Agent run ${activeRunId.substring(0, 8)} finished with status: ${data.status}.`,
+              data.status === "completed" ? "text-emerald-500" : "text-amber-400"
+            );
+          }
+        }
+      } catch {
+        // Transient network errors: keep the current state and retry next tick.
+      }
+    };
+
+    poll();
+    const interval = setInterval(() => {
+      if (phaseRef.current === "running") poll();
+    }, RUN_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeRunId, accessToken, log, updatePhase]);
 
   const startStop = useCallback(async () => {
+    // Ignore clicks while a start/stop request is already in flight.
+    if (phaseRef.current === "starting" || phaseRef.current === "stopping") {
+      return;
+    }
+
     if (!user) {
       log("Please sign in with GitHub to start an agent run.", "text-amber-400");
       options?.onRequireAuth?.();
@@ -82,7 +159,7 @@ export function useAgentRun(
 
     const authHeader = `Bearer ${session.access_token}`;
 
-    if (!isRunning) {
+    if (phaseRef.current === "idle") {
       if (
         !repoUrl ||
         repoUrl.trim() === "owner/repo" ||
@@ -107,12 +184,11 @@ export function useAgentRun(
       }
 
       options?.onStart?.();
-      setIsRunning(true);
+      updatePhase("starting");
       log(`Triggering AI Agent Loop for ${repoUrl}...`, "text-zinc-500");
 
       try {
-        const backendUrl = getBackendUrl();
-        const res = await fetch(`${backendUrl}/start`, {
+        const res = await fetch(`${getBackendUrl()}/start`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -123,66 +199,62 @@ export function useAgentRun(
             target_issue: targetIssueNumber,
           }),
         });
-        const data = await res.json();
         if (!res.ok) {
-          const detail =
-            typeof data.detail === "string"
-              ? data.detail
-              : `Backend returned HTTP ${res.status}.`;
-          throw new Error(detail);
+          throw new Error(await readDetail(res));
         }
+        const data = await res.json();
         if (!data.run_id) {
           throw new Error("Backend did not return a run identifier");
         }
         setActiveRunId(data.run_id);
+        updatePhase("running");
         log(
           `Agent run queued: ${data.run_id.substring(0, 8)}...`,
           "text-emerald-500"
         );
       } catch (err) {
         console.error(err);
-        log(
-          `Failed to reach backend. Is it running? (${err})`,
-          "text-red-400"
-        );
-        setIsRunning(false);
+        log(`Failed to start the agent run. (${err})`, "text-red-400");
+        updatePhase("idle");
       }
-    } else {
-      setIsRunning(false);
-      log("Agent Loop Halted.", "text-red-500");
-      try {
-        const backendUrl = getBackendUrl();
-        const res = activeRunId
-          ? await fetch(`${backendUrl}/stop`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: authHeader,
-              },
-              body: JSON.stringify({ run_id: activeRunId }),
-            })
-          : await fetch(`${backendUrl}/stop`, {
-              method: "POST",
-              headers: { Authorization: authHeader },
-            });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(
-            typeof data.detail === "string"
-              ? data.detail
-              : `Backend returned HTTP ${res.status}.`
-          );
-        }
-      } catch (err) {
-        console.error("Failed to stop agents:", err);
-        log(`Failed to stop the agent run. (${err})`, "text-red-400");
-      }
+      return;
     }
-  }, [isRunning, repoUrl, targetIssue, activeRunId, user, session, log, options]);
+
+    // phase === "running". A run_id is always known here: the phase only
+    // becomes "running" after /start returned one. We never fall back to the
+    // body-less /stop, which cancels every run in the organization.
+    if (!activeRunId) {
+      updatePhase("idle");
+      return;
+    }
+
+    updatePhase("stopping");
+    try {
+      const res = await fetch(`${getBackendUrl()}/stop`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader,
+        },
+        body: JSON.stringify({ run_id: activeRunId }),
+      });
+      if (!res.ok) {
+        throw new Error(await readDetail(res));
+      }
+      updatePhase("idle");
+      log("Agent Loop Halted.", "text-red-500");
+    } catch (err) {
+      console.error("Failed to stop agents:", err);
+      // The run is still going on the server: stay in "running" so Stop can be retried.
+      updatePhase("running");
+      log(`Failed to stop the agent run. (${err})`, "text-red-400");
+    }
+  }, [repoUrl, targetIssue, activeRunId, user, session, log, options, updatePhase]);
 
   const state: AgentRunState = {
-    isRunning,
+    phase,
+    isRunning: phase === "running" || phase === "stopping",
+    isPending: phase === "starting" || phase === "stopping",
     activeRunId,
     repoUrl,
     targetIssue,
