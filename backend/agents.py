@@ -206,6 +206,9 @@ _REFUSAL_RE = re.compile(
 )
 # Files whose content legitimately contains ``` fences.
 _MARKUP_EXTENSIONS = {"md", "markdown", "mdx", "rst"}
+# Plain-text targets (notes, LICENSE, extensionless files) are prose
+# themselves, so prose before a fence says nothing about the reply's shape.
+_PROSE_EXTENSIONS = {"txt", "text", ""}
 _LANGUAGE_ALIASES = {
     "py": {"python", "py", "python3"},
     "js": {"javascript", "js", "node"},
@@ -245,6 +248,54 @@ def _is_lead_in(lines: list[str]) -> bool:
         if _CODE_HEADER_RE.search(line):
             return False
     return bool(_LEAD_IN_RE.match(text[-1]))
+
+
+# Markdown decoration an LLM puts in front of prose ("**Updated file:**",
+# "> Note", "- item", "1. step", "## Changes").
+_PROSE_DECORATION_RE = re.compile(r"^(?:[*_>#-]+|\d+[.)])[ \t]*")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_CODE_CHARS_RE = re.compile(r"[=;{}<>\[\]]")
+
+
+def _is_prose_line(line: str) -> bool:
+    """True for an unindented natural-language line that does not look like code.
+
+    Inline code spans (`x = 1`) are ignored, so a sentence that quotes code is
+    still prose; a line that opens a string literal (``x = \"\"\"``,
+    ``const t = `...``, ``cat <<EOF``) is not.
+    """
+    if not line or line[0].isspace():
+        return False
+    text = _INLINE_CODE_RE.sub("", _PROSE_DECORATION_RE.sub("", line.rstrip()))
+    return bool(
+        text[:1].isalpha()
+        and not _CODE_CHARS_RE.search(text)
+        and not _CODE_HEADER_RE.search(text)
+    )
+
+
+def _is_prose(lines: list[str]) -> bool:
+    """True when every non-blank line (of the text before a fence) is prose.
+
+    A fence line at column 0 is not valid outside a string literal in the
+    languages we rewrite, and opening such a literal takes a code line, so a
+    fence preceded only by prose belongs to a chat-style reply, not the file.
+    """
+    text = [line for line in lines if line.strip()]
+    return bool(text) and all(_is_prose_line(line) for line in text)
+
+
+def _opens_fenced_block(lines: list[str]) -> bool:
+    """True when ``lines[0]`` is a fence with a language tag or a later closer."""
+    opener = _FENCE_LINE_RE.match(lines[0])
+    if opener.group("lang"):
+        return True
+    return any(
+        (m := _FENCE_LINE_RE.match(line))
+        and m.group("marker") == opener.group("marker")
+        and not m.group("lang")
+        for line in lines[1:]
+    )
 
 
 def _extract_fenced(lines: list[str], ext: str) -> str:
@@ -292,15 +343,34 @@ def _extract_fenced(lines: list[str], ext: str) -> str:
             ok = False
             break
         i = following
+    wanted = _LANGUAGE_ALIASES.get(ext, {ext} if ext else set())
+
+    def language_mismatch(lang: str) -> bool:
+        # Only judged for well-known extensions, where a tag such as "bash"
+        # on a .py target is certainly another language (e.g. an install
+        # command). Untagged blocks and unknown extensions are accepted.
+        return bool(lang) and ext in _LANGUAGE_ALIASES and lang not in wanted
+
     if ok:
-        wanted = _LANGUAGE_ALIASES.get(ext, {ext} if ext else set())
-        body = next((b for lang, b in blocks if lang in wanted), blocks[0][1])
+        body = next((b for lang, b in blocks if lang in wanted), None)
+        if body is None:
+            # No block is tagged with the file's language: take the first
+            # block that is not certainly another language, else fail closed.
+            body = next((b for lang, b in blocks if not language_mismatch(lang)), None)
+        if body is None:
+            raise GeneratedCodeError(
+                "Implementer output has no code block in the target file's language."
+            )
         return "\n".join(body)
 
     # Shape 2: one block around the whole file.
     close_i = next((j for j in range(len(lines) - 1, 0, -1) if closes(lines[j])), None)
     if close_i is None:
         raise GeneratedCodeError(_UNTERMINATED_MSG)
+    if language_mismatch(_FENCE_LINE_RE.match(lines[0]).group("lang").lower()):
+        raise GeneratedCodeError(
+            "Implementer output has no code block in the target file's language."
+        )
     body = lines[1:close_i]
     if sum(1 for line in body if _FENCE_LINE_RE.match(line)) % 2:
         # The last bare fence is really an inner one: the reply was cut off
@@ -316,9 +386,12 @@ def normalize_generated_code(
 ) -> str:
     """Extract the file contents from an Implementer response.
 
-    The prompt asks for the bare file. A reply is only unwrapped when it
-    starts with a fence, or with a short prose lead-in ending in ":" followed
-    by a fence. Any other reply is the bare file and is kept verbatim, even
+    The prompt asks for the bare file. A reply is unwrapped when it starts
+    with a fence, or when everything before its first fence is prose; the
+    block tagged with the file's language wins, and a reply whose only blocks
+    are tagged with another language is rejected. A reply that starts like
+    prose but mixes in code-looking lines before a fenced block is rejected as
+    ambiguous. Any other reply is the bare file and is kept verbatim, even
     when it contains fence lines (e.g. an example inside a docstring).
 
     Raises instead of returning something that must not be committed: empty
@@ -358,15 +431,33 @@ def normalize_generated_code(
             raise GeneratedCodeError(_UNTERMINATED_MSG)
         code = "\n".join(lines)
     elif first_fence is not None and (
-        first_fence == 0 or _is_lead_in(lines[:first_fence])
+        first_fence == 0
+        or _is_lead_in(lines[:first_fence])
+        or (ext not in _PROSE_EXTENSIONS and _is_prose(lines[:first_fence]))
     ):
+        # A chat-style reply: prose (any length, any punctuation) around one
+        # or more fenced blocks.
         code = _extract_fenced(lines[first_fence:], ext)
+    elif (
+        first_fence is not None
+        and ext not in _PROSE_EXTENSIONS
+        and _is_prose_line(next(line for line in lines if line.strip()))
+        and _opens_fenced_block(lines[first_fence:])
+    ):
+        # The reply starts like prose but also contains code-looking lines
+        # before the fence, so it is neither clearly a bare file nor clearly a
+        # wrapped one. Committing it verbatim would ship prose and fence lines
+        # into the file; fail closed instead.
+        raise GeneratedCodeError("Implementer returned ambiguous fenced output.")
     else:
         code = text  # the bare file, as the prompt requests
 
     code = code.strip()
     if not code:
         raise ValueError("Implementer returned empty code.")
+    if _REFUSAL_RE.match(code):
+        # e.g. "```\nI cannot do this.\n```": the refusal is inside the fence.
+        raise GeneratedCodeError("Implementer refused the task.")
     if re.search(r"^\s*</?untrusted-data\b", code, re.IGNORECASE | re.MULTILINE):
         # The model echoed the prompt's data wrapper instead of the file.
         raise GeneratedCodeError("Implementer output contains prompt data markers.")

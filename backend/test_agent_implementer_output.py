@@ -88,8 +88,83 @@ def test_prose_around_fence_is_stripped(raw):
 def test_block_matching_file_language_is_preferred():
     raw = "Run:\n```bash\npip install x\n```\nThen:\n```python\nx = 2\n```"
     assert normalize_generated_code(raw, path="a.py") == "x = 2"
-    # Without a matching language the first block wins.
-    assert normalize_generated_code(raw, path="a.go") == "pip install x"
+    # No block in the file's language: fail closed rather than commit the
+    # shell command as Go source.
+    with pytest.raises(GeneratedCodeError, match="language"):
+        normalize_generated_code(raw, path="a.go")
+    # Unknown extensions and untagged blocks keep the first-block rule.
+    assert normalize_generated_code(raw, path="a.zig") == "pip install x"
+    assert normalize_generated_code("Run:\n```\nx = 2\n```", path="a.py") == "x = 2"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Run:\n```bash\npip install x\n```\nThen:\n```js\nx=1\n```",
+        "```bash\npip install x\n```",
+        '```bash\nFENCE = """\n```\n"""\n```',  # whole-file shape
+    ],
+)
+def test_blocks_only_in_another_language_are_rejected(raw):
+    with pytest.raises(GeneratedCodeError, match="language"):
+        normalize_generated_code(raw, path="src/a.py")
+
+
+# Reviewer repros: chat-style lead-ins that are not "<= 3 lines ending in ':'"
+# used to be committed verbatim, prose and fence lines included.
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Here's the updated `src/a.py` with error handling added.\n\n"
+        "```python\nx = 2\n```\n\nLet me know if you need anything else!",
+        "Sure! Below is the complete file\n```python\nx = 2\n```",
+        "**Updated file:**\n```python\nx = 2\n```",
+        "Here is the updated file.\n```python\nx = 2\n```",
+        "I rewrote the handler. It now validates input.\n"
+        "Errors are logged.\nTests still pass.\nSee the file below.\n"
+        "```python\nx = 2\n```",
+        "## Changes\n\n- Set `x = 2` instead of 1.\n\n```python\nx = 2\n```\nThanks.",
+    ],
+)
+def test_prose_lead_ins_are_unwrapped(raw):
+    assert normalize_generated_code(raw, path="src/a.py") == "x = 2"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Here is the fix.\nCall setup() before x = 2 runs.\n```python\nx = 2\n```",
+        "Updated below.\nimport os\n```\nx = 2\n```",
+    ],
+)
+def test_prose_mixed_with_code_before_a_fence_is_ambiguous(raw):
+    with pytest.raises(GeneratedCodeError, match="ambiguous"):
+        normalize_generated_code(raw, path="src/a.py")
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        # Module docstring holding a fenced example: the opener line is code.
+        '"""Utilities.\n\nExample usage:\n\n```python\nfoo()\n```\n"""\nimport x',
+        # Ruby heredoc / shell heredoc opening a string that contains fences.
+        "doc = <<~MD\n```ruby\nx\n```\nMD",
+        "cat <<EOF\n```bash\nx\n```\nEOF",
+    ],
+)
+def test_bare_files_whose_fences_follow_code_are_kept(src):
+    path = {'"': "a.py", "d": "a.rb", "c": "a.sh"}[src[0]]
+    assert normalize_generated_code(src, path=path) == src
+
+
+def test_plain_text_targets_are_not_unwrapped_on_prose_alone():
+    doc = "Usage notes.\nRun the tool like this.\n```bash\ntool --x\n```\nDone."
+    assert normalize_generated_code(doc, path="NOTES.txt") == doc
+
+
+def test_refusal_inside_fence_is_rejected():
+    with pytest.raises(GeneratedCodeError, match="refused"):
+        normalize_generated_code("```\nI cannot do this.\n```", path="a.py")
 
 
 @pytest.mark.parametrize(
