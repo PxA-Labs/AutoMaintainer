@@ -18,6 +18,7 @@ anyio==4.15.1
     #   httpx
     #   httpx2
     #   langsmith
+    #   litellm
     #   mcp
     #   openai
     #   sse-starlette
@@ -43,6 +44,7 @@ certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
+    #   langchain-core
     #   litellm
     #   requests
 cffi==2.1.1
@@ -83,8 +85,6 @@ distro==1.9.0
     #   openai
 fastapi==0.162.0
     # via -r requirements.in
-fastuuid==0.14.0
-    # via litellm
 filelock==3.32.7
     # via
     #   huggingface-hub
@@ -173,9 +173,9 @@ jsonschema-specifications==2025.9.1
     # via jsonschema
 kombu==5.6.2
     # via celery
-langchain==1.4.6
+langchain==1.5.0
     # via -r requirements.in
-langchain-core==1.6.10
+langchain-core==1.8.0
     # via
     #   langchain
     #   langchain-groq
@@ -188,7 +188,7 @@ langchain-groq==1.1.3
     # via -r requirements.in
 langchain-mcp-adapters==0.3.2
     # via -r requirements.in
-langchain-protocol==0.0.19
+langchain-protocol==0.0.21
     # via
     #   langchain-core
     #   langgraph-sdk
@@ -204,9 +204,9 @@ langgraph-prebuilt==1.1.0
     # via langgraph
 langgraph-sdk==0.4.8
     # via langgraph
-langsmith==0.13.0
+langsmith==0.14.17
     # via langchain-core
-litellm==1.106.5
+litellm==1.109.1
     # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
@@ -470,7 +470,6 @@ truststore==0.10.4
     #   httpx2
 typing-extensions==4.16.0
     # via
-    #   anyio
     #   click-repl
     #   fastapi
     #   groq
