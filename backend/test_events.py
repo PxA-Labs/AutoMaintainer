@@ -519,7 +519,7 @@ async def test_agent_emitted_events_have_no_css_formatting():
 
     mock_issue = MagicMock()
     mock_issue.title = "Sample Targeted Issue"
-    mock_issue.body = "Issue description for testing"
+    mock_issue.body = "Issue description for testing; fix app.py:1-2"
     mock_issue.number = 42
 
     mock_gh_repo = MagicMock()

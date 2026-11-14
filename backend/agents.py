@@ -48,6 +48,8 @@ current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 gh = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+# Largest file (in characters) the Implementer will rewrite in full.
+IMPLEMENTER_MAX_FILE_CHARS = int(os.getenv("IMPLEMENTER_MAX_FILE_CHARS", "60000"))
 
 
 def _clean_env(val: str | None) -> str | None:
@@ -117,36 +119,142 @@ async def broadcast_log(message: Union[dict, BaseEvent]):
         print(f"Supabase insert failed: {e}")
 
 
-TARGET_REFERENCE_RE = re.compile(
-    r"(?P<path>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+):(?P<start>\d+)-(?P<end>\d+)"
+# A repository-relative path: segments start with an alphanumeric character
+# (so no hidden/".." segments) and the file extension starts with a letter (so
+# version numbers such as 3.11 never qualify).
+_PATH_PATTERN = (
+    r"(?:[A-Za-z0-9_@+-][A-Za-z0-9_.@+-]*/)*"
+    r"[A-Za-z0-9_@+-][A-Za-z0-9_.@+-]*\.[A-Za-z][A-Za-z0-9_+-]*"
 )
+# Must not continue a URL, host name or longer path (e.g. "https://x.org/a.py").
+_PATH_START = r"(?<![\w./:@\\-])(?:\./)?"
+TARGET_REFERENCE_RE = re.compile(
+    _PATH_START
+    + r"(?P<path>"
+    + _PATH_PATTERN
+    + r")`?"
+    # path:10-25 / path:10–25 / path:10—25 / path:10, or GitHub-style path#L10-L25
+    + r"(?::\d+(?:[ \t]*[-–—][ \t]*L?\d+)?|#L\d+(?:-L?\d+)?)"
+    + r"(?![\w/]|\.\w)"
+)
+# Fallback: a bare backticked path such as `backend/main.py`.
+_BACKTICK_PATH_RE = re.compile(r"`(?:\./)?(?P<path>" + _PATH_PATTERN + r")`")
+# Host names that look like "file.ext" (example.com:8080, docs.python.org/...).
+_DOMAIN_SUFFIXES = {"com", "org", "net", "io", "dev", "ai", "app", "co", "edu", "gov"}
+
+
+def _is_safe_target_path(path: str) -> bool:
+    if path.startswith((".", "/")) or ".." in path.split("/"):
+        return False
+    first = path.split("/")[0]
+    if "." in first and first.rsplit(".", 1)[1].lower() in _DOMAIN_SUFFIXES:
+        return False  # a host name, not a repository path
+    return True
 
 
 def extract_target_file(directive: str) -> str | None:
-    """Extract the first safe repository-relative file reference from a directive."""
-    for match in TARGET_REFERENCE_RE.finditer(directive or ""):
-        path = match.group("path")
-        if path.startswith((".", "/")) or ".." in path.split("/"):
-            continue
-        return path
+    """Extract the first safe repository-relative file reference from a directive.
+
+    Line-referenced paths are preferred; a backticked path is the fallback.
+    Returns None when nothing usable is found (callers must then fail).
+    """
+    text = directive or ""
+    for regex in (TARGET_REFERENCE_RE, _BACKTICK_PATH_RE):
+        for match in regex.finditer(text):
+            path = match.group("path")
+            if _is_safe_target_path(path):
+                return path
     return None
 
 
-def normalize_generated_code(raw_code: str) -> str:
-    """Remove optional Markdown fences and reject empty/error model output."""
+class GeneratedCodeError(ValueError):
+    """Implementer output is unusable (refusal, truncation, malformed fences)."""
+
+
+_FENCE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*(?P<lang>[\w+#.-]*)[ \t]*$")
+_REFUSAL_RE = re.compile(
+    r"^\W*(?:i['’]?m sorry|i am sorry|sorry[,.!]|i can(?:not|['’]?t)\b"
+    r"|i (?:am|['’]?m) (?:not able|unable)|i won['’]?t\b|as an ai\b)",
+    re.IGNORECASE,
+)
+# Files whose content legitimately contains ``` fences.
+_MARKUP_EXTENSIONS = {"md", "markdown", "mdx", "rst"}
+_LANGUAGE_ALIASES = {
+    "py": {"python", "py", "python3"},
+    "js": {"javascript", "js", "node"},
+    "mjs": {"javascript", "js"},
+    "cjs": {"javascript", "js"},
+    "jsx": {"jsx", "javascript", "js"},
+    "ts": {"typescript", "ts"},
+    "tsx": {"tsx", "typescript", "ts"},
+    "yml": {"yaml", "yml"},
+    "yaml": {"yaml", "yml"},
+    "sh": {"bash", "sh", "shell", "zsh"},
+    "rb": {"ruby", "rb"},
+    "rs": {"rust", "rs"},
+    "go": {"go", "golang"},
+}
+
+
+def normalize_generated_code(
+    raw_code: str,
+    path: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    """Extract the file contents from an Implementer response.
+
+    Accepts a bare file or a fenced block surrounded by prose (picking the block
+    whose language matches ``path``, else the first). Raises instead of
+    returning something that must not be committed: empty output, LLM error
+    text, refusals, and truncated output (``finish_reason == "length"`` or an
+    unterminated fence).
+    """
     if not isinstance(raw_code, str):
         raise ValueError("Implementer returned a non-text response.")
+    if finish_reason == "length":
+        raise GeneratedCodeError(
+            "Implementer output was truncated (finish_reason=length)."
+        )
 
-    code = raw_code.strip()
-    if code.startswith("[ERROR]"):
-        raise RuntimeError(code)
-    if code.startswith("```"):
-        lines = code.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        code = "\n".join(lines).strip()
+    text = raw_code.strip()
+    if text.startswith("[ERROR]"):
+        raise RuntimeError(text)
+    if _REFUSAL_RE.match(text):
+        raise GeneratedCodeError("Implementer refused the task.")
+
+    ext = path.rsplit(".", 1)[-1].lower() if path and "." in path else ""
+    lines = text.splitlines()
+
+    if ext in _MARKUP_EXTENSIONS:
+        # Inner fences are content; only unwrap one fence around the whole file.
+        if (
+            len(lines) >= 2
+            and _FENCE_LINE_RE.match(lines[0])
+            and lines[-1].strip() == "```"
+        ):
+            lines = lines[1:-1]
+        code = "\n".join(lines)
+    else:
+        fences = [i for i, line in enumerate(lines) if _FENCE_LINE_RE.match(line)]
+        if not fences:
+            code = text
+        else:
+            if len(fences) % 2:
+                raise GeneratedCodeError(
+                    "Implementer output has an unterminated code fence (truncated)."
+                )
+            blocks = []
+            for open_i, close_i in zip(fences[::2], fences[1::2]):
+                if _FENCE_LINE_RE.match(lines[close_i]).group("lang"):
+                    raise GeneratedCodeError(
+                        "Implementer output has malformed code fences."
+                    )
+                lang = _FENCE_LINE_RE.match(lines[open_i]).group("lang").lower()
+                blocks.append((lang, "\n".join(lines[open_i + 1 : close_i])))
+            wanted = _LANGUAGE_ALIASES.get(ext, {ext} if ext else set())
+            code = next((b for lang, b in blocks if lang in wanted), blocks[0][1])
+
+    code = code.strip()
     if not code:
         raise ValueError("Implementer returned empty code.")
     return code
@@ -217,6 +325,18 @@ class AgentState(TypedDict):
 
 class EmptyAgentStreamError(RuntimeError):
     """Raised when an MCP agent stream contains no usable final response."""
+
+
+class LLMResponse(str):
+    """Model output text that also carries the provider's ``finish_reason``
+    (e.g. ``"length"`` when the output was cut off), when it is known."""
+
+    finish_reason: str | None
+
+    def __new__(cls, content: str, finish_reason: str | None = None):
+        obj = super().__new__(cls, content)
+        obj.finish_reason = finish_reason
+        return obj
 
 
 class LLMExecutionError(RuntimeError):
@@ -426,7 +546,16 @@ async def run_llm_with_tools(
                                             )
                                         )
 
-                    return extract_final_agent_content(final_res)
+                    content = extract_final_agent_content(final_res)
+                    metadata = getattr(
+                        final_res["messages"][-1], "response_metadata", None
+                    )
+                    finish_reason = (
+                        metadata.get("finish_reason")
+                        if isinstance(metadata, dict)
+                        else None
+                    )
+                    return LLMResponse(content, finish_reason)
 
                 return await manager.execute_with_retry(
                     _call_with_tools, estimated_tokens=estimated_tokens
@@ -498,63 +627,71 @@ async def architect_node(state: AgentState):
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "active"}})
 
-    if target_issue and gh:
+    if target_issue:
+        # Targeted mode must work on the real issue. It used to fall through to
+        # an LLM-invented directive when the issue could not be fetched.
+        if not gh:
+            raise PipelineAbortError(
+                "FETCH_ISSUE_FAILED",
+                f"Cannot fetch issue #{target_issue}: GitHub access is not configured.",
+                AgentPhase.ARCHITECT,
+            )
         try:
             gh_repo = gh.get_repo(repo)
             issue = gh_repo.get_issue(number=target_issue)
-            directive = f"Targeted Issue #{target_issue}: {issue.title}\n{issue.body}"
-            state["architect_directive"] = directive
-
-            new_logs.append(
-                {
-                    "type": "ui_update",
-                    "pipeline": {
-                        "id": f"#{target_issue}",
-                        "title": issue.title[:30] + "...",
-                        "status": "architecting",
-                        "agent": "Architect",
-                    },
-                }
-            )
-            new_logs.append(
-                {
-                    "agent": "Architect",
-                    "msg": f"Targeting specific issue #{target_issue}: {issue.title}",
-                }
-            )
-            new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
-            if run_id:
-                await emit_event(
-                    PlanCheckpointEvent(
-                        run_id=run_id,
-                        phase=AgentPhase.ARCHITECT,
-                        plan_markdown=directive,
-                        files_to_modify=[],
-                        files_to_create=[],
-                    )
-                )
-            return {
-                "architect_directive": directive,
-                "target_file_path": extract_target_file(directive) or "",
-                "log_messages": new_logs,
-            }  # ARCHITECT EARLY RETURN
+            issue_title = issue.title or ""
+            issue_body = issue.body or ""
         except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "Architect",
-                    "msg": f"Failed to fetch issue #{target_issue}: {str(e)}",
-                }
+            raise PipelineAbortError(
+                "FETCH_ISSUE_FAILED",
+                f"Failed to fetch issue #{target_issue}: {e}",
+                AgentPhase.ARCHITECT,
+            ) from e
+
+        directive = f"Targeted Issue #{target_issue}: {issue_title}\n{issue_body}"
+        state["architect_directive"] = directive
+        target_file = extract_target_file(directive)
+        if not target_file:
+            raise PipelineAbortError(
+                "NO_TARGET_FILE",
+                f"Issue #{target_issue} does not reference a repository file "
+                "(e.g. 'path/to/file.py:10-25'); nothing to implement.",
+                AgentPhase.ARCHITECT,
             )
-            if run_id:
-                await emit_event(
-                    ErrorEvent(
-                        run_id=run_id,
-                        phase=AgentPhase.ARCHITECT,
-                        error_code="FETCH_ISSUE_FAILED",
-                        message=f"Failed to fetch issue #{target_issue}: {str(e)}",
-                        fatal=False,
-                    )
+
+        new_logs.append(
+            {
+                "type": "ui_update",
+                "pipeline": {
+                    "id": f"#{target_issue}",
+                    "title": issue_title[:30] + "...",
+                    "status": "architecting",
+                    "agent": "Architect",
+                },
+            }
+        )
+        new_logs.append(
+            {
+                "agent": "Architect",
+                "msg": f"Targeting specific issue #{target_issue}: {issue_title}",
+            }
+        )
+        new_logs.append({"type": "ui_update", "agentStatus": {"Architect": "idle"}})
+        if run_id:
+            await emit_event(
+                PlanCheckpointEvent(
+                    run_id=run_id,
+                    phase=AgentPhase.ARCHITECT,
+                    plan_markdown=directive,
+                    files_to_modify=[target_file],
+                    files_to_create=[],
                 )
+            )
+        return {
+            "architect_directive": directive,
+            "target_file_path": target_file,
+            "log_messages": new_logs,
+        }  # ARCHITECT EARLY RETURN
 
     if gh:
         try:
@@ -741,6 +878,14 @@ async def architect_node(state: AgentState):
                 files_to_modify=[target_file] if target_file else [],
                 files_to_create=[],
             )
+        )
+    if not target_file:
+        # Stop before the Visionary opens an issue the Implementer cannot act on.
+        raise PipelineAbortError(
+            "NO_TARGET_FILE",
+            "Architect directive does not reference a repository file "
+            "(expected e.g. 'path/to/file.py:10-25').",
+            AgentPhase.ARCHITECT,
         )
 
     new_logs.append(
@@ -989,7 +1134,16 @@ async def implementer_node(state: AgentState):
     iteration = state.get("iteration", 0)
     review = state.get("review", "")
     target_file = state.get("target_file_path") or extract_target_file(idea)
-    path = target_file or f"feature_issue_{issue_number}.py"
+    if not target_file:
+        # Never invent a file (the old fallback created feature_issue_N.py at
+        # the repository root); the run must name a concrete target.
+        raise PipelineAbortError(
+            "NO_TARGET_FILE",
+            "The task does not reference a repository file (expected e.g. "
+            "'path/to/file.py:10-25'); refusing to guess where to write code.",
+            AgentPhase.IMPLEMENTER,
+        )
+    path = target_file
     run_id = current_run_id.get(None)
 
     if run_id:
@@ -1012,44 +1166,55 @@ async def implementer_node(state: AgentState):
     original_content = ""
     target_file_exists = False
 
-    if target_file:
-        try:
-            file = gh_repo.get_contents(target_file, ref=source_ref)
-            if isinstance(file, list):
-                raise ValueError(
-                    f"Implementer target is a directory, not a file: {target_file}"
-                )
-            original_content = file.decoded_content.decode("utf-8")
-            target_file_exists = True
-        except GithubException as error:
-            if error.status != 404:
-                raise
-            original_content = (
-                "(This file does not exist yet; create it from the task.)"
+    try:
+        file = gh_repo.get_contents(target_file, ref=source_ref)
+        if isinstance(file, list):
+            raise ValueError(
+                f"Implementer target is a directory, not a file: {target_file}"
             )
+        original_content = file.decoded_content.decode("utf-8")
+        target_file_exists = True
+    except GithubException as error:
+        if error.status != 404:
+            raise
+        original_content = "(This file does not exist yet; create it from the task.)"
 
-        system_prompt = (
-            "You are the Implementer Agent. "
-            f"{'Modify the supplied repository file' if target_file_exists else 'Create the referenced repository file'} "
-            "to satisfy the task and Maintainer feedback. "
-            "Preserve unrelated code and formatting. Output ONLY the complete file contents, "
-            "without Markdown fences."
+    # The implementer rewrites the whole file; above this size the model's
+    # output limit truncates it, so refuse rather than commit half a file.
+    if len(original_content) > IMPLEMENTER_MAX_FILE_CHARS:
+        raise PipelineAbortError(
+            "TARGET_FILE_TOO_LARGE",
+            f"{target_file} has {len(original_content)} characters, above the "
+            f"{IMPLEMENTER_MAX_FILE_CHARS}-character limit for full-file rewrites.",
+            AgentPhase.IMPLEMENTER,
         )
-        user_prompt = (
-            f"Task:\n{idea}\n\nRepository file: {target_file}\n\n"
-            f"Current file contents:\n{original_content}\n\n"
-            f"Maintainer feedback:\n{review or 'No feedback; implement the task.'}"
-        )
-    else:
-        system_prompt = (
-            "You are the Implementer Agent. Create the smallest useful source file for the "
-            "approved task. Output ONLY the complete file contents, without Markdown fences."
-        )
-        user_prompt = f"Task:\n{idea}\n\nCreate the new file: {path}"
 
-    code = normalize_generated_code(
-        await _llm_or_abort(AgentPhase.IMPLEMENTER, system_prompt, user_prompt)
+    system_prompt = (
+        "You are the Implementer Agent. "
+        f"{'Modify the supplied repository file' if target_file_exists else 'Create the referenced repository file'} "
+        "to satisfy the task and Maintainer feedback. "
+        "Preserve unrelated code and formatting. Output ONLY the complete file contents, "
+        "without Markdown fences."
     )
+    user_prompt = (
+        f"Task:\n{idea}\n\nRepository file: {target_file}\n\n"
+        f"Current file contents:\n{original_content}\n\n"
+        f"Maintainer feedback:\n{review or 'No feedback; implement the task.'}"
+    )
+
+    raw_code = await _llm_or_abort(AgentPhase.IMPLEMENTER, system_prompt, user_prompt)
+    try:
+        code = normalize_generated_code(
+            raw_code,
+            path=path,
+            finish_reason=getattr(raw_code, "finish_reason", None),
+        )
+    except (ValueError, RuntimeError) as e:
+        raise PipelineAbortError(
+            "INVALID_GENERATED_CODE",
+            f"Implementer output for {path} was rejected: {e}",
+            AgentPhase.IMPLEMENTER,
+        ) from e
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "active"}})
     new_logs.append(
         {
