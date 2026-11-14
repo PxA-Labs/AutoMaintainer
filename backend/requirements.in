@@ -1,7 +1,8 @@
 fastapi
 uvicorn
 langchain
-litellm
+# Floor prevents the resolver from backtracking to vulnerable litellm 1.83.0 (see #382-#386)
+litellm>=1.105.1
 langgraph
 pygithub
 python-dotenv
