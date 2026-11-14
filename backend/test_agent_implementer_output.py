@@ -38,6 +38,12 @@ from agents import (
         ),
         ("Bump to python 3.11:1-2 and edit app.py:3", "app.py"),
         ("Call example.com:8080 from client.js:4-9", "client.js"),
+        ("Fix backend/main.py:L10-L25", "backend/main.py"),  # AST context form
+        ("Use `Node.js` to fix `app/page.js`", "app/page.js"),
+        ("`Next.js` build breaks in `app/page.js`", "app/page.js"),
+        ("Rename `main.py` (see `Node.js` docs)", "main.py"),
+        ("See https://x.org/a?file=src/app.py#L10-L20 and fix b.py:1", "b.py"),
+        ("Call foo.local:8080 from client.js:4-9", "client.js"),
     ],
 )
 def test_extract_target_file_formats(directive, expected):
@@ -53,6 +59,11 @@ def test_extract_target_file_formats(directive, expected):
         "Point the client at example.com:8080",
         "Update ../secrets.env:1-2",
         "Update .github/workflows/ci.yml:1-2",
+        "`Next.js` build breaks on the home page",
+        "See https://x.org/a?file=src/app.py#L10-L20",
+        "See https://x.org/a?path~src/app.py:10",
+        "Point the client at foo.local:8080",
+        "Clone into ~/src/app.py:3",
     ],
 )
 def test_extract_target_file_rejects_non_targets(directive):

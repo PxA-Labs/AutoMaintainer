@@ -126,21 +126,34 @@ _PATH_PATTERN = (
     r"(?:[A-Za-z0-9_@+-][A-Za-z0-9_.@+-]*/)*"
     r"[A-Za-z0-9_@+-][A-Za-z0-9_.@+-]*\.[A-Za-z][A-Za-z0-9_+-]*"
 )
-# Must not continue a URL, host name or longer path (e.g. "https://x.org/a.py").
-_PATH_START = r"(?<![\w./:@\\-])(?:\./)?"
+# Must not continue a URL, query string, host name or longer path
+# (e.g. "https://x.org/a.py", "?file=src/app.py", "~/src/app.py").
+_PATH_START = r"(?<![\w./:@\\=~?&%#-])(?:\./)?"
 TARGET_REFERENCE_RE = re.compile(
     _PATH_START
     + r"(?P<path>"
     + _PATH_PATTERN
     + r")`?"
-    # path:10-25 / path:10–25 / path:10—25 / path:10, or GitHub-style path#L10-L25
-    + r"(?::\d+(?:[ \t]*[-–—][ \t]*L?\d+)?|#L\d+(?:-L?\d+)?)"
+    # path:10-25 / path:L10-L25 / path:10–25 / path:10—25 / path:10, or
+    # GitHub-style path#L10-L25
+    + r"(?::L?\d+(?:[ \t]*[-–—][ \t]*L?\d+)?|#L\d+(?:-L?\d+)?)"
     + r"(?![\w/]|\.\w)"
 )
 # Fallback: a bare backticked path such as `backend/main.py`.
 _BACKTICK_PATH_RE = re.compile(r"`(?:\./)?(?P<path>" + _PATH_PATTERN + r")`")
 # Host names that look like "file.ext" (example.com:8080, docs.python.org/...).
-_DOMAIN_SUFFIXES = {"com", "org", "net", "io", "dev", "ai", "app", "co", "edu", "gov"}
+_DOMAIN_SUFFIXES = {
+    "com", "org", "net", "io", "dev", "ai", "app", "co", "edu", "gov",
+    "info", "me", "xyz", "cloud", "tech", "site", "us", "uk", "de", "eu",
+    "local", "localhost", "internal", "lan", "test", "example", "invalid",
+}  # fmt: skip
+# Product names that look like files when backticked (`Node.js`, `Next.js`).
+_NOT_FILE_NAMES = {
+    "node.js", "next.js", "nuxt.js", "vue.js", "react.js", "angular.js",
+    "express.js", "nest.js", "ember.js", "backbone.js", "three.js", "d3.js",
+    "chart.js", "p5.js", "socket.io", "asp.net", "solid.js", "alpine.js",
+    "deno.js", "bun.js", "svelte.js", "moment.js", "day.js", "anime.js",
+}  # fmt: skip
 
 
 def _is_safe_target_path(path: str) -> bool:
@@ -155,16 +168,24 @@ def _is_safe_target_path(path: str) -> bool:
 def extract_target_file(directive: str) -> str | None:
     """Extract the first safe repository-relative file reference from a directive.
 
-    Line-referenced paths are preferred; a backticked path is the fallback.
-    Returns None when nothing usable is found (callers must then fail).
+    Line-referenced paths are preferred; a backticked path is the fallback,
+    where paths with a directory win over bare names and well-known product
+    names (`Node.js`) are ignored. Returns None when nothing usable is found
+    (callers must then fail).
     """
     text = directive or ""
-    for regex in (TARGET_REFERENCE_RE, _BACKTICK_PATH_RE):
-        for match in regex.finditer(text):
-            path = match.group("path")
-            if _is_safe_target_path(path):
-                return path
-    return None
+    for match in TARGET_REFERENCE_RE.finditer(text):
+        if _is_safe_target_path(match.group("path")):
+            return match.group("path")
+    candidates = [
+        m.group("path")
+        for m in _BACKTICK_PATH_RE.finditer(text)
+        if _is_safe_target_path(m.group("path"))
+        and m.group("path").lower() not in _NOT_FILE_NAMES
+    ]
+    return next((p for p in candidates if "/" in p), None) or next(
+        iter(candidates), None
+    )
 
 
 class GeneratedCodeError(ValueError):
