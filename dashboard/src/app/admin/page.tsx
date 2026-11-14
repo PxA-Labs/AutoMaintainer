@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { 
   Users, Database, Activity, DollarSign, TrendingUp, AlertCircle, 
   Clock, RefreshCw, Loader2,
   BarChart3, Server, GitBranch, Terminal, Settings
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { useAuth, AuthProvider } from '@/lib/auth';
+import { useAuth } from '@/lib/auth';
 import ErrorBoundary from "@/components/ErrorBoundary";
 import { getBackendUrl } from '@/lib/config';
+import { barPercent } from '@/lib/chart';
 
 type AdminTab = 'overview' | 'orgs' | 'runs' | 'usage' | 'system';
 
@@ -95,6 +96,16 @@ const statusBadge = (status: string) => {
   return <span className={`px-2 py-0.5 rounded text-xs font-medium ${styles[status] || styles.queued}`}>{status}</span>;
 };
 
+/** Largest single-day token count; daily bars are scaled against it. */
+function maxDailyTokens(metrics: AdminMetrics): number {
+  return metrics.usage.last30Days.reduce((max, day) => Math.max(max, day.tokens || 0), 0);
+}
+
+/** Total events across types; event-type bars are shares of this (not of tokens). */
+function totalEventCount(metrics: AdminMetrics): number {
+  return Object.values(metrics.usage.byEventType).reduce((sum, e) => sum + (e.count || 0), 0);
+}
+
 function AdminDashboard() {
   const { user, session, loading: authLoading } = useAuth();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
@@ -103,32 +114,40 @@ function AdminDashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'orgs' | 'runs' | 'usage' | 'system'>('overview');
 
+  // In-flight guard kept in a ref so the auto-refresh interval below does not
+  // need to be torn down and re-created every time a refresh starts or ends.
+  const inFlightRef = useRef(false);
+
   const fetchMetrics = useCallback(async () => {
-    if (!session) return;
-    
+    if (!session || inFlightRef.current) return;
+    inFlightRef.current = true;
+    setRefreshing(true);
+
     try {
-      setLoading(true);
       setError(null);
-      
+
       const backendUrl = getBackendUrl();
 
       const res = await fetch(`${backendUrl}/admin/metrics`, {
         headers: { "Authorization": `Bearer ${session.access_token}` }
       });
-      
+
       if (!res.ok) {
         if (res.status === 403) {
           throw new Error("Access denied. Admin privileges required.");
         }
         throw new Error(`Failed to fetch metrics: ${res.status}`);
       }
-      
+
       const data = await res.json();
       setMetrics(data);
     } catch (err) {
       console.error("Failed to fetch admin metrics:", err);
+      // When data is already on screen this is shown as an inline banner;
+      // only the very first load falls back to the full-page error.
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
       setRefreshing(false);
     }
@@ -141,17 +160,14 @@ function AdminDashboard() {
     loadMetrics();
   }, [fetchMetrics]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh every 30 seconds in the background, keeping current data.
   useEffect(() => {
     const interval = setInterval(() => {
-      if (!refreshing) {
-        setRefreshing(true);
-        fetchMetrics();
-      }
+      void fetchMetrics();
     }, 30000);
-    
+
     return () => clearInterval(interval);
-  }, [fetchMetrics, refreshing]);
+  }, [fetchMetrics]);
 
   // Auth gate
   if (authLoading) {
@@ -174,7 +190,7 @@ function AdminDashboard() {
     );
   }
 
-  if (loading) {
+  if (loading && !metrics) {
     return (
       <div className="flex h-screen w-full bg-[#0a0a0a] items-center justify-center">
         <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
@@ -182,7 +198,7 @@ function AdminDashboard() {
     );
   }
 
-  if (error) {
+  if (error && !metrics) {
     return (
       <div className="flex h-screen w-full bg-[#0a0a0a] items-center justify-center p-8">
         <div className="text-center">
@@ -190,7 +206,7 @@ function AdminDashboard() {
           <h1 className="text-2xl font-bold text-zinc-100 mb-2">Failed to Load Metrics</h1>
           <p className="text-zinc-500 mb-4">{error}</p>
           <button 
-            onClick={() => { setRefreshing(true); fetchMetrics(); }}
+            onClick={() => { void fetchMetrics(); }}
             className="px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg hover:bg-indigo-500/20 transition-colors"
           >
             Retry
@@ -246,12 +262,13 @@ function AdminDashboard() {
         
         <div className="p-4 border-t border-zinc-800/50">
           <button
-            onClick={() => { setRefreshing(true); fetchMetrics(); }}
+            onClick={() => { void fetchMetrics(); }}
             disabled={refreshing}
+            aria-busy={refreshing}
             className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg font-medium hover:bg-indigo-500/20 transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            Refresh
+            {refreshing ? 'Refreshing' : 'Refresh'}
           </button>
         </div>
       </div>
@@ -373,7 +390,7 @@ function AdminDashboard() {
                   <div key={i} className="flex-1 flex flex-col items-center gap-1">
                     <div 
                       className="w-full bg-blue-500/50 rounded-t transition-all hover:bg-blue-500"
-                      style={{ height: `${Math.max(day.tokens / 10000 * 100, 2)}%`, minHeight: '4px' }}
+                      style={{ height: `${Math.max(barPercent(day.tokens, maxDailyTokens(metrics)), 2)}%`, minHeight: '4px' }}
                       title={`${day.date}: ${formatNumber(day.tokens)} tokens`}
                     />
                     <span className="text-[10px] text-zinc-500">{day.date.split('-').slice(1).join('-')}</span>
@@ -519,46 +536,62 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
 function RunsTable() {
   const [runs, setRuns] = useState<AdminRunRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const { session } = useAuth();
 
   useEffect(() => {
+    let active = true;
     const fetchRuns = async () => {
       if (!session) return;
       try {
-        const backendUrl = (() => {
-          if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "");
-          if (typeof window !== "undefined") {
-            const port = window.location.port;
-            const hostname = window.location.hostname;
-            if ((hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]") && port !== "8000") {
-              const formattedHost = (hostname === "::1" || hostname === "[::1]") ? "[::1]" : hostname;
-              return `${window.location.protocol}//${formattedHost}:8000`;
-            }
-            return `${window.location.protocol}//${window.location.host}`;
-          }
-          return "http://localhost:8000";
-        })();
-
-        const res = await fetch(`${backendUrl}/admin/runs`, {
+        const res = await fetch(`${getBackendUrl()}/admin/runs`, {
           headers: { "Authorization": `Bearer ${session.access_token}` }
         });
-        if (res.ok) {
-          const data = await res.json();
-          setRuns(data.runs || []);
+        if (!res.ok) {
+          throw new Error(
+            res.status === 403
+              ? "Access denied. Admin privileges required."
+              : `Failed to load runs (HTTP ${res.status}).`
+          );
         }
+        const data = await res.json();
+        if (!active) return;
+        setRuns(data.runs || []);
+        setLoadError(null);
       } catch (err) {
         console.error("Failed to fetch runs:", err);
+        if (active) setLoadError(err instanceof Error ? err.message : "Failed to load runs.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
     fetchRuns();
-  }, [session]);
+    return () => {
+      active = false;
+    };
+  }, [session, reloadKey]);
 
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
+      </div>
+    );
+  }
+
+  // A failed request is not the same as "no runs": say so and offer a retry.
+  if (loadError) {
+    return (
+      <div role="alert" className="flex-1 flex flex-col items-center justify-center gap-3 text-center">
+        <AlertCircle className="w-8 h-8 text-red-500" />
+        <p className="text-sm text-red-400">{loadError}</p>
+        <button
+          onClick={() => { setLoading(true); setReloadKey((k) => k + 1); }}
+          className="px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg hover:bg-indigo-500/20 transition-colors text-sm"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -625,7 +658,7 @@ function UsageTable({ metrics }: { metrics: AdminMetrics }) {
                 <div className="flex-1 h-2 bg-zinc-800 rounded-full overflow-hidden">
                   <div 
                     className="h-full bg-blue-500 transition-all"
-                    style={{ width: `${metrics.usage.totalTokens > 0 ? data.count / metrics.usage.totalTokens * 100 : 0}%` }}
+                    style={{ width: `${barPercent(data.count, totalEventCount(metrics))}%` }}
                   />
                 </div>
                 <span className="w-20 text-right text-xs font-mono text-zinc-200">{data.count}</span>
@@ -662,7 +695,7 @@ function UsageTable({ metrics }: { metrics: AdminMetrics }) {
             <div key={i} className="flex-1 flex flex-col items-center gap-1 relative" style={{ maxWidth: '40px' }}>
               <div 
                 className="w-full bg-blue-500/50 rounded-t transition-all hover:bg-blue-500 cursor-pointer"
-                style={{ height: `${Math.max(day.tokens / 50000 * 100, 2)}%`, minHeight: '4px' }}
+                style={{ height: `${Math.max(barPercent(day.tokens, maxDailyTokens(metrics)), 2)}%`, minHeight: '4px' }}
                 title={`${day.date}: ${formatNumber(day.tokens)} tokens • ${formatCost(day.costCents)}`}
               />
               <span className="text-[10px] text-zinc-500">{day.date.split('-').slice(1).join('-')}</span>
@@ -808,9 +841,8 @@ function ResourceBar({ label, value, warning, critical }: {
 export default function AdminPage() {
   return (
     <ErrorBoundary title="Admin Dashboard Error">
-      <AuthProvider>
-        <AdminDashboard />
-      </AuthProvider>
+      {/* AuthProvider is mounted once, in the root layout. */}
+      <AdminDashboard />
     </ErrorBoundary>
   );
 }
