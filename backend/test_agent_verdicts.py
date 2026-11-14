@@ -12,8 +12,7 @@ from agents import END, is_approved_verdict, should_implement, should_iterate
     "text",
     [
         "VERDICT: APPROVE",
-        "  verdict: approve  \nSolid change.",
-        "VERDICT:APPROVE\nok",
+        "  VERDICT: APPROVE  \nSolid change.",
     ],
 )
 def test_unambiguous_approval(text):
@@ -37,6 +36,11 @@ def test_unambiguous_approval(text):
         "VERDICT: REJECT\nVERDICT: APPROVE",
         "VERDICT: APPROVE\nActually, VERDICT: REJECT",
         "Some preamble\nVERDICT: APPROVE",
+        # The prompt demands the line exactly; variants fail closed.
+        "verdict: approve\nSolid change.",
+        "Verdict: Approve",
+        "VERDICT:APPROVE\nok",
+        "VERDICT:  APPROVE",
     ],
 )
 def test_ambiguous_or_negative_is_rejected(text):

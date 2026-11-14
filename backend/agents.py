@@ -473,7 +473,9 @@ VERDICT_INSTRUCTIONS = (
     "`VERDICT: REJECT` (no Markdown, quotes or other text on that line). "
     "After that line, give your reasoning in at most 3 sentences."
 )
-_VERDICT_LINE_RE = re.compile(r"VERDICT:[ \t]*(APPROVE|REJECT)", re.IGNORECASE)
+# Exactly the line the prompt asks for (case-sensitive, one space); only
+# surrounding whitespace is tolerated. Anything else fails closed.
+_VERDICT_LINE_RE = re.compile(r"VERDICT: (APPROVE|REJECT)")
 _LATER_REJECT_RE = re.compile(r"VERDICT\W*REJECT", re.IGNORECASE)
 
 
@@ -490,7 +492,7 @@ def is_approved_verdict(text: str | None) -> bool:
     if not lines:
         return False
     match = _VERDICT_LINE_RE.fullmatch(lines[0].strip())
-    if not match or match.group(1).upper() != "APPROVE":
+    if not match or match.group(1) != "APPROVE":
         return False
     return not _LATER_REJECT_RE.search("\n".join(lines[1:]))
 
