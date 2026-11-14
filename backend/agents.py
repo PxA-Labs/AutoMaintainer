@@ -12,6 +12,7 @@ import httpx
 from typing import TypedDict, Annotated, Optional, Union
 import asyncio
 from github import Github, GithubException
+from github.IssuePullRequest import IssuePullRequest
 import uuid
 import json
 import re
@@ -790,6 +791,15 @@ async def architect_node(state: AgentState):
                 f"Failed to fetch issue #{target_issue}: {e}",
                 AgentPhase.ARCHITECT,
             ) from e
+        if isinstance(getattr(issue, "pull_request", None), IssuePullRequest):
+            # GitHub's issues API also returns pull requests (PyGithub sets
+            # Issue.pull_request for them); a PR description is not an issue
+            # to implement.
+            raise PipelineAbortError(
+                "TARGET_IS_PULL_REQUEST",
+                f"#{target_issue} is a pull request, not an issue; nothing to implement.",
+                AgentPhase.ARCHITECT,
+            )
 
         directive = f"Targeted Issue #{target_issue}: {issue_title}\n{issue_body}"
         state["architect_directive"] = directive
@@ -1563,10 +1573,12 @@ def _request_human_review(gh_repo, pr, issue_number) -> list[str]:
     return reviewers
 
 
-def _merge_pr(pr, pr_number: int) -> None:
-    """Merge, raising PipelineAbortError when GitHub does not merge the PR."""
+def _merge_pr(pr, pr_number: int, head_sha: str) -> None:
+    """Merge exactly ``head_sha`` (the commit that was reviewed and, under
+    MERGE_POLICY=ci, checked); GitHub refuses if the head has moved since.
+    Raises PipelineAbortError when GitHub does not merge the PR."""
     try:
-        result = pr.merge(commit_message=f"Merged PR #{pr_number}")
+        result = pr.merge(commit_message=f"Merged PR #{pr_number}", sha=head_sha)
     except Exception as e:
         raise PipelineAbortError(
             "MERGE_FAILED",
@@ -1672,8 +1684,10 @@ async def maintainer_node(state: AgentState):
 
     merge_status = "approved" if is_approved else "changes_requested"
     if pr is not None:
+        commented = False
         try:
             pr.create_issue_comment(f"**Maintainer Review:**\n{review}")
+            commented = True
         except Exception as e:
             new_logs.append(
                 {"agent": "System", "msg": f"Failed to comment on PR: {str(e)}"}
@@ -1691,12 +1705,16 @@ async def maintainer_node(state: AgentState):
 
         if is_approved:
             policy = get_merge_policy()
+            head_sha = pr.head.sha
             should_merge, reason = policy == "auto", "MERGE_POLICY=auto"
             if policy == "ci":
-                should_merge, reason = _ci_checks_passed(gh_repo, pr.head.sha)
+                should_merge, reason = _ci_checks_passed(gh_repo, head_sha)
+            if should_merge and not commented:
+                # Never merge a change whose review is not visible on the PR.
+                should_merge, reason = False, "the review comment could not be posted"
 
             if should_merge:
-                _merge_pr(pr, pr_number)
+                _merge_pr(pr, pr_number, head_sha)
                 merge_status = "merged"
                 new_logs.append(
                     {

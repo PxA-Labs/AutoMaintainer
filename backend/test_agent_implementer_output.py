@@ -307,6 +307,24 @@ async def test_missing_target_issue_aborts(offline, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_target_that_is_a_pull_request_aborts(offline, monkeypatch):
+    offline.get_issue.return_value = SimpleNamespace(
+        title="Refactor",
+        body="Edit app.py:1-5",
+        pull_request=MagicMock(spec=agents.IssuePullRequest),
+    )
+
+    async def llm(s, u, estimated_tokens=3000):
+        return "VERDICT: APPROVE" if ("Maintainer" in s or "Product" in s) else "x = 2"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", llm)
+    result = await agents.run_agent_loop("o/r", target_issue=5, run_id="r")
+    assert result["status"] == "failed"
+    assert result["error_code"] == "TARGET_IS_PULL_REQUEST"
+    offline.create_git_ref.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_directive_without_file_target_fails_run_before_issue(
     offline, monkeypatch
 ):

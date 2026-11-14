@@ -157,6 +157,30 @@ async def test_auto_policy_merges_on_approval(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["auto", "ci"])
+async def test_merge_is_pinned_to_reviewed_head_sha(monkeypatch, policy):
+    """The head must not move between review/check evaluation and the merge."""
+    monkeypatch.setenv("MERGE_POLICY", policy)
+    repo, pr, _ = _setup(
+        monkeypatch,
+        statuses=[("ci/build", "success")],
+        check_runs=[("tests", "completed", "success")],
+    )
+    await agents.maintainer_node(_state())
+    assert pr.merge.call_args.kwargs["sha"] == "headsha"
+
+
+@pytest.mark.asyncio
+async def test_failed_review_comment_blocks_auto_merge(monkeypatch):
+    monkeypatch.setenv("MERGE_POLICY", "auto")
+    repo, pr, _ = _setup(monkeypatch)
+    pr.create_issue_comment.side_effect = GithubException(502, {}, None)
+    result = await agents.maintainer_node(_state())
+    pr.merge.assert_not_called()
+    assert result["merge_status"] == "awaiting_human_review"
+
+
+@pytest.mark.asyncio
 async def test_merge_exception_is_reported_as_failure(monkeypatch):
     monkeypatch.setenv("MERGE_POLICY", "auto")
     repo, pr, _ = _setup(monkeypatch)
