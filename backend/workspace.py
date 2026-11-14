@@ -1,8 +1,14 @@
+import hashlib
 import os
 import re
 import tempfile
 from pathlib import Path
+
 from fastapi import HTTPException
+
+# owner/repo or a bare name. Used with re.fullmatch: re.match with "$" would
+# also accept a trailing newline ("owner/repo\n").
+REPO_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?")
 
 # Top-level entries inside a repository that are never served or written
 # through the filesystem API.
@@ -26,17 +32,25 @@ def get_safe_repo_dir(repo_name: str) -> Path:
     """Safely resolves and creates the directory path for a target repository.
 
     Validates repository name against strict allowlist and prevents path traversal.
+
+    The directory name is a readable slug plus a hash of the full name, so the
+    mapping is one-to-one: flattening "/" alone made "a/b_c" and "a_b/c" share
+    one clone (and therefore one tenant could read another's working tree).
+    The hash is over the lower-cased name because GitHub names are
+    case-insensitive -- "Owner/Repo" and "owner/repo" are the same repository.
     """
     if not repo_name or not isinstance(repo_name, str):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
     # Strict allowlist check: owner/repo or single name
-    if not re.match(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+    if not REPO_NAME_PATTERN.fullmatch(repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
-    clean_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", repo_name)
-    if ".." in clean_name or not clean_name:
+    slug = repo_name.replace("/", "_")
+    if ".." in slug or slug.strip(".") == "":
         raise HTTPException(status_code=400, detail="Invalid repository name")
+    digest = hashlib.sha256(repo_name.lower().encode("utf-8")).hexdigest()[:12]
+    clean_name = f"{slug}-{digest}"
 
     base_dir = get_base_workspace_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
