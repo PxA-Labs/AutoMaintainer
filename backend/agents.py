@@ -352,6 +352,9 @@ class AgentState(TypedDict):
     branch_name: str
     target_file_path: str
     iteration: int
+    # Outcome of the Maintainer step: changes_requested, approved,
+    # awaiting_human_review or merged.
+    merge_status: str
     log_messages: Annotated[list, operator.add]
 
 
@@ -1368,11 +1371,104 @@ async def implementer_node(state: AgentState):
     }
 
 
+# --- Merge policy -------------------------------------------------------------
+# MERGE_POLICY decides what happens after the Maintainer approves a PR:
+#   human (default) - never auto-merge; leave the PR open and request review.
+#   ci              - merge only when every commit status / check run on the PR
+#                     head passed and at least one check exists.
+#   auto            - legacy behaviour: merge on approval alone.
+MERGE_POLICIES = ("human", "ci", "auto")
+MAX_REVIEW_DIFF_CHARS = 20000
+_PASSING_CHECK_STATES = {"success", "neutral", "skipped"}
+
+
+def get_merge_policy() -> str:
+    policy = (os.getenv("MERGE_POLICY") or "human").strip().lower()
+    if policy not in MERGE_POLICIES:
+        logger.warning("Unknown MERGE_POLICY %r; falling back to 'human'.", policy)
+        return "human"
+    return policy
+
+
+def _pr_diff_text(pr) -> str:
+    """Unified diff of the PR against its base, file by file."""
+    parts = []
+    for f in pr.get_files():
+        patch = f.patch or "(binary file or diff too large to display)"
+        parts.append(f"--- {f.filename} ({f.status})\n{patch}")
+    return "\n\n".join(parts) or "(empty diff)"
+
+
+def _ci_checks_passed(gh_repo, sha: str) -> tuple[bool, str]:
+    """Return (passed, detail) for all commit statuses and check runs on ``sha``.
+
+    Fails closed: no checks at all, or any pending/failed check, is not a pass.
+    """
+    commit = gh_repo.get_commit(sha)
+    results = [(s.context, s.state) for s in commit.get_combined_status().statuses]
+    for run in commit.get_check_runs():
+        state = run.conclusion if run.status == "completed" else run.status
+        results.append((run.name, state))
+    if not results:
+        return False, "no CI checks reported on the PR head"
+    failing = [
+        f"{name}={state}"
+        for name, state in results
+        if state not in _PASSING_CHECK_STATES
+    ]
+    if failing:
+        return False, "checks not green: " + ", ".join(failing)
+    if not any(state == "success" for _, state in results):
+        return False, "no check reported success"
+    return True, f"{len(results)} CI checks passed"
+
+
+def _request_human_review(gh_repo, pr, issue_number) -> list[str]:
+    """Ask the issue assignees (or the repository owner) to review the PR."""
+    logins: list[str] = []
+    if issue_number:
+        try:
+            issue = gh_repo.get_issue(number=issue_number)
+            logins.extend(a.login for a in (issue.assignees or []))
+        except Exception as e:
+            logger.warning("Could not read assignees of #%s: %s", issue_number, e)
+    owner = getattr(gh_repo, "owner", None)
+    if not logins and getattr(owner, "type", None) == "User":
+        logins.append(owner.login)  # organisations cannot be requested
+    author = getattr(getattr(pr, "user", None), "login", None)
+    reviewers = [login for login in dict.fromkeys(logins) if login != author]
+    if reviewers:
+        try:
+            pr.create_review_request(reviewers=reviewers)
+        except Exception as e:
+            logger.warning("Could not request review on PR #%s: %s", pr.number, e)
+            return []
+    return reviewers
+
+
+def _merge_pr(pr, pr_number: int) -> None:
+    """Merge, raising PipelineAbortError when GitHub does not merge the PR."""
+    try:
+        result = pr.merge(commit_message=f"Merged PR #{pr_number}")
+    except Exception as e:
+        raise PipelineAbortError(
+            "MERGE_FAILED", f"Failed to merge PR #{pr_number}: {e}", AgentPhase.MAINTAINER
+        ) from e
+    if not getattr(result, "merged", False):
+        raise PipelineAbortError(
+            "MERGE_FAILED",
+            f"GitHub did not merge PR #{pr_number}: "
+            f"{getattr(result, 'message', 'unknown reason')}",
+            AgentPhase.MAINTAINER,
+        )
+
+
 async def maintainer_node(state: AgentState):
     new_logs = []
     code = state["code"]
     repo_name = state["repo_name"]
     pr_number = state.get("pr_number")
+    issue_number = state.get("issue_number")
     iteration = state.get("iteration", 0)
     run_id = current_run_id.get(None)
 
@@ -1387,14 +1483,49 @@ async def maintainer_node(state: AgentState):
             )
         )
 
+    gh_repo = pr = None
+    diff_text = None
+    if gh and pr_number:
+        try:
+            gh_repo = gh.get_repo(repo_name)
+            pr = gh_repo.get_pull(pr_number)
+            diff_text = _pr_diff_text(pr)
+        except Exception as e:
+            # Reviewing (and possibly merging) without the real diff is unsafe.
+            raise PipelineAbortError(
+                "PR_DIFF_UNAVAILABLE",
+                f"Could not load the diff of PR #{pr_number} for review: {e}",
+                AgentPhase.MAINTAINER,
+            ) from e
+
+    # Review the change in context: the originating task plus the actual diff
+    # against base, not only the regenerated file.
+    task = state.get("idea") or state.get("architect_directive") or ""
+    review_sections = [
+        f"Originating task (issue #{issue_number}):\n"
+        + untrusted_block("originating issue", task)
+    ]
+    if diff_text is not None:
+        review_sections.append(
+            f"Pull request #{pr_number} diff against the base branch:\n"
+            + untrusted_block("pr diff", diff_text, max_chars=MAX_REVIEW_DIFF_CHARS)
+        )
+    review_sections.append(
+        f"Full contents of {state.get('target_file_path') or 'the changed file'} "
+        "after the change:\n"
+        + untrusted_block("changed file", code, max_chars=MAX_REVIEW_DIFF_CHARS)
+    )
+
     system_prompt = (
         "You are the Maintainer. Review the change for correctness, security and "
-        "whether it resolves the task. Approve only if it is safe to merge; "
-        "otherwise reject and point out the concrete flaw to fix. "
+        "whether it resolves the originating task. Approve only if it is safe to "
+        "merge; otherwise reject and point out the concrete flaw to fix. "
         + VERDICT_INSTRUCTIONS
+        + " "
+        + UNTRUSTED_DATA_NOTICE
     )
     review = await _llm_or_abort(
-        AgentPhase.MAINTAINER, system_prompt, f"Review this code:\n{code}"
+        AgentPhase.MAINTAINER, system_prompt, "\n\n".join(review_sections)
     )
     state["review"] = review
 
@@ -1420,14 +1551,34 @@ async def maintainer_node(state: AgentState):
             )
         )
 
-    if gh and pr_number:
+    merge_status = "approved" if is_approved else "changes_requested"
+    if pr is not None:
         try:
-            gh_repo = gh.get_repo(repo_name)
-            pr = gh_repo.get_pull(pr_number)
             pr.create_issue_comment(f"**Maintainer Review:**\n{review}")
+        except Exception as e:
+            new_logs.append(
+                {"agent": "System", "msg": f"Failed to comment on PR: {str(e)}"}
+            )
+            if run_id:
+                await emit_event(
+                    ErrorEvent(
+                        run_id=run_id,
+                        phase=AgentPhase.MAINTAINER,
+                        error_code="PR_COMMENT_FAILED",
+                        message=f"Failed to comment on PR: {str(e)}",
+                        fatal=False,
+                    )
+                )
 
-            if is_approved:
-                pr.merge(commit_message=f"Merged PR #{pr_number}")
+        if is_approved:
+            policy = get_merge_policy()
+            should_merge, reason = policy == "auto", "MERGE_POLICY=auto"
+            if policy == "ci":
+                should_merge, reason = _ci_checks_passed(gh_repo, pr.head.sha)
+
+            if should_merge:
+                _merge_pr(pr, pr_number)
+                merge_status = "merged"
                 new_logs.append(
                     {
                         "type": "ui_update",
@@ -1441,25 +1592,30 @@ async def maintainer_node(state: AgentState):
                 new_logs.append(
                     {
                         "agent": "System",
-                        "msg": f"Successfully merged PR #{pr_number}!",
+                        "msg": f"Successfully merged PR #{pr_number} ({reason}).",
                     }
                 )
-        except Exception as e:
-            new_logs.append(
-                {
-                    "agent": "System",
-                    "msg": f"Failed to review/merge PR: {str(e)}",
-                }
-            )
-            if run_id:
-                await emit_event(
-                    ErrorEvent(
-                        run_id=run_id,
-                        phase=AgentPhase.MAINTAINER,
-                        error_code="PR_REVIEW_MERGE_FAILED",
-                        message=f"Failed to review/merge PR: {str(e)}",
-                        fatal=False,
-                    )
+            else:
+                merge_status = "awaiting_human_review"
+                reviewers = _request_human_review(gh_repo, pr, issue_number)
+                why = (
+                    "MERGE_POLICY=human"
+                    if policy == "human"
+                    else f"not auto-merged: {reason}"
+                )
+                new_logs.append(
+                    {
+                        "agent": "System",
+                        "msg": (
+                            f"PR #{pr_number} approved by the Maintainer and left "
+                            f"open for human review ({why})"
+                            + (
+                                f"; review requested from {', '.join(reviewers)}."
+                                if reviewers
+                                else "."
+                            )
+                        ),
+                    }
                 )
 
     if not is_approved:
@@ -1468,6 +1624,7 @@ async def maintainer_node(state: AgentState):
     new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "idle"}})
     return {
         "review": review,
+        "merge_status": merge_status,
         "iteration": state.get("iteration", 0),
         "log_messages": new_logs,
     }
@@ -1611,6 +1768,7 @@ async def run_agent_loop(
         "branch_name": "",
         "target_file_path": "",
         "iteration": 0,
+        "merge_status": "",
         "log_messages": [],
     }
 
@@ -1651,6 +1809,7 @@ async def run_agent_loop(
             "issue_number": (final_state or {}).get("issue_number") or 0,
             "pr_number": (final_state or {}).get("pr_number") or 0,
             "branch_name": (final_state or {}).get("branch_name") or "",
+            "merge_status": (final_state or {}).get("merge_status") or "",
         }
     except PipelineAbortError as e:
         return await _fail_run(run_id, e.error_code, str(e), e.phase, final_state)
