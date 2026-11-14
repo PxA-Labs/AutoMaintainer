@@ -373,6 +373,19 @@ def test_terminal_websocket_rejects_user_without_org(monkeypatch):
     assert excinfo.value.code == 1008
 
 
+def test_terminal_websocket_rejects_pending_invite(monkeypatch):
+    """An unaccepted invite (joined_at NULL) is not membership."""
+    import agents
+
+    pending = {**MEMBER, "joined_at": None}
+    monkeypatch.setattr(agents, "supabase", _supabase_stub([pending]), raising=False)
+
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        _connect_and_resize()
+
+    assert excinfo.value.code == 1008
+
+
 def test_terminal_websocket_accepts_org_member(monkeypatch, fake_pty):
     """A token backed by an accepted, allowlisted membership is authorized."""
     import agents

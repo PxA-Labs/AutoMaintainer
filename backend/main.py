@@ -6,6 +6,7 @@ from fastapi import (
     HTTPException,
     Depends,
     Header,
+    Query,
     Request,
 )
 from fastapi.responses import StreamingResponse
@@ -84,6 +85,82 @@ class FileCreateRequest(BaseModel):
     commit_message: Optional[str] = None
 
 
+def internal_error(status_code: int, public_message: str, exc: BaseException):
+    """Log ``exc`` server-side and return an HTTPException that does not echo it.
+
+    Exception text from PyGithub, PostgREST or Celery can carry hostnames,
+    query details, tokens embedded in URLs and stack fragments. Clients get a
+    generic message plus an opaque error id that correlates with the log line.
+    """
+    error_id = uuid.uuid4().hex[:12]
+    logger.error(
+        f"{public_message} [error_id={error_id}]: {exc}",
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return HTTPException(
+        status_code=status_code, detail=f"{public_message} (error id: {error_id})"
+    )
+
+
+def _is_production() -> bool:
+    return os.getenv("ENVIRONMENT", "development").strip().lower() == "production"
+
+
+def dev_bypass_enabled() -> bool:
+    """AUTH_DEV_BYPASS, refused outright when ENVIRONMENT=production.
+
+    The bypass trusts every request as a fixed dev user. A single stray env var
+    on a production service must not turn that into an open API, so the flag
+    is ignored there (and the app also refuses to start; see lifespan).
+    """
+    if os.getenv("AUTH_DEV_BYPASS", "").strip().lower() != "true":
+        return False
+    if _is_production():
+        logger.critical(
+            "AUTH_DEV_BYPASS=true is set with ENVIRONMENT=production; ignoring it. "
+            "Remove AUTH_DEV_BYPASS from the production environment."
+        )
+        return False
+    logger.warning("AUTH_DEV_BYPASS is enabled - all requests are trusted!")
+    return True
+
+
+def _dev_bypass_user() -> dict:
+    return {
+        "user_id": os.getenv(
+            "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
+        ),
+        "org_id": os.getenv("AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"),
+        "role": os.getenv("AUTH_DEV_ROLE", "owner"),
+        "email": "dev@localhost",
+    }
+
+
+def _fetch_membership(supabase_client, user_id: str):
+    """The caller's earliest ACCEPTED organization membership.
+
+    Rows with joined_at NULL are pending invites. They must not grant access,
+    matching the schema's RLS helpers (user_org_ids / user_is_org_admin), which
+    already require joined_at IS NOT NULL.
+    """
+    return (
+        supabase_client.table("organization_members")
+        .select("org_id, role")
+        .eq("user_id", user_id)
+        .not_.is_("joined_at", "null")
+        .order("joined_at")
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+
+
+# Org roles allowed to change repository contents or start/stop runs.
+# 'viewer' is read-only. Unknown or missing roles fail closed.
+WRITE_ROLES = frozenset({"owner", "admin", "member"})
+ADMIN_ROLES = frozenset({"owner", "admin"})
+
+
 # --- Dependency: Get current user/org from Supabase Auth ---
 async def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
@@ -104,17 +181,8 @@ async def get_current_user(
         )
 
     # Explicit opt-in for local development only; never enabled by default.
-    if os.getenv("AUTH_DEV_BYPASS", "").strip().lower() == "true":
-        logger.warning("AUTH_DEV_BYPASS is enabled - all requests are trusted!")
-        return {
-            "user_id": os.getenv(
-                "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
-            ),
-            "org_id": os.getenv(
-                "AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"
-            ),
-            "email": "dev@localhost",
-        }
+    if dev_bypass_enabled():
+        return _dev_bypass_user()
 
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
@@ -133,20 +201,14 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired access token")
 
-    # Resolve the caller's primary organization membership.
+    # Resolve the caller's primary (accepted) organization membership.
     org_id = None
+    role = None
     try:
-        membership = await asyncio.to_thread(
-            lambda: supabase.table("organization_members")
-            .select("org_id")
-            .eq("user_id", user.id)
-            .order("joined_at")
-            .limit(1)
-            .maybe_single()
-            .execute()
-        )
+        membership = await asyncio.to_thread(_fetch_membership, supabase, user.id)
         if membership and membership.data:
             org_id = membership.data["org_id"]
+            role = membership.data.get("role")
     except Exception as e:
         logger.warning(f"Failed to resolve org membership for {user.id}: {e}")
 
@@ -156,7 +218,7 @@ async def get_current_user(
             detail="No organization membership found. Complete onboarding first.",
         )
 
-    return {"user_id": user.id, "org_id": org_id, "email": user.email}
+    return {"user_id": user.id, "org_id": org_id, "role": role, "email": user.email}
 
 
 async def get_org_id(user: dict = Depends(get_current_user)) -> str:
@@ -165,6 +227,23 @@ async def get_org_id(user: dict = Depends(get_current_user)) -> str:
 
 async def get_user_id(user: dict = Depends(get_current_user)) -> str:
     return user["user_id"]
+
+
+async def get_org_role(user: dict = Depends(get_current_user)) -> Optional[str]:
+    return user.get("role")
+
+
+async def require_write_role(role: Optional[str] = Depends(get_org_role)) -> str:
+    """Reject org members whose role is read-only ('viewer').
+
+    Write routes commit with the server's GitHub credentials, so membership
+    alone is not enough.
+    """
+    if role not in WRITE_ROLES:
+        raise HTTPException(
+            status_code=403, detail="Your organization role does not allow changes"
+        )
+    return role
 
 
 # --- Repository validation helper ---
@@ -205,17 +284,10 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
     """
     from agents import supabase
 
-    if os.getenv("AUTH_DEV_BYPASS", "").strip().lower() == "true":
-        logger.warning("AUTH_DEV_BYPASS is enabled - all requests are trusted!")
-        return {
-            "user_id": os.getenv(
-                "AUTH_DEV_USER_ID", "00000000-0000-0000-0000-000000000001"
-            ),
-            "org_id": os.getenv(
-                "AUTH_DEV_ORG_ID", "00000000-0000-0000-0000-000000000002"
-            ),
-            "email": "dev@localhost",
-        }
+    # The terminal additionally requires the user id to be on
+    # TERMINAL_ADMIN_USER_IDS, so the bypass alone never grants a shell.
+    if dev_bypass_enabled():
+        return _dev_bypass_user()
 
     protocols = websocket.scope.get("subprotocols") or []
     if len(protocols) < 2 or protocols[0] != "bearer":
@@ -236,20 +308,9 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
 
     # A valid token is not sufficient. get_current_user also requires an
     # organization_members row and 403s without one; the terminal must not be
-    # weaker than the HTTP routes. This endpoint spawns a shell whose child
-    # inherits os.environ, including SUPABASE_SERVICE_KEY (which bypasses RLS)
-    # and GITHUB_TOKEN, so a self-registered account with no org must not reach
-    # it.
+    # weaker than the HTTP routes. Pending invites (joined_at NULL) do not count.
     try:
-        membership = await asyncio.to_thread(
-            lambda: supabase.table("organization_members")
-            .select("org_id")
-            .eq("user_id", user.id)
-            .order("joined_at")
-            .limit(1)
-            .maybe_single()
-            .execute()
-        )
+        membership = await asyncio.to_thread(_fetch_membership, supabase, user.id)
     except Exception as e:
         logger.warning(f"Failed to resolve org membership for {user.id}: {e}")
         return None
@@ -260,6 +321,7 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
     return {
         "user_id": user.id,
         "org_id": membership.data["org_id"],
+        "role": membership.data.get("role"),
         "email": user.email,
     }
 
@@ -285,9 +347,25 @@ async def require_repo_access(
     return org_id
 
 
+async def require_repo_write_access(
+    org_id: str = Depends(require_repo_access),
+    role: str = Depends(require_write_role),
+) -> str:
+    """require_repo_access plus a role that may change repository contents."""
+    return org_id
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global gitnexus_process
+
+    # Refuse to boot a production service with the auth bypass set. Requests
+    # would ignore it anyway (dev_bypass_enabled), but failing the deploy makes
+    # the misconfiguration impossible to miss.
+    if _is_production() and os.getenv("AUTH_DEV_BYPASS", "").strip().lower() == "true":
+        raise RuntimeError(
+            "AUTH_DEV_BYPASS=true is not allowed when ENVIRONMENT=production"
+        )
 
     # Initialize observability
     setup_structured_logging()
@@ -440,8 +518,7 @@ async def healthz():
 
 @app.get("/healthz/supabase")
 async def healthz_supabase():
-    from agents import supabase, SUPABASE_URL
-    from urllib.parse import urlparse
+    from agents import supabase
 
     if not supabase:
         raise HTTPException(
@@ -454,13 +531,9 @@ async def healthz_supabase():
         )
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
-        logger.error(f"Supabase connection check failed: {e}", exc_info=True)
-        parsed = urlparse(SUPABASE_URL or "")
-        safe_host = parsed.netloc or parsed.path or "unknown"
-        raise HTTPException(
-            status_code=503,
-            detail=f"Supabase connection failed ({e}) [target_host='{safe_host}']",
-        )
+        # This probe is public: neither the exception text nor the Supabase
+        # host (which identifies the project) goes into the response.
+        raise internal_error(503, "Supabase connection failed", e)
 
 
 @app.get("/healthz/observability")
@@ -494,6 +567,7 @@ async def start_agents(
     req: StartRequest,
     org_id: str = Depends(get_org_id),
     user_id: str = Depends(get_user_id),
+    _role: str = Depends(require_write_role),
 ):
     """
     Start an agent run via Celery task queue.
@@ -513,9 +587,7 @@ async def start_agents(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Repository validation failed: {e}"
-        )
+        raise internal_error(500, "Repository validation failed", e)
 
     # Create run record in database
     run_id = str(uuid.uuid4())
@@ -538,7 +610,7 @@ async def start_agents(
     try:
         await asyncio.to_thread(lambda: sb.table("runs").insert(run_data).execute())
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create run record: {e}")
+        raise internal_error(500, "Failed to create run record", e)
 
     # Queue the Celery task
     try:
@@ -578,9 +650,7 @@ async def start_agents(
             .eq("id", run_id)
             .execute()
         )
-        raise HTTPException(
-            status_code=500, detail=f"Failed to queue agent run: {err_msg}"
-        )
+        raise internal_error(500, "Failed to queue agent run", e)
 
     return {
         "status": "queued",
@@ -632,8 +702,9 @@ async def get_run_status(run_id: str, org_id: str = Depends(get_org_id)):
 async def list_runs(
     org_id: str = Depends(get_org_id),
     status: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
+    # Bounded so a caller cannot ask PostgREST for an absurd or negative range.
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=100_000),
 ):
     """List runs for the current organization."""
     from agents import supabase as agents_supabase
@@ -663,7 +734,9 @@ async def list_runs(
 
 @app.post("/stop")
 async def stop_agents(
-    req: Optional[StopRequest] = None, org_id: str = Depends(get_org_id)
+    req: Optional[StopRequest] = None,
+    org_id: str = Depends(get_org_id),
+    role: str = Depends(require_write_role),
 ):
     """Stop/cancel a running agent run."""
     from agents import supabase as agents_supabase
@@ -703,14 +776,23 @@ async def stop_agents(
         # control.revoke() call, not agent work.
         outcome = await asyncio.to_thread(cancel_run_task, run_id)
         if not outcome.get("success"):
-            raise HTTPException(
-                status_code=500, detail=outcome.get("error", "Cancellation failed")
+            raise internal_error(
+                500,
+                "Cancellation failed",
+                RuntimeError(outcome.get("error", "unknown error")),
             )
 
         return {"status": "cancelled", "run_id": run_id}
 
     else:
-        # Cancel all running runs for org
+        # Cancel all running runs for org. This affects every member's runs
+        # (and a /stop that races a /start arrives here without a run_id), so
+        # it is reserved for org admins.
+        if role not in ADMIN_ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail="Stopping all runs requires an org admin; pass run_id",
+            )
         result = await asyncio.to_thread(
             lambda: sb.table("runs")
             .select("id")
@@ -752,21 +834,40 @@ async def inline_assist(
         )
         return StreamingResponse(generator, media_type="text/event-stream")
     except Exception as e:
-        logger.error(f"Inline assist failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Inline assist processing failed: {str(e)}",
-        )
+        raise internal_error(500, "Inline assist processing failed", e)
 
 
-# --- File operations (unchanged) ---
+# --- File operations ---
+
+
+def _get_github_repo(gh: Github, repo_name: str):
+    try:
+        return gh.get_repo(repo_name)
+    except Exception as e:
+        logger.info(f"get_repo({repo_name}) failed: {e}")
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+
+def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None:
+    """Best-effort write of an already-committed change into the local clone.
+
+    The commit has succeeded by the time this runs, so a local failure is
+    logged rather than turned into an error response for a change that landed.
+    """
+    if not repo_dir.exists():
+        return
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Committed upstream but local mirror write failed: {e}")
 
 
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(
     repo_name: str,
     payload: FileUpdateRequest,
-    org_id: str = Depends(require_repo_access),
+    org_id: str = Depends(require_repo_write_access),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -776,33 +877,32 @@ async def update_repo_file(
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
 
+    # Validate the local mirror path BEFORE any GitHub call. Checking it only
+    # after the commit meant a path the workspace refuses (.git/..., symlink
+    # escapes) still got an upstream commit, followed by a 500.
+    repo_dir = get_safe_repo_dir(repo_name)
+    target_path = get_safe_target_path(repo_dir, payload.file_path)
+
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
     gh = Github(token)
-    try:
-        repo = gh.get_repo(repo_name)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+    repo = _get_github_repo(gh, repo_name)
     try:
         file = repo.get_contents(payload.file_path)
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
+        logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
+        raise HTTPException(status_code=404, detail="File not found in repo")
     message = (
         payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
     )
     try:
         repo.update_file(file.path, message, payload.content, file.sha)
-
-        # Write to local clone so the IDE doesn't show stale reads
-        repo_dir = get_safe_repo_dir(repo_name)
-        if repo_dir.exists():
-            target_path = get_safe_target_path(repo_dir, payload.file_path)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(payload.content, encoding="utf-8")
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update file: {e}")
+        raise internal_error(500, "Failed to update file", e)
+
+    # Mirror to the local clone so the IDE doesn't show stale reads.
+    _write_local_mirror(repo_dir, target_path, payload.content)
     return {"status": "updated", "message": message}
 
 
@@ -810,7 +910,7 @@ async def update_repo_file(
 async def create_repo_file(
     repo_name: str,
     payload: FileCreateRequest,
-    org_id: str = Depends(require_repo_access),
+    org_id: str = Depends(require_repo_write_access),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -820,37 +920,32 @@ async def create_repo_file(
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
 
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="GitHub token not configured")
-    gh = Github(token)
-    try:
-        repo = gh.get_repo(repo_name)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
-
-    message = (
-        payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
-    )
-
     actual_path = payload.file_path
     actual_content = payload.content
     if payload.is_dir:
         actual_path = f"{payload.file_path.rstrip('/')}/.gitkeep"
         actual_content = ""
 
+    # Validate the local mirror path BEFORE committing upstream (see update).
+    repo_dir = get_safe_repo_dir(repo_name)
+    target_path = get_safe_target_path(repo_dir, actual_path)
+
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=401, detail="GitHub token not configured")
+    gh = Github(token)
+    repo = _get_github_repo(gh, repo_name)
+
+    message = (
+        payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
+    )
+
     try:
         repo.create_file(actual_path, message, actual_content)
-
-        # Write to local clone
-        repo_dir = get_safe_repo_dir(repo_name)
-        if repo_dir.exists():
-            target_path = get_safe_target_path(repo_dir, actual_path)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(actual_content, encoding="utf-8")
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create file: {e}")
+        raise internal_error(500, "Failed to create file", e)
+
+    _write_local_mirror(repo_dir, target_path, actual_content)
     return {"status": "created", "message": message}
 
 
@@ -859,7 +954,7 @@ async def delete_repo_file(
     repo_name: str,
     file_path: str,
     commit_message: Optional[str] = None,
-    org_id: str = Depends(require_repo_access),
+    org_id: str = Depends(require_repo_write_access),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -870,15 +965,13 @@ async def delete_repo_file(
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not configured")
     gh = Github(token)
-    try:
-        repo = gh.get_repo(repo_name)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+    repo = _get_github_repo(gh, repo_name)
 
     try:
         file = repo.get_contents(file_path)
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"File not found in repo: {e}")
+        logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
+        raise HTTPException(status_code=404, detail="File not found in repo")
 
     if isinstance(file, list):
         raise HTTPException(
@@ -890,7 +983,7 @@ async def delete_repo_file(
     try:
         repo.delete_file(file.path, message, file.sha)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {e}")
+        raise internal_error(500, "Failed to delete file", e)
     return {"status": "deleted", "message": message}
 
 
@@ -916,6 +1009,7 @@ async def propose_changes(
     payload: ProposeChangesRequest,
     org_id: str = Depends(get_org_id),
     user_id: str = Depends(get_user_id),
+    _role: str = Depends(require_write_role),
 ):
     """
     Create a new branch, commit changes, and open a Pull Request.
@@ -937,10 +1031,7 @@ async def propose_changes(
         raise HTTPException(status_code=401, detail="GitHub token not configured")
 
     gh = Github(token)
-    try:
-        repo = gh.get_repo(repo_name)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Repository not found: {e}")
+    repo = _get_github_repo(gh, repo_name)
 
     # Get default branch
     default_branch = repo.default_branch
@@ -1015,7 +1106,7 @@ async def propose_changes(
             ref.delete()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"Failed to propose changes: {e}")
+        raise internal_error(500, "Failed to propose changes", e)
 
 
 # --- Terminal WebSocket ---
@@ -1388,7 +1479,7 @@ def search_repo(
                 except Exception:
                     pass
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise internal_error(500, "Search failed", e)
 
     return {"query": q, "results": results[:100]}
 
@@ -1590,8 +1681,7 @@ async def get_admin_metrics(
             },
         }
     except Exception as e:
-        logger.exception(f"Failed to fetch admin metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch metrics: {e}")
+        raise internal_error(500, "Failed to fetch metrics", e)
 
 
 @app.get("/admin/runs")
@@ -1599,8 +1689,8 @@ async def get_admin_runs(
     org_id: str = Depends(get_org_id),
     user_id: str = Depends(get_user_id),
     status: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=100_000),
 ):
     """Get all runs across organization for admin."""
     from agents import supabase as agents_supabase
