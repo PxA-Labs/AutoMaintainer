@@ -35,6 +35,12 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      # All github/codeql-action/* steps must run the same version or
+      # CodeQL refuses to analyze; bump them together in one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   # Docker
   - package-ecosystem: "docker"
