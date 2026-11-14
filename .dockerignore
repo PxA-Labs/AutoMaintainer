@@ -20,3 +20,11 @@
 .git
 .gitignore
 **/.DS_Store
+
+# Not needed in the image. .claude can hold whole worktree copies of the repo,
+# which would bloat the build context enormously.
+.claude
+.github
+docs
+docker-compose.yml
+**/*.log
