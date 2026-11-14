@@ -118,6 +118,56 @@ def test_markdown_targets_keep_inner_fences():
     assert normalize_generated_code(f"```markdown\n{doc}\n```", path="docs/a.md") == doc
 
 
+# A file that itself contains fence lines (docstring example). The reviewer's
+# repro: the bare file used to be replaced by the inner snippet "f()".
+FILE_WITH_INNER_FENCES = (
+    'def f():\n    """Example:\n\n```python\nf()\n```\n"""\n    return 1'
+)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        FILE_WITH_INNER_FENCES + "\n",  # bare file, as the prompt asks
+        f"```python\n{FILE_WITH_INNER_FENCES}\n```",  # wrapped in a fence
+        f"Here is the updated file:\n```python\n{FILE_WITH_INNER_FENCES}\n```\nDone.",
+        f"```\n{FILE_WITH_INNER_FENCES}\n```",
+    ],
+)
+def test_file_containing_fences_is_kept_whole(raw):
+    assert normalize_generated_code(raw, path="a.py") == FILE_WITH_INNER_FENCES
+
+
+def test_bare_js_file_with_fenced_template_string_is_kept_whole():
+    src = "const t = `\n```js\nx()\n```\n`;\nexport default t;"
+    assert normalize_generated_code(src, path="a.js") == src
+
+
+def test_bare_file_with_odd_inner_fences_is_not_called_truncated():
+    src = 'FENCE = """\n```\n"""\nprint(FENCE)'
+    assert normalize_generated_code(src, path="a.py") == src
+
+
+def test_wrapped_file_cut_off_after_inner_fence_is_truncated():
+    raw = '```python\ndef f():\n    """Example:\n\n```python\nf()\n```\n"""\n    ret'
+    with pytest.raises(GeneratedCodeError, match="unterminated"):
+        normalize_generated_code(raw, path="a.py")
+
+
+def test_tilde_fences_are_unwrapped():
+    assert normalize_generated_code("~~~python\nx = 2\n~~~", path="a.py") == "x = 2"
+
+
+def test_comment_starting_with_i_cant_is_not_a_refusal():
+    src = "# I can't use f-strings here (py2 compat)\nx = '%s' % 1"
+    assert normalize_generated_code(src, path="a.py") == src
+
+
+def test_truncated_markdown_with_unbalanced_fence_is_rejected():
+    with pytest.raises(GeneratedCodeError, match="unterminated"):
+        normalize_generated_code("# T\n\n```python\nx = 1", path="README.md")
+
+
 # --- implementer_node ----------------------------------------------------
 
 

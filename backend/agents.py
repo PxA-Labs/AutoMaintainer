@@ -171,9 +171,14 @@ class GeneratedCodeError(ValueError):
     """Implementer output is unusable (refusal, truncation, malformed fences)."""
 
 
-_FENCE_LINE_RE = re.compile(r"^[ \t]*```[ \t]*(?P<lang>[\w+#.-]*)[ \t]*$")
+# A Markdown fence line: ``` or ~~~ optionally followed by a language tag.
+_FENCE_LINE_RE = re.compile(
+    r"^[ \t]*(?P<marker>```|~~~)[ \t]*(?P<lang>[\w+#.-]*)[ \t]*$"
+)
+# Only explicit refusal phrasing at the very start counts; a leading "#" or
+# "//" comment ("# I can't use f-strings here") is file content, not a refusal.
 _REFUSAL_RE = re.compile(
-    r"^\W*(?:i['’]?m sorry|i am sorry|sorry[,.!]|i can(?:not|['’]?t)\b"
+    r"^[\s*_>\"'“]*(?:i['’]?m sorry|i am sorry|sorry[,.!]|i can(?:not|['’]?t)\b"
     r"|i (?:am|['’]?m) (?:not able|unable)|i won['’]?t\b|as an ai\b)",
     re.IGNORECASE,
 )
@@ -194,6 +199,92 @@ _LANGUAGE_ALIASES = {
     "rs": {"rust", "rs"},
     "go": {"go", "golang"},
 }
+# A prose lead-in line such as "Here is the updated file:" or "Sure:". It must
+# start at column 0 with a letter, end with ":" and not look like code (block
+# headers such as "def f():" / "else:", calls, assignments, braces).
+_LEAD_IN_RE = re.compile(r"^[A-Za-z][^=;{}<>\[\]]*:$")
+_CODE_HEADER_RE = re.compile(
+    r"^(?:def|class|if|elif|else|for|while|with|try|except|finally|async|match"
+    r"|case|default|switch|function|export|import|from|const|let|var|public"
+    r"|private|protected|static|return|lambda)\b|\w\("
+)
+_MAX_LEAD_IN_LINES = 3
+_UNTERMINATED_MSG = "Implementer output has an unterminated code fence (truncated)."
+
+
+def _is_lead_in(lines: list[str]) -> bool:
+    """True when ``lines`` (everything before a fence) is a short prose lead-in."""
+    text = [line.rstrip() for line in lines if line.strip()]
+    if not text or len(text) > _MAX_LEAD_IN_LINES:
+        return False
+    for line in text:
+        if not line[:1].isalpha():
+            return False  # indented, or starts with a symbol/quote: code
+        if _CODE_HEADER_RE.search(line):
+            return False
+    return bool(_LEAD_IN_RE.match(text[-1]))
+
+
+def _extract_fenced(lines: list[str], ext: str) -> str:
+    """Extract the file from a reply whose ``lines[0]`` opens a fence.
+
+    Two shapes are accepted:
+    * one or more fenced blocks separated only by short prose lead-ins (the
+      block whose language matches the file wins, else the first);
+    * a single block wrapping the whole file, which may itself contain fence
+      lines (docstrings, template strings). Its closing fence is the last
+      matching bare fence line; any text after it is trailing prose.
+    """
+    marker = _FENCE_LINE_RE.match(lines[0]).group("marker")
+
+    def closes(line: str) -> bool:
+        m = _FENCE_LINE_RE.match(line)
+        return bool(m and m.group("marker") == marker and not m.group("lang"))
+
+    def next_fence(start: int):
+        return next(
+            (j for j in range(start, len(lines)) if _FENCE_LINE_RE.match(lines[j])),
+            None,
+        )
+
+    # Shape 1: sequential open/close pairs with only lead-ins between them.
+    blocks, i, ok = [], 0, True
+    while True:
+        opener = _FENCE_LINE_RE.match(lines[i])
+        close_i = next((j for j in range(i + 1, len(lines)) if closes(lines[j])), None)
+        body = lines[i + 1 : close_i] if close_i is not None else []
+        # A fence line inside a block (e.g. "```python" in a docstring) means
+        # the blocks are nested, so this is not a flat sequence of blocks.
+        if (
+            opener.group("marker") != marker
+            or close_i is None
+            or any(_FENCE_LINE_RE.match(line) for line in body)
+        ):
+            ok = False
+            break
+        blocks.append((opener.group("lang").lower(), body))
+        following = next_fence(close_i + 1)
+        if following is None:
+            break  # whatever follows is trailing prose
+        if not _is_lead_in(lines[close_i + 1 : following]):
+            ok = False
+            break
+        i = following
+    if ok:
+        wanted = _LANGUAGE_ALIASES.get(ext, {ext} if ext else set())
+        body = next((b for lang, b in blocks if lang in wanted), blocks[0][1])
+        return "\n".join(body)
+
+    # Shape 2: one block around the whole file.
+    close_i = next((j for j in range(len(lines) - 1, 0, -1) if closes(lines[j])), None)
+    if close_i is None:
+        raise GeneratedCodeError(_UNTERMINATED_MSG)
+    body = lines[1:close_i]
+    if sum(1 for line in body if _FENCE_LINE_RE.match(line)) % 2:
+        # The last bare fence is really an inner one: the reply was cut off
+        # inside the file, or its fences cannot be paired unambiguously.
+        raise GeneratedCodeError(_UNTERMINATED_MSG)
+    return "\n".join(body)
 
 
 def normalize_generated_code(
@@ -203,11 +294,14 @@ def normalize_generated_code(
 ) -> str:
     """Extract the file contents from an Implementer response.
 
-    Accepts a bare file or a fenced block surrounded by prose (picking the block
-    whose language matches ``path``, else the first). Raises instead of
-    returning something that must not be committed: empty output, LLM error
-    text, refusals, and truncated output (``finish_reason == "length"`` or an
-    unterminated fence).
+    The prompt asks for the bare file. A reply is only unwrapped when it
+    starts with a fence, or with a short prose lead-in ending in ":" followed
+    by a fence. Any other reply is the bare file and is kept verbatim, even
+    when it contains fence lines (e.g. an example inside a docstring).
+
+    Raises instead of returning something that must not be committed: empty
+    output, LLM error text, refusals, and truncated output
+    (``finish_reason == "length"`` or an unterminated fence).
     """
     if not isinstance(raw_code, str):
         raise ValueError("Implementer returned a non-text response.")
@@ -224,35 +318,29 @@ def normalize_generated_code(
 
     ext = path.rsplit(".", 1)[-1].lower() if path and "." in path else ""
     lines = text.splitlines()
+    first_fence = next(
+        (i for i, line in enumerate(lines) if _FENCE_LINE_RE.match(line)), None
+    )
 
     if ext in _MARKUP_EXTENSIONS:
         # Inner fences are content; only unwrap one fence around the whole file.
         if (
-            len(lines) >= 2
-            and _FENCE_LINE_RE.match(lines[0])
-            and lines[-1].strip() == "```"
+            first_fence == 0
+            and len(lines) >= 2
+            and lines[-1].strip() == _FENCE_LINE_RE.match(lines[0]).group("marker")
         ):
             lines = lines[1:-1]
+        # Markdown fences come in pairs; an odd count means the reply was cut
+        # off inside a code block. (reStructuredText does not use fences.)
+        if ext != "rst" and sum(1 for ln in lines if _FENCE_LINE_RE.match(ln)) % 2:
+            raise GeneratedCodeError(_UNTERMINATED_MSG)
         code = "\n".join(lines)
+    elif first_fence is not None and (
+        first_fence == 0 or _is_lead_in(lines[:first_fence])
+    ):
+        code = _extract_fenced(lines[first_fence:], ext)
     else:
-        fences = [i for i, line in enumerate(lines) if _FENCE_LINE_RE.match(line)]
-        if not fences:
-            code = text
-        else:
-            if len(fences) % 2:
-                raise GeneratedCodeError(
-                    "Implementer output has an unterminated code fence (truncated)."
-                )
-            blocks = []
-            for open_i, close_i in zip(fences[::2], fences[1::2]):
-                if _FENCE_LINE_RE.match(lines[close_i]).group("lang"):
-                    raise GeneratedCodeError(
-                        "Implementer output has malformed code fences."
-                    )
-                lang = _FENCE_LINE_RE.match(lines[open_i]).group("lang").lower()
-                blocks.append((lang, "\n".join(lines[open_i + 1 : close_i])))
-            wanted = _LANGUAGE_ALIASES.get(ext, {ext} if ext else set())
-            code = next((b for lang, b in blocks if lang in wanted), blocks[0][1])
+        code = text  # the bare file, as the prompt requests
 
     code = code.strip()
     if not code:
