@@ -24,6 +24,12 @@ export function DashboardShell() {
   const [runs, setRuns] = useState<any[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  // Whether the Web IDE currently holds unsaved edits; switching repository
+  // discards them, so the change is confirmed first.
+  const ideDirtyRef = useRef(false);
+  const handleIdeDirtyChange = useCallback((dirty: boolean) => {
+    ideDirtyRef.current = dirty;
+  }, []);
 
   // Health check for Supabase persistence
   const isSupabaseUnreachable = useSupabaseHealth();
@@ -140,7 +146,17 @@ export function DashboardShell() {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         repoUrl={runState.repoUrl}
-        onRepoUrlChange={runActions.setRepoUrl}
+        onRepoUrlChange={(url) => {
+          if (
+            ideDirtyRef.current &&
+            !window.confirm(
+              "The editor has unsaved changes that will be discarded when switching repository. Continue?"
+            )
+          ) {
+            return;
+          }
+          runActions.setRepoUrl(url);
+        }}
         isEditingRepo={runState.isEditingRepo}
         onSetIsEditingRepo={runActions.setIsEditingRepo}
         targetIssue={runState.targetIssue}
@@ -166,6 +182,7 @@ export function DashboardShell() {
         {/* Global Header */}
         <Header
           isRunning={runState.isRunning}
+          isPending={runState.isPending}
           tokensUsed={systemHealth.tokensUsed}
           latency={systemHealth.latency}
           onStartStop={runActions.startStop}
@@ -174,7 +191,12 @@ export function DashboardShell() {
         {/* Main View Switcher */}
         <main className="flex-1 flex flex-col overflow-hidden">
           {activeTab === "ide" ? (
-            <IdeView user={user} repoUrl={runState.repoUrl} logs={logs} />
+            <IdeView
+              user={user}
+              repoUrl={runState.repoUrl}
+              logs={logs}
+              onDirtyChange={handleIdeDirtyChange}
+            />
           ) : activeTab === "gitnexus" ? (
             <CodeGraph repoUrl={runState.repoUrl} />
           ) : activeTab === "runs" ? (

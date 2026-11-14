@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal, Code } from "lucide-react";
 import WebIDE from "@/components/WebIDE";
 import dynamic from "next/dynamic";
@@ -17,17 +17,28 @@ interface IdeViewProps {
   user: any;
   repoUrl: string;
   logs: LogEntry[];
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
+export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
   const [terminalMode, setTerminalMode] = useState<"logs" | "pty">("logs");
+  const logScrollRef = useRef<HTMLDivElement>(null);
+  // Follow new log lines unless the user scrolled up to read older ones.
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = logScrollRef.current;
+    if (el && stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [logs, terminalMode]);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Monaco WebIDE container */}
       <div className="flex-1 min-h-0">
         {user ? (
-          <WebIDE repoUrl={repoUrl} />
+          <WebIDE repoUrl={repoUrl} onDirtyChange={onDirtyChange} />
         ) : (
           <div className="flex items-center justify-center h-full bg-zinc-950 text-zinc-500 text-sm">
             Sign in to access the Web IDE
@@ -64,7 +75,15 @@ export function IdeView({ user, repoUrl, logs }: IdeViewProps) {
         </div>
 
         {terminalMode === "logs" ? (
-          <div className="flex-1 min-h-0 p-3 overflow-y-auto custom-scrollbar font-mono text-xs bg-zinc-950 space-y-1">
+          <div
+            ref={logScrollRef}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              stickToBottomRef.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            }}
+            className="flex-1 min-h-0 p-3 overflow-y-auto custom-scrollbar font-mono text-xs bg-zinc-950 space-y-1"
+          >
             {logs.map((log, i) => (
               <div key={i} className={`flex items-start gap-2 py-0.5 leading-relaxed ${log.color}`}>
                 <span className="text-zinc-600 shrink-0 text-[11px] select-none">{log.time}</span>
