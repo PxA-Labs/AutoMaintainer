@@ -5,6 +5,8 @@ import asyncio
 import os
 import shutil
 import subprocess
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -222,3 +224,91 @@ def test_git_timeout_kills_process(monkeypatch, tmp_path):
 
     assert ok is False
     assert killed
+
+
+# --- Implementer and the shared clone --------------------------------------------
+
+
+def _implementer_state(idea):
+    return {
+        "repo_name": "o/r",
+        "idea": idea,
+        "issue_number": 7,
+        "iteration": 0,
+        "review": "",
+        "branch_name": "",
+        "target_file_path": "",
+        "pr_number": 0,
+    }
+
+
+def _link_dir(target, link):
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        if os.name != "nt":
+            pytest.skip("cannot create a directory symlink here")
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_implementer_does_not_write_through_repo_symlinks(tmp_path, monkeypatch):
+    """A symlinked directory committed to the target repo redirected the
+    Implementer's local write outside the workspace."""
+    import agents
+    from github import GithubException
+
+    repo_dir = get_safe_repo_dir("o/r")
+    repo_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _link_dir(outside, repo_dir / "docs")
+
+    gh_repo = MagicMock()
+    gh_repo.default_branch = "main"
+    gh_repo.get_contents.side_effect = GithubException(404, {}, None)
+    gh_repo.create_pull.return_value = SimpleNamespace(number=1, html_url="u")
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: gh_repo))
+
+    async def fake_llm(*a, **k):
+        return "PAYLOAD"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", fake_llm)
+
+    asyncio.run(agents.implementer_node(_implementer_state("Fix docs/evil.py:1-2")))
+
+    assert not (outside / "evil.py").exists()
+    gh_repo.create_file.assert_called_once()
+
+
+@requires_git
+def test_implementer_leaves_default_branch_clone_clean(upstream, monkeypatch):
+    """PR code written into the shared default-branch clone made the next
+    `git pull --ff-only` fail, so the clone went permanently stale."""
+    import agents
+
+    repo_dir = get_safe_repo_dir("o/r")
+    assert (
+        git("clone", "-q", str(upstream), str(repo_dir), cwd=upstream).returncode == 0
+    )
+
+    gh_repo = MagicMock()
+    gh_repo.default_branch = "main"
+    existing = MagicMock()
+    existing.decoded_content = b"v1\n"
+    gh_repo.get_contents.return_value = existing
+    gh_repo.create_pull.return_value = SimpleNamespace(number=1, html_url="u")
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: gh_repo))
+
+    async def fake_llm(*a, **k):
+        return "unmerged-change\n"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", fake_llm)
+
+    asyncio.run(agents.implementer_node(_implementer_state("Fix app.py:1-1")))
+
+    assert git("status", "--porcelain", cwd=repo_dir).stdout == ""
+    (upstream / "app.py").write_text("v2\n")
+    git("commit", "-qam", "c2", cwd=upstream)
+    assert git("pull", "--ff-only", cwd=repo_dir).returncode == 0

@@ -1044,13 +1044,13 @@ async def implementer_node(state: AgentState):
             }
         )
 
-    from workspace import get_safe_repo_dir
-
-    repo_dir = get_safe_repo_dir(state["repo_name"])
-    if repo_dir.exists():
-        local_path = repo_dir / path
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_text(code, encoding="utf-8")
+    # Deliberately no write into the local clone. That clone is the shared
+    # mirror of the DEFAULT branch, while this code lives only on the PR branch
+    # until it is merged: writing it there showed unmerged code in the IDE and
+    # dirtied the tree so every later sync failed. The write also used
+    # `repo_dir / path` without containment checks, so a symlinked directory
+    # committed to the target repo redirected it outside the workspace.
+    # Nothing reads the PR content back from disk; GitHub has it.
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "idle"}})
     return {
