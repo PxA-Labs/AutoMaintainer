@@ -1,19 +1,47 @@
 import json
+import re
 import shutil
 
 import pytest
 
 from agents import extract_target_file
 from evals.prompt import build_implementer_prompt
-from evals.taskset import TASKS_DIR, TaskError, load_task, load_tasks, taskset_hash
+from evals.taskset import (
+    CATEGORIES,
+    DIFFICULTIES,
+    KINDS,
+    TASKS_DIR,
+    TaskError,
+    load_task,
+    load_tasks,
+    taskset_hash,
+)
 
 TASKS = load_tasks()
 
 
 def test_task_set_size_and_mix():
     assert 8 <= len(TASKS) <= 12
-    assert {t.kind for t in TASKS} == {"bugfix", "feature"}
-    assert {t.difficulty for t in TASKS} == {"easy", "medium", "hard"}
+    assert {t.kind for t in TASKS} <= set(KINDS)
+    assert {t.category for t in TASKS} <= set(CATEGORIES)
+    assert {t.difficulty for t in TASKS} == set(DIFFICULTIES)
+
+
+# Ways a test could look at files instead of behaviour. A test that reads the
+# target's source (or any file in the fixture) can be steered by the candidate,
+# which controls the target file: e.g. a comment that satisfies a grep.
+_FILE_ACCESS = re.compile(
+    r"\bopen\(|read_text|read_bytes|\binspect\b|getsource|__file__|"
+    r"\bPath\(|\bos\.path\b|\bglob\b|importlib|__spec__|__loader__|"
+    r"\bsubprocess\b|\bexec\(|\beval\("
+)
+
+
+def _test_files(task):
+    return [
+        *task.hidden_tests_dir.glob("test_*.py"),
+        *(task.repo_dir / "tests").glob("test_*.py"),
+    ]
 
 
 @pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
@@ -23,6 +51,30 @@ def test_task_is_well_formed(task):
     assert extract_target_file(task.issue_text) == task.target_file
     assert task.provenance.startswith("original")
     assert any((task.repo_dir / "tests").glob("test_*.py")), "no pass-to-pass tests"
+
+
+@pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
+def test_tests_check_behaviour_not_files(task):
+    for path in _test_files(task):
+        source = path.read_text(encoding="utf-8")
+        match = _FILE_ACCESS.search(source)
+        assert match is None, f"{path.name} uses {match and match.group()!r}"
+
+
+@pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
+def test_hidden_tests_exercise_the_target(task):
+    # Hidden tests import the target module (not a helper the candidate could
+    # leave alone) and hold several tests, so neither a stub nor a single
+    # hard-coded answer satisfies them. Noop/oracle baselines check the rest.
+    module = task.target_file[: -len(".py")].replace("/", ".")
+    package, _, name = module.rpartition(".")
+    imports = [rf"from {re.escape(module)} import ", rf"import {re.escape(module)}\b"]
+    if package:
+        imports.append(rf"from {re.escape(package)} import .*\b{name}\b")
+    for hidden in task.hidden_tests_dir.glob("test_*.py"):
+        source = hidden.read_text(encoding="utf-8")
+        assert any(re.search(p, source) for p in imports), hidden.name
+        assert len(re.findall(r"^def test_", source, re.MULTILINE)) >= 2
 
 
 @pytest.mark.parametrize("task", TASKS, ids=lambda t: t.id)
@@ -75,6 +127,28 @@ def test_loader_requires_hidden_tests_and_solution(tmp_path):
     dest = _copy_task(tmp_path / "x")
     shutil.rmtree(dest / "solution")
     with pytest.raises(TaskError, match="solution"):
+        load_task(dest)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [("kind", "chore"), ("category", "misc"), ("difficulty", "trivial")],
+)
+def test_loader_rejects_unknown_vocabulary(tmp_path, key, value):
+    dest = _copy_task(tmp_path)
+    meta = json.loads((dest / "task.json").read_text(encoding="utf-8"))
+    meta[key] = value
+    (dest / "task.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(TaskError, match=key):
+        load_task(dest)
+
+
+def test_loader_requires_category(tmp_path):
+    dest = _copy_task(tmp_path)
+    meta = json.loads((dest / "task.json").read_text(encoding="utf-8"))
+    del meta["category"]
+    (dest / "task.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(TaskError, match="category"):
         load_task(dest)
 
 

@@ -4,6 +4,7 @@
   "body": "`BoundedCache` in `cachelib/bounded.py` is documented as evicting the least recently used entry, but when it is full, `put` throws away the entry that was just inserted. Reading a key with `get` and overwriting an existing key with `put` should both count as using that key, so it becomes the most recently used. Overwriting an existing key must never evict anything.",
   "target_file": "cachelib/bounded.py",
   "kind": "bugfix",
+  "category": "data-structure",
   "difficulty": "hard",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

@@ -4,6 +4,7 @@
   "body": "`page_count` in `listing/paging.py` uses floor division, so 11 items with 5 per page report 2 pages and the eleventh item can never be shown. It should round up (0 items means 0 pages). A `per_page` below 1 currently fails with `ZeroDivisionError` or returns nonsense; it should raise `ValueError`.",
   "target_file": "listing/paging.py",
   "kind": "bugfix",
+  "category": "edge-case",
   "difficulty": "easy",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

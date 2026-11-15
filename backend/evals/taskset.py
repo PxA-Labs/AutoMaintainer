@@ -2,7 +2,8 @@
 
 A task lives in ``evals/tasks/<task_id>/``::
 
-    task.json        id, title, body, target_file, kind, difficulty, provenance
+    task.json        id, title, body, target_file, kind, category, difficulty,
+                     provenance
     repo/            the fixture repository (what the agent is allowed to see)
     hidden_tests/    acceptance tests; NEVER shown to the model
     solution/        reference version of the changed file(s), for the oracle
@@ -19,7 +20,27 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 TASKS_DIR = Path(__file__).resolve().parent / "tasks"
-REQUIRED_KEYS = ("id", "title", "body", "target_file", "kind", "difficulty")
+REQUIRED_KEYS = (
+    "id",
+    "title",
+    "body",
+    "target_file",
+    "kind",
+    "category",
+    "difficulty",
+)
+# Closed vocabularies, so a typo cannot silently create a new bucket in the
+# per-kind / per-category breakdowns (docs/EVALS.md describes each value).
+KINDS = ("bugfix", "feature", "refactor")
+CATEGORIES = (
+    "logic",
+    "edge-case",
+    "input-validation",
+    "error-handling",
+    "data-structure",
+    "api-change",
+)
+DIFFICULTIES = ("easy", "medium", "hard")
 
 
 class TaskError(ValueError):
@@ -33,6 +54,7 @@ class Task:
     body: str
     target_file: str
     kind: str
+    category: str
     difficulty: str
     provenance: str
     path: Path
@@ -77,12 +99,22 @@ def load_task(task_dir: Path) -> Task:
     if meta["id"] != task_dir.name:
         raise TaskError(f"{task_dir.name}: id {meta['id']!r} != directory name")
     _check_relative(meta["target_file"])
+    for key, allowed in (
+        ("kind", KINDS),
+        ("category", CATEGORIES),
+        ("difficulty", DIFFICULTIES),
+    ):
+        if meta[key] not in allowed:
+            raise TaskError(
+                f"{task_dir.name}: {key} {meta[key]!r} is not one of {allowed}"
+            )
     task = Task(
         id=meta["id"],
         title=meta["title"],
         body=meta["body"],
         target_file=meta["target_file"],
         kind=meta["kind"],
+        category=meta["category"],
         difficulty=meta["difficulty"],
         provenance=meta.get("provenance", ""),
         path=task_dir,
