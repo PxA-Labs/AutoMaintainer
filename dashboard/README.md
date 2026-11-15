@@ -20,6 +20,23 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Tests
+
+```bash
+npm run lint      # ESLint, including the jsx-a11y recommended rules
+npm test          # Vitest unit/component tests (src/**/*.test.ts[x])
+npm run test:e2e  # Playwright smoke tests (e2e/)
+```
+
+The e2e suite builds the static export with test-only public env, serves
+`out/` from `e2e/serve.mjs` on http://127.0.0.1:4173 and drives it in
+Chromium. The backend and Supabase are mocked in the browser with
+`page.route`; any other outbound request is aborted, so no real backend,
+Supabase or GitHub is contacted. First run `npx playwright install chromium`.
+Set `E2E_SKIP_BUILD=1` to reuse an existing e2e build, or
+`E2E_BROWSER_CHANNEL=chrome` to use an installed Chrome instead of the
+Playwright browser.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

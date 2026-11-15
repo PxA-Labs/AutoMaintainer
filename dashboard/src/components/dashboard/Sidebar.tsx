@@ -78,6 +78,10 @@ function RepoInput({
       }}
       className="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-mono focus:outline-none focus:border-indigo-500"
       placeholder="e.g. facebook/react"
+      // Mounted only after the user activates the edit button, which this
+      // input replaces; focus must follow or it drops to <body>. Not a
+      // page-load autofocus, which is what the rule guards against.
+      // eslint-disable-next-line jsx-a11y/no-autofocus
       autoFocus
     />
   );
