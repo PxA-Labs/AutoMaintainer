@@ -1,0 +1,10 @@
+{
+  "id": "unique_keep_first",
+  "title": "unique(key=...) keeps the last duplicate instead of the first",
+  "body": "`unique(items, key=None)` in `collectionutil/dedupe.py` is documented to drop duplicates while keeping the *first* occurrence of each item, in the original order. Two items are duplicates when `key(item)` is equal (or the items themselves, without `key`). With `key`, it currently returns the last item of each group. It should return the first item of each group, positioned where that group first appeared, and accept any iterable, including a generator.",
+  "target_file": "collectionutil/dedupe.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

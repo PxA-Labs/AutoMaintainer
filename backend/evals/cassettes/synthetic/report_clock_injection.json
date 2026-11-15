@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: answer in the wrong language (only a javascript block; rejected)",
+  "prompt_sha256": "5165195d392ab3759f0f2fa26969ec410d8c3e3d042e1a0ca659c38602ff1afc",
+  "prompt_version": "a2ecc40e0103",
+  "response": "Here is the updated function:\n\n```javascript\nexport function renderReport(title, rows, now = new Date()) {\n  return [title, `Generated ${now.toISOString()}`].join('\\n');\n}\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "report_clock_injection",
+  "temperature": null,
+  "usage": null
+}

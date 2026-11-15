@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix after a chat-style explanation, in a py fence",
+  "prompt_sha256": "a796fd50ba65a4bd3145f3178788bb8c6ca9b9f477479a40afbc7caa0be23363",
+  "prompt_version": "a2ecc40e0103",
+  "response": "Sure! The bug is that the dict keeps the last value for each key. I changed it to remember which keys were seen and keep the first item.\n\n```py\n\"\"\"Order-preserving de-duplication.\"\"\"\n\n\ndef unique(items, key=None) -> list:\n    \"\"\"Return ``items`` without duplicates, keeping each first occurrence.\n\n    ``key`` maps an item to the value used to compare items.\n    \"\"\"\n    seen = set()\n    result = []\n    for item in items:\n        marker = key(item) if key else item\n        if marker not in seen:\n            seen.add(marker)\n            result.append(item)\n    return result\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "unique_keep_first",
+  "temperature": null,
+  "usage": null
+}

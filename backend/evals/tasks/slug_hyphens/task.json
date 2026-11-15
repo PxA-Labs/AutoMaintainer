@@ -4,6 +4,7 @@
   "body": "`make_slug` in `textutil/slug.py` promises that every run of characters other than letters and digits becomes a single hyphen and that a slug never starts or ends with a hyphen. Titles with punctuation break both rules: `make_slug(\"Hello, World!\")` returns `\"hello--world-\"` instead of `\"hello-world\"`. Please make the function behave as documented.",
   "target_file": "textutil/slug.py",
   "kind": "bugfix",
+  "category": "logic",
   "difficulty": "medium",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

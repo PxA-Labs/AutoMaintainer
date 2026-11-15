@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix inside a bare fence with no prose",
+  "prompt_sha256": "e2fd48ee5ce181b672d79fcd2415da903225f38d74b950d930018c389852d067",
+  "prompt_version": "a2ecc40e0103",
+  "response": "```\n\"\"\"A tiny parser for ``key = value`` configuration files.\"\"\"\n\n\nclass ConfigError(ValueError):\n    \"\"\"The configuration text is invalid.\"\"\"\n\n    def __init__(self, message: str, missing=None):\n        super().__init__(message)\n        self.missing = list(missing or [])\n\n\ndef parse_config(text: str, *, required=()) -> dict[str, str]:\n    \"\"\"Parse ``key = value`` lines; blank lines and ``#`` comments are ignored.\n\n    Raises ``ConfigError`` (with ``missing`` set) when a ``required`` key is\n    absent.\n    \"\"\"\n    result: dict[str, str] = {}\n    for number, line in enumerate(text.splitlines(), start=1):\n        line = line.strip()\n        if not line or line.startswith(\"#\"):\n            continue\n        if \"=\" not in line:\n            raise ConfigError(f\"line {number}: expected 'key = value'\")\n        key, value = line.split(\"=\", 1)\n        result[key.strip()] = value.strip()\n    missing = sorted(set(required) - set(result))\n    if missing:\n        raise ConfigError(f\"missing required keys: {', '.join(missing)}\", missing)\n    return result\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "config_required_keys",
+  "temperature": null,
+  "usage": null
+}

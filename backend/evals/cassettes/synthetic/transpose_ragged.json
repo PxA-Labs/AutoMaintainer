@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: prose mixed with code lines before the fence (rejected as ambiguous)",
+  "prompt_sha256": "7616dfe0637beb5fc5ffb88faf9e5e0fd31da9a0db2e0cb790e453824ef7a480",
+  "prompt_version": "a2ecc40e0103",
+  "response": "I replaced the zip call:\n    return [list(column) for column in zip(*rows)]\nand also added a length check.\n\n```python\n\"\"\"Small matrix helpers for the spreadsheet export.\"\"\"\n\n\ndef transpose(rows: list[list]) -> list[list]:\n    \"\"\"Return the transpose of a rectangular matrix given as a list of rows.\"\"\"\n    if not rows:\n        return []\n    width = len(rows[0])\n    if any(len(row) != width for row in rows):\n        raise ValueError(\"all rows must have the same length\")\n    return [[row[i] for row in rows] for i in range(width)]\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "transpose_ragged",
+  "temperature": null,
+  "usage": null
+}

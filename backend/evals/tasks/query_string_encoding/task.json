@@ -1,0 +1,10 @@
+{
+  "id": "query_string_encoding",
+  "title": "build_query produces broken URLs",
+  "body": "`build_query` in `httpkit/query.py` joins `key=value` pairs with `&` but does not encode anything, so a search for `fish & chips` produces a broken URL. Please change it so that:\n\n- keys and values are percent-encoded with `urllib.parse.quote` and `safe=\"\"`, so a space becomes `%20`, `&` becomes `%26` and `/` becomes `%2F`;\n- a parameter whose value is `None` is left out;\n- a list or tuple value repeats the key once per element, in order (`{\"tag\": [\"a\", \"b\"]}` gives `tag=a&tag=b`), and an empty list adds nothing;\n- other values are converted with `str()`.\n\nParameters keep the order of the dict.",
+  "target_file": "httpkit/query.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

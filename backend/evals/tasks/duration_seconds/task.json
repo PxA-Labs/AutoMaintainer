@@ -4,6 +4,7 @@
   "body": "`parse_duration` in `timefmt/durations.py` understands hours and minutes (`\"1h30m\"`). Please add an `s` unit for seconds, so `\"2m15s\"` gives 135. Input that is not entirely a sequence of `<number><unit>` parts, such as an empty string, a bare number like `\"90\"`, an unknown unit like `\"5d\"` or a trailing number like `\"1h30\"`, currently returns a partial total silently; it should raise `ValueError` instead.",
   "target_file": "timefmt/durations.py",
   "kind": "feature",
+  "category": "input-validation",
   "difficulty": "medium",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

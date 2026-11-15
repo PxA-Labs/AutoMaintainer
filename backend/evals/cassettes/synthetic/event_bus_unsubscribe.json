@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: plausible but wrong: unsubscribing while publish iterates the live list skips the next handler (hidden tests fail)",
+  "prompt_sha256": "12fdd28e19e3fe6e551f67b43ad54f22b3294c30429dabf5cd122630b59a96d9",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"In-process publish/subscribe.\"\"\"\n\nfrom collections import defaultdict\n\n\nclass EventBus:\n    def __init__(self):\n        self._handlers = defaultdict(list)\n\n    def subscribe(self, event: str, handler):\n        \"\"\"Call ``handler(payload)`` whenever ``event`` is published.\n\n        Returns a function that removes the subscription.\n        \"\"\"\n        self._handlers[event].append(handler)\n\n        def unsubscribe() -> None:\n            if handler in self._handlers[event]:\n                self._handlers[event].remove(handler)\n\n        return unsubscribe\n\n    def publish(self, event: str, payload=None) -> int:\n        \"\"\"Call every handler of ``event`` in subscription order.\n\n        Returns the number of handlers called.\n        \"\"\"\n        handlers = self._handlers.get(event, [])\n        for handler in handlers:\n            handler(payload)\n        return len(handlers)\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "event_bus_unsubscribe",
+  "temperature": null,
+  "usage": null
+}

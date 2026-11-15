@@ -1,0 +1,10 @@
+{
+  "id": "carrier_registry",
+  "title": "Replace the carrier if/elif chain with a registry",
+  "body": "`shipping_cost(carrier, weight_kg)` in `logistics/shipping.py` is a growing `if`/`elif` chain, and every new carrier means editing it. Please refactor it to a registry without changing any existing result: add `register_carrier(name, rate_fn)`, where `rate_fn` takes the weight in kg and returns the cost, and make `shipping_cost` look the carrier up in the registry. The three existing carriers (`post`, `courier`, `freight`) must be registered when the module is imported. Registering a name that is already registered raises `ValueError` unless `replace=True` is passed as a keyword argument. An unknown carrier still raises `ValueError`, and a negative weight still raises `ValueError` before any rate function is called.",
+  "target_file": "logistics/shipping.py",
+  "kind": "refactor",
+  "category": "api-change",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

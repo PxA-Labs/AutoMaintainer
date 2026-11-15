@@ -1,0 +1,10 @@
+{
+  "id": "sliding_window_limiter",
+  "title": "RateLimiter keeps rejecting after the window has passed",
+  "body": "`RateLimiter` in `throttle/limiter.py` should allow at most `limit` calls in any window of `window` seconds: `allow(now)` returns `True` when fewer than `limit` accepted calls happened in the half-open interval `(now - window, now]`, and then records the call. Instead, rejected calls are recorded too, and at most one expired timestamp is dropped per call, so a client that retried while it was limited stays locked out long after the window has passed. Rejected calls must not count, and every expired timestamp should be dropped. `now` values are non-decreasing.",
+  "target_file": "throttle/limiter.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "hard",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

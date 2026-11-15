@@ -1,0 +1,10 @@
+{
+  "id": "retry_exception_filter",
+  "title": "retry decorator swallows errors and ignores its exceptions argument",
+  "body": "The `retry` decorator in `resilience/retry.py` takes `times` and an `exceptions` tuple. It has two bugs. It retries on every exception, not only on the types listed in `exceptions`: an exception of any other type must propagate at once, without another attempt. And when every attempt fails it returns `None` instead of raising: after `times` failed attempts it must re-raise the exception from the last attempt. `times` is the total number of attempts, and a successful attempt returns the wrapped function's value straight away.",
+  "target_file": "resilience/retry.py",
+  "kind": "bugfix",
+  "category": "error-handling",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

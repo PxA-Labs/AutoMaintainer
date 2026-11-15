@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "6393190f11447aaf3007e2cfeb9ce777c29cd8861d5cac16f8d6ed8c80be5396",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Helpers for building request URLs.\"\"\"\n\nfrom urllib.parse import quote\n\n\ndef build_query(params: dict) -> str:\n    \"\"\"Return ``params`` as a URL query string (without the leading ``?``).\"\"\"\n    pairs = []\n    for key, value in params.items():\n        if value is None:\n            continue\n        values = value if isinstance(value, (list, tuple)) else [value]\n        for item in values:\n            pairs.append(f\"{quote(str(key), safe='')}={quote(str(item), safe='')}\")\n    return \"&\".join(pairs)\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "query_string_encoding",
+  "temperature": null,
+  "usage": null
+}

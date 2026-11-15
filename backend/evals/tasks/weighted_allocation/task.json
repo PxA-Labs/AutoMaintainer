@@ -1,0 +1,10 @@
+{
+  "id": "weighted_allocation",
+  "title": "Add weighted allocation of an amount in cents",
+  "body": "`billing/allocate.py` can only split an amount evenly. Please add `allocate(total_cents: int, weights: list[int]) -> list[int]` that splits a non-negative whole number of cents in proportion to `weights`, using the largest remainder method: each share first gets `floor(total_cents * w / sum(weights))`; the cents left over are then handed out one at a time to the shares with the largest fractional remainder, breaking ties in favour of the lower index. The shares must always add up to `total_cents`. Raise `ValueError` if `total_cents` is negative, `weights` is empty, any weight is negative, or all weights are zero. Use exact integer arithmetic, not floats. `split_evenly` must keep working as it does now.",
+  "target_file": "billing/allocate.py",
+  "kind": "feature",
+  "category": "logic",
+  "difficulty": "hard",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

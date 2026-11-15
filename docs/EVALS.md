@@ -47,6 +47,27 @@ exit 1 if any cassette answered a different prompt) and `--generate-only`
 (live: only record cassettes into `--record DIR`; no candidate code runs and
 the results file has `aggregate: null`).
 
+### What CI runs, and subsets
+
+- **Pull requests** that touch `backend/agents.py`, `backend/evals/**` or the
+  lockfile run the offline job in `.github/workflows/evals.yml` on **all 30
+  tasks**: the harness unit tests, the oracle (must be 100%), the no-op (must
+  be 0%) and the synthetic replay (`--min-resolve-rate 0.6 --fail-on-stale`).
+  Every task starts several fresh pytest subprocesses (test collection,
+  repository tests, hidden tests), so with `--jobs 4` each mode takes a
+  minute or two.
+- **Live runs** are manual (`workflow_dispatch`); the `tasks` input takes
+  `all` or a comma-separated subset, which also bounds the API cost.
+- For a quick local check while editing the prompt or normalizer, run one
+  task per category, then the full set before you push:
+
+```bash
+python -m evals.run --mode replay --tasks page_count,env_bool_override,retry_exception_filter,lru_eviction,version_compare,carrier_registry
+```
+
+A subset changes `taskset_hash`, so `evals.compare` only compares runs over
+the same subset. Never quote a subset's rate as the set's rate.
+
 Exit codes:
 
 | Code | Meaning |
@@ -72,12 +93,23 @@ bare file.
 
 ```
 backend/evals/tasks/<task_id>/
-  task.json      id, title, body, target_file, kind, difficulty, provenance
+  task.json      id, title, body, target_file, kind, category, difficulty,
+                 provenance
   repo/          the fixture repository; the only thing the model may see
     tests/       pre-existing (pass-to-pass) tests, used to detect regressions
   hidden_tests/  acceptance (fail-to-pass) tests; never shown to the model
   solution/      reference version of target_file, used by the oracle
 ```
+
+`kind`, `category` and `difficulty` come from closed lists; the loader
+(`evals/taskset.py`) rejects any other value, so a typo cannot create a new
+bucket:
+
+| Field | Values |
+| --- | --- |
+| `kind` | `bugfix` (behaviour is wrong), `feature` (new behaviour or API), `refactor` (behaviour-preserving restructuring that the hidden tests can observe, such as a new public helper, parameter or registry, while the repository's own tests guard the old behaviour) |
+| `category` | `logic` (wrong computation), `edge-case` (boundaries, empty or partial input), `input-validation` (rejecting bad input), `error-handling` (exceptions raised, propagated, retried or chained), `data-structure` (ordering, eviction, iteration, internal state), `api-change` (renames, new parameters, deprecations, extension points) |
+| `difficulty` | `easy` (a local one- or two-line change), `medium` (several cases to get right), `hard` (an interplay of conditions or a new algorithm) |
 
 The model receives the issue (`title` and `body`) as the Implementer's task
 text and the current content of `target_file`. The prompt is identical to the
@@ -96,31 +128,80 @@ production one: `evals/tests/test_prompt_parity.py` runs the real
 - `test_taskset.py` checks that no hidden test name and no solution text
   appears in the rendered prompt.
 
+### Leaky-task guards
+
+A task is useless if a candidate can pass it without doing the work. Every
+task is held to these rules, and `evals/tests/test_taskset.py` enforces the
+ones that can be checked statically:
+
+- **Behaviour, not files.** Hidden and repository tests call the code; they
+  never read source or fixture files (`open(`, `read_text`, `inspect`,
+  `__file__`, `Path(`, `os.path`, `glob`, `importlib`, `subprocess`,
+  `exec(`/`eval(` are rejected). The candidate controls the target file, so a
+  test that inspects it could be satisfied by a comment.
+- **No trivial pass.** Every hidden test file imports the target module and
+  holds at least two tests, with several inputs per behaviour (often
+  parametrized), so no single hard-coded return value or stub passes. Hidden
+  tests never compare against constants defined in the target module, which
+  the candidate could change.
+- **Fail before, pass after.** The no-op baseline must fail every task's
+  hidden tests without a regression, and the oracle must pass all of them (CI
+  runs both on every PR that touches the harness).
+- **Fair.** Hidden tests check only what the issue states, including exact
+  formats and exception types, so a correct reading of the issue passes.
+
 ### Provenance of the current set
 
-The 10 tasks (3 easy, 5 medium, 2 hard; 8 bug fixes and 2 small features)
-were **written from scratch for this harness in 2026-11**. They are not taken
-or adapted from any public repository, issue tracker or benchmark, such as
-SWE-bench or HumanEval, so a model cannot have memorized them from public
-data. They are small and synthetic, so they measure basic single-file editing
-ability, not performance on real-world issues.
+The set has **30 tasks**. All of them were **written from scratch for this
+harness in 2026-11**: the first 10 for the MVP, 20 more to narrow the
+confidence intervals. None is taken or adapted from any public repository,
+issue tracker or benchmark, such as SWE-bench, HumanEval or MBPP, so a model
+cannot have memorized them from public data. They are small and synthetic,
+so they measure basic single-file editing ability, not performance on
+real-world issues.
+
+| | Count |
+| --- | --- |
+| Kind | 19 bugfix, 6 feature, 5 refactor |
+| Difficulty | 11 easy, 13 medium, 6 hard |
+| Category | 7 edge-case, 6 input-validation, 6 data-structure, 5 logic, 4 api-change, 2 error-handling |
+
+`error-handling` is the thinnest category; prefer it for the next tasks. The
+results file carries each task's `kind` and `difficulty`; join on `task_id`
+with `task.json` for `category`.
 
 ### Adding a task
 
 1. Create `tasks/<new_id>/` with the layout above. `id` must equal the
-   directory name. Write it yourself; do not copy public code or issues.
+   directory name. Write it yourself; do not copy public code, issues or
+   benchmark problems. Set `kind`, `category` and `difficulty` from the lists
+   above and `provenance` to a string starting with `original`.
 2. The issue body must name the target file in a form `extract_target_file`
-   understands, for example `` `pkg/module.py` ``. A test enforces this.
+   understands, for example `` `pkg/module.py` ``, and should name no other
+   file path. A test enforces this.
 3. Describe the required behavior in the issue precisely enough that the
    hidden tests are fair. Hidden tests must check only what the issue states.
+   Follow the [leaky-task guards](#leaky-task-guards).
 4. Add at least one pre-existing test under `repo/tests/` that passes before
-   and after the fix.
+   and after the fix. For a refactor, these tests pin the old behaviour.
+   Name hidden test files `test_hidden_<topic>.py`, so they never share a
+   basename with a repository test.
 5. Run `python -m evals.run --mode oracle --tasks <new_id>` (must resolve) and
-   `--mode noop` (must not resolve, with `regression: false`), then
-   `python -m pytest -q evals` and `black evals`.
-6. Add a cassette for replay, or regenerate the replay set, and update the
-   replay `--min-resolve-rate` gate in `.github/workflows/evals.yml` if the
-   expected count changes.
+   `--mode noop --tasks <new_id>` (must not resolve, with
+   `regression: false`).
+6. Replay needs a cassette for **every** task (a missing one is a harness
+   error, exit 2). Hand-write `cassettes/synthetic/<new_id>.json` in the
+   shape of the existing ones (`"synthetic": true`, `"model":
+   "synthetic-fixture"`, a `note` that says what the response exercises),
+   then run `python -m evals.rehash` to fill in `prompt_sha256` and
+   `prompt_version`. Never paste a real model's output into the synthetic
+   set.
+7. Update the expected replay score in `evals/tests/test_harness.py` and, if
+   the rate changes, the replay `--min-resolve-rate` gate in
+   `.github/workflows/evals.yml` (the committed set is kept at exactly 60%,
+   so adding correct and failing cassettes in a 3:2 ratio keeps the gate).
+8. Run `python -m pytest -q evals` (this includes the full oracle, no-op and
+   replay runs) and `black evals`, and update the counts in this document.
 
 The backend suite never collects files under `tasks/`; `evals/conftest.py`
 excludes them.
@@ -178,18 +259,31 @@ Fields of each task record:
 | `stale_cassette` | The cassette was recorded for a different prompt. Its result does not describe the current prompt. |
 | `error` | An infrastructure failure, such as a missing cassette or a network error. The run exits with code 2. Never report a run with errors. |
 
-Report the interval with the rate, for example "6/10 resolved (60%, 95% CI
-31–83%)". With n=10, the interval is roughly ±25 points.
+Report the interval with the rate, for example "18/30 resolved (60%, 95% CI
+42–75%)". With n=30, the interval is roughly ±17 points around 50%; at the
+MVP's n=10 it was about ±25 (6/10: 31–83%).
 
 ### About the committed cassettes
 
 `cassettes/synthetic/` is **hand-written**. It is not output from a real model.
-It covers every outcome the harness can classify: bare-file and fenced
-correct answers, a partial fix, a refusal, a truncated reply, and a change
-that breaks an existing caller. Replaying it measures the **harness and the
-output normalizer**, not the model. CI gates on its known score (6/10), so a
-change to `normalize_generated_code` that starts rejecting well-formed output
-fails the PR. To track real model behavior offline, record a set with
+It covers every outcome the harness can classify:
+
+- 18 correct answers in every reply shape the normalizer must accept: the
+  bare file, a bare or `python`/`py`-tagged fence, a fence after a one-line
+  lead-in or a chat-style explanation, and a fence followed by prose;
+- 5 rejected replies: a refusal, a truncated reply (`finish_reason=length`),
+  an empty reply, prose mixed with code lines before the fence (ambiguous),
+  and an answer in the wrong language;
+- 3 regressions: a renamed parameter, a removed public name, and a bare file
+  with a syntax error;
+- 4 plausible but wrong fixes that fail the hidden tests only.
+
+Each cassette's `note` says which case it is. Replaying it measures the
+**harness and the output normalizer**, not the model. CI gates on its known
+score (18/30, `--min-resolve-rate 0.6`) and `evals/tests/test_harness.py`
+pins each failure class above per task plus the 18/30 total, so a change to `normalize_generated_code` that
+starts rejecting well-formed output, or accepting malformed output, fails the
+PR. To track real model behavior offline, record a set with
 `--mode live --record evals/cassettes/<name>` and replay it with
 `--cassettes`.
 
@@ -220,8 +314,9 @@ sorted by task id, so `--jobs` does not change them.
 3. Compare **paired** outcomes, task by task, not two separate rates. Only the
    tasks where exactly one version succeeded carry information. `compare`
    lists them (`only_a_resolved` and `only_b_resolved`) and gives the exact
-   McNemar p-value. With 10 tasks, even 4 discordant tasks that all favor one
-   side give p=0.125. Most differences you will see at this size are noise.
+   McNemar p-value. Even 5 discordant tasks that all favor one side give
+   only p=0.0625; it takes 6 of 6 (p=0.031) to reach p<0.05. Most differences
+   you will see at n=30 are noise.
 4. Overlapping Wilson intervals are not a valid test of a difference, because
    they ignore the pairing. Use the McNemar result.
 5. Run live comparisons more than once (epic #414 asks for at least 3 seeds),
@@ -232,9 +327,11 @@ sorted by task id, so `--jobs` does not change them.
 
 ## Limitations
 
-- **Small n, wide intervals.** 10 tasks give a 95% CI that is about 50 points
-  wide. Use the harness to catch large regressions and to look at failures,
-  not to rank close alternatives.
+- **Small n, wide intervals.** 30 tasks give a 95% CI that is about 30 to 35
+  points wide in the middle of the range (18/30: 42–75%). Use the harness to
+  catch large regressions and to look at failures, not to rank close
+  alternatives. Per-category counts (2 to 7 tasks) are far too small for
+  per-category rates; read them as failure examples.
 - **Single-file, small Python tasks.** The Implementer rewrites one whole
   file. The tasks contain no multi-file edits, no other languages, no large
   files, and no tasks where the model must find the right file.

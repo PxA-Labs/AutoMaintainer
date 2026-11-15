@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: bare file with a syntax error (missing colon): every test fails to import (regression)",
+  "prompt_sha256": "242df94ccb96d3ab35f3e69e3e18d323ca4968212a14dc39ac3335e41ca0bbe9",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Shipping cost calculation.\"\"\"\n\n_CARRIERS = {}\n\n\ndef register_carrier(name: str, rate_fn, *, replace: bool = False) -> None\n    \"\"\"Make ``name`` available to :func:`shipping_cost`.\"\"\"\n    if name in _CARRIERS and not replace:\n        raise ValueError(f\"carrier already registered: {name}\")\n    _CARRIERS[name] = rate_fn\n\n\ndef shipping_cost(carrier: str, weight_kg: float) -> float:\n    \"\"\"Return the cost of shipping ``weight_kg`` with ``carrier``.\"\"\"\n    if weight_kg < 0:\n        raise ValueError(\"weight must not be negative\")\n    try:\n        rate_fn = _CARRIERS[carrier]\n    except KeyError:\n        raise ValueError(f\"unknown carrier: {carrier}\") from None\n    return rate_fn(weight_kg)\n\n\ndef _post(weight_kg: float) -> float:\n    return 4.5 if weight_kg <= 2 else 4.5 + (weight_kg - 2) * 1.2\n\n\nregister_carrier(\"post\", _post)\nregister_carrier(\"courier\", lambda weight_kg: 9.0 + weight_kg * 0.8)\nregister_carrier(\"freight\", lambda weight_kg: max(60.0, weight_kg * 0.35))\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "carrier_registry",
+  "temperature": null,
+  "usage": null
+}
