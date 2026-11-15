@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **workspace**: Key clones by GitHub repository id for agent runs and IDE routes ([#474](https://github.com/PxA-Labs/AutoMaintainer/pull/474)) (closes [#392](https://github.com/PxA-Labs/AutoMaintainer/issues/392)) - @purvanshjoshi
 - **db**: Add runs.repo_name and check tenant references in run and IDE policies ([#472](https://github.com/PxA-Labs/AutoMaintainer/pull/472)) - @purvanshjoshi
 - **github-app**: Verified installation linking, minimum-permission tokens and tenant isolation hardening ([#466](https://github.com/PxA-Labs/AutoMaintainer/pull/466)) - @purvanshjoshi
 - **backend**: Run PyGithub calls off the event loop, fix trace-field logging, harden LocalRunner ([#458](https://github.com/PxA-Labs/AutoMaintainer/pull/458)) - @purvanshjoshi
