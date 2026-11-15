@@ -84,7 +84,7 @@ jobs:
     - name: No-op baseline (must be 0%)
       run: python -m evals.run --mode noop --jobs 4 --out eval-results/noop.json --max-resolve-rate 0.0
 
-    # The committed cassettes are synthetic: 6 of 10 are correct fixes. A drop
+    # The committed cassettes are synthetic: 18 of 30 are correct fixes. A drop
     # means normalize_generated_code or the harness started rejecting or
     # mis-applying output it used to handle. --fail-on-stale: a PR that
     # changes the Implementer prompt must re-bind the cassettes on purpose
