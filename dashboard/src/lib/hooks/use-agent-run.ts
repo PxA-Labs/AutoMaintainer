@@ -3,18 +3,25 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { getBackendUrl, parseTargetIssue } from "@/lib/config";
 import { useAuth } from "@/lib/auth";
-import { isTerminalRunStatus } from "@/lib/run-status";
+import { isActiveRunStatus, isTerminalRunStatus } from "@/lib/run-status";
+import {
+  clearPersistedRunId,
+  persistRunId,
+  readPersistedRunId,
+} from "@/lib/run-persistence";
 
 /** How often the active run's status is polled from GET /status/{run_id}. */
 export const RUN_STATUS_POLL_MS = 5000;
 
 /**
  * idle      - no run is tracked
+ * restoring - GET /status for a remembered/offered run is in flight; Start is
+ *             blocked so a reload mid-run cannot enqueue a second run
  * starting  - POST /start is in flight (no run_id yet, so Stop is impossible)
  * running   - the backend confirmed a run_id and it is queued/running
  * stopping  - POST /stop is in flight; we stay "running" until it succeeds
  */
-export type RunPhase = "idle" | "starting" | "running" | "stopping";
+export type RunPhase = "idle" | "restoring" | "starting" | "running" | "stopping";
 
 interface AgentRunState {
   phase: RunPhase;
@@ -33,6 +40,12 @@ interface AgentRunActions {
   setTargetIssue: (issue: string) => void;
   setIsEditingRepo: (editing: boolean) => void;
   setActiveRunId: (id: string | null) => void;
+  /**
+   * Re-attach to an existing run: confirms via GET /status that it is still
+   * queued/running, then tracks it as if this tab had started it. Resolves to
+   * whether the run was resumed.
+   */
+  resumeRun: (runId: string) => Promise<boolean>;
   resetRun: () => void;
   addLog: (log: LogEntry) => void;
 }
@@ -89,10 +102,70 @@ export function useAgentRun(
 
   const resetRun = useCallback(() => {
     setActiveRunId(null);
+    clearPersistedRunId();
     updatePhase("idle");
   }, [updatePhase]);
 
   const accessToken = session?.access_token ?? null;
+
+  const resumeRun = useCallback(
+    async (runId: string): Promise<boolean> => {
+      if (phaseRef.current !== "idle" || !accessToken) return false;
+      updatePhase("restoring");
+      try {
+        const res = await fetch(
+          `${getBackendUrl()}/status/${encodeURIComponent(runId)}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (res.status === 404) {
+          // Unknown run, or one belonging to another organization.
+          clearPersistedRunId();
+          return false;
+        }
+        if (!res.ok) throw new Error(await readDetail(res));
+        const data = await res.json();
+        if (!isActiveRunStatus(data?.status)) {
+          clearPersistedRunId();
+          return false;
+        }
+        if (typeof data.repo_name === "string" && data.repo_name) {
+          setRepoUrl(data.repo_name);
+        }
+        setActiveRunId(runId);
+        persistRunId(runId);
+        updatePhase("running");
+        log(
+          `Resumed tracking of agent run ${runId.substring(0, 8)} (${data.status}).`,
+          "text-emerald-500"
+        );
+        return true;
+      } catch (err) {
+        // Keep the remembered id: a transient failure should not forget a
+        // run that may still be going. A later reload can retry.
+        log(`Could not restore the agent run. (${err})`, "text-amber-400");
+        return false;
+      } finally {
+        // Cast: TypeScript narrowed the ref to "idle" at the top of this function.
+        if ((phaseRef.current as RunPhase) === "restoring") updatePhase("idle");
+      }
+    },
+    [accessToken, log, updatePhase]
+  );
+
+  // After a reload mid-run, re-attach to the run remembered in the URL or
+  // sessionStorage. Attempted once, as soon as a session token is available.
+  const restoreAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (!accessToken || restoreAttemptedRef.current) return;
+    restoreAttemptedRef.current = true;
+    const remembered = readPersistedRunId();
+    // Synchronising with external state (URL/sessionStorage, then the
+    // backend) is what effects are for. The synchronous "restoring" phase is
+    // deliberate: Start stays blocked for the whole /status round trip, so a
+    // reload mid-run cannot enqueue a second run in the meantime.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (remembered) void resumeRun(remembered);
+  }, [accessToken, resumeRun]);
 
   // Sync with the backend: once a run is known, poll its status so the UI
   // reflects runs that complete, fail, or are cancelled elsewhere.
@@ -112,6 +185,7 @@ export function useAgentRun(
         if (isTerminalRunStatus(data?.status)) {
           // Do not interrupt an in-flight stop: its own handler settles the phase.
           if (phaseRef.current === "running") {
+            clearPersistedRunId();
             updatePhase("idle");
             log(
               `Agent run ${activeRunId.substring(0, 8)} finished with status: ${data.status}.`,
@@ -135,8 +209,12 @@ export function useAgentRun(
   }, [activeRunId, accessToken, log, updatePhase]);
 
   const startStop = useCallback(async () => {
-    // Ignore clicks while a start/stop request is already in flight.
-    if (phaseRef.current === "starting" || phaseRef.current === "stopping") {
+    // Ignore clicks while a start/stop/restore request is already in flight.
+    if (
+      phaseRef.current === "starting" ||
+      phaseRef.current === "stopping" ||
+      phaseRef.current === "restoring"
+    ) {
       return;
     }
 
@@ -207,6 +285,7 @@ export function useAgentRun(
           throw new Error("Backend did not return a run identifier");
         }
         setActiveRunId(data.run_id);
+        persistRunId(data.run_id);
         updatePhase("running");
         log(
           `Agent run queued: ${data.run_id.substring(0, 8)}...`,
@@ -241,6 +320,7 @@ export function useAgentRun(
       if (!res.ok) {
         throw new Error(await readDetail(res));
       }
+      clearPersistedRunId();
       updatePhase("idle");
       log("Agent Loop Halted.", "text-red-500");
     } catch (err) {
@@ -254,7 +334,7 @@ export function useAgentRun(
   const state: AgentRunState = {
     phase,
     isRunning: phase === "running" || phase === "stopping",
-    isPending: phase === "starting" || phase === "stopping",
+    isPending: phase === "starting" || phase === "stopping" || phase === "restoring",
     activeRunId,
     repoUrl,
     targetIssue,
@@ -267,6 +347,7 @@ export function useAgentRun(
     setTargetIssue,
     setIsEditingRepo,
     setActiveRunId,
+    resumeRun,
     resetRun,
     addLog: onLog,
   };
