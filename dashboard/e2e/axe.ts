@@ -38,14 +38,19 @@ function describe(violations: Result[]) {
 export async function expectNoA11yViolations(page: Page, screen: string, allow: AxeAllowance[] = []) {
   // Let finite entrance transitions finish so contrast is measured on the
   // final colours rather than a half-faded frame. Infinite ones (pulsing
-  // status dots, spinners) never resolve `finished`, so they are skipped.
+  // status dots, spinners) never resolve `finished`, so they are skipped,
+  // and the wait is capped so a paused or throttled animation (a loaded CI
+  // runner) cannot hang the test; axe then simply runs on what is shown.
   await page.evaluate(() =>
-    Promise.all(
-      document
-        .getAnimations()
-        .filter((a) => Number.isFinite(Number(a.effect?.getComputedTiming().endTime)))
-        .map((a) => a.finished.catch(() => undefined))
-    )
+    Promise.race([
+      Promise.all(
+        document
+          .getAnimations()
+          .filter((a) => Number.isFinite(Number(a.effect?.getComputedTiming().endTime)))
+          .map((a) => a.finished.catch(() => undefined))
+      ),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
   );
 
   const results = await new AxeBuilder({ page }).withTags(WCAG_TAGS).analyze();
