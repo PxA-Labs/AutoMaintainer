@@ -418,3 +418,53 @@ async def test_directive_without_file_target_fails_run_before_issue(
     assert result["error_code"] == "NO_TARGET_FILE"
     offline.create_issue.assert_not_called()
     offline.create_file.assert_not_called()
+
+
+# --- Lead-ins that quote code (review blocker on fix/agent-pipeline-safety) ---
+import pytest as _pytest
+
+from agents import GeneratedCodeError as _GCE, normalize_generated_code as _norm
+
+
+@_pytest.mark.parametrize(
+    "reply",
+    [
+        "Changed parse() to handle empty input:\n```python\nx = 1\n```",
+        "Updated config[key] handling as requested.\n```python\nx = 1\n```\nDone.",
+        "Fixed the a < b comparison.\n\n```\nx = 1\n```",
+    ],
+)
+def test_python_reply_with_code_quoting_lead_in_is_unwrapped(reply):
+    assert _norm(reply, "a.py") == "x = 1"
+
+
+def test_python_bare_file_with_fence_in_docstring_is_kept_verbatim():
+    src = 'def f():\n    """Example:\n\n```python\nf()\n```\n"""\n    return 1'
+    assert _norm(src, "a.py") == src
+
+
+def test_python_unparseable_reply_without_fenced_block_fails_closed():
+    with _pytest.raises(_GCE):
+        _norm("Changed parse() so it works\n```", "a.py")
+
+
+@_pytest.mark.parametrize(
+    "reply,path",
+    [
+        ("Changed parse() to handle empty input:\n```js\nconst x = 1;\n```", "a.js"),
+        ("Updated the handler (see below)\n```ts\nlet x = 1;\n```", "a.ts"),
+    ],
+)
+def test_non_python_sentence_lead_in_with_fence_is_unwrapped_or_rejected(reply, path):
+    # Either a clean extraction or a refusal is acceptable; committing the
+    # prose and fence lines verbatim is not.
+    try:
+        out = _norm(reply, path)
+    except _GCE:
+        return
+    assert "```" not in out and not out.startswith(("Changed", "Updated"))
+
+
+def test_non_python_bare_file_is_kept_verbatim():
+    src = "import x from 'y';\nconst t = 1;\nexport default t;"
+    assert _norm(src, "a.js") == src

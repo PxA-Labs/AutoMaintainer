@@ -1,3 +1,4 @@
+import ast
 import os
 import logging
 from dotenv import load_dotenv
@@ -255,6 +256,12 @@ _CODE_HEADER_RE = re.compile(
     r"|private|protected|static|return|lambda)\b|\w\("
 )
 _MAX_LEAD_IN_LINES = 3
+# Two leading words ("Changed parse() ...", "Here is ..."), not a code keyword.
+_SENTENCE_START_RE = re.compile(
+    r"^(?!(?:import|from|export|const|let|var|function|class|def|async|return"
+    r"|public|private|protected|static|package|use|module)\b)"
+    r"[A-Za-z][A-Za-z'’]*[ \t]+[A-Za-z]"
+)
 _UNTERMINATED_MSG = "Implementer output has an unterminated code fence (truncated)."
 
 
@@ -469,6 +476,30 @@ def normalize_generated_code(
         # before the fence, so it is neither clearly a bare file nor clearly a
         # wrapped one. Committing it verbatim would ship prose and fence lines
         # into the file; fail closed instead.
+        raise GeneratedCodeError("Implementer returned ambiguous fenced output.")
+    elif first_fence is not None and ext == "py":
+        # The heuristics above can miss a lead-in that quotes code, e.g.
+        # "Changed parse() to handle X:". For Python we can decide exactly: a
+        # bare file parses (fences inside docstrings are fine); a chat-style
+        # reply with prose and fence lines does not.
+        try:
+            ast.parse(text)
+            code = text
+        except SyntaxError:
+            if not _opens_fenced_block(lines[first_fence:]):
+                raise GeneratedCodeError(
+                    "Implementer returned ambiguous fenced output."
+                )
+            code = _extract_fenced(lines[first_fence:], ext)
+    elif (
+        first_fence is not None
+        and ext not in _PROSE_EXTENSIONS
+        and _SENTENCE_START_RE.match(next(line for line in lines if line.strip()))
+        and _opens_fenced_block(lines[first_fence:])
+    ):
+        # No parser for this language: a reply that opens like a sentence and
+        # carries a fenced block is far more likely chat than a file. Fail
+        # closed rather than commit prose and fence lines into the file.
         raise GeneratedCodeError("Implementer returned ambiguous fenced output.")
     else:
         code = text  # the bare file, as the prompt requests
