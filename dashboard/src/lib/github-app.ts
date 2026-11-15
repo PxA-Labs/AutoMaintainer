@@ -189,6 +189,13 @@ export async function requestInstallUrl(githubToken: string | null | undefined):
         "The GitHub App install flow is not configured on the server. Ask your administrator to set it up."
       );
     }
+    if (res.status === 502) {
+      // The backend could not look up the GitHub user behind the token:
+      // usually a GitHub outage or a token revoked on GitHub's side.
+      throw new InstallUrlError(
+        "GitHub could not confirm your account. Try again in a moment; if it keeps failing, sign out and sign in with GitHub again."
+      );
+    }
     throw new InstallUrlError(
       detail ? `Could not start the install: ${detail}` : `Could not start the install (HTTP ${res.status}).`
     );

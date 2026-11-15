@@ -91,6 +91,22 @@ describe("readSetupResult", () => {
     expect(readSetupResult("?github_setup=requested")).toMatchObject({ tone: "info" });
   });
 
+  // Exact Location headers GET /github/app/setup sends: Python's
+  // f"{_dashboard_base_url()}/?{urlencode(params)}" with the dicts returned by
+  // main._complete_app_setup (params in insertion order).
+  it.each([
+    ["https://dash.example.test/?github_setup=linked&github_installation_id=12345678", "linked", "success"],
+    ["https://dash.example.test/?github_setup=requested", "requested", "info"],
+    ...["invalid", "unverified", "unavailable", "expired", "forbidden", "unauthorized", "conflict", "error"].map(
+      (outcome) => [`https://dash.example.test/?github_setup=${outcome}`, outcome, "error"]
+    ),
+  ])("understands the setup route's redirect %s", (location, outcome, tone) => {
+    const result = readSetupResult(new URL(location).search);
+    expect(result).toMatchObject({ outcome, tone });
+    if (outcome === "linked") expect(result?.message).toContain("installation 12345678");
+    expect(stripSetupParams(location)).toBe("/");
+  });
+
   it("does not echo an unknown outcome", () => {
     const result = readSetupResult("?github_setup=%3Cscript%3E");
     expect(result).toMatchObject({ outcome: "unknown", tone: "error" });
@@ -162,6 +178,11 @@ describe("requestInstallUrl", () => {
 
     vi.stubGlobal("fetch", vi.fn(async () => respond(503, { detail: "not configured" })));
     await expect(requestInstallUrl("gho")).rejects.toThrow(/not configured on the server/);
+  });
+
+  it("suggests a retry or a new sign-in when GitHub cannot identify the user (502)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => respond(502, { detail: "Could not identify the GitHub user" })));
+    await expect(requestInstallUrl("gho")).rejects.toThrow(/Try again in a moment.*sign in with GitHub again/);
   });
 
   it("refuses to follow a URL that is not GitHub's install page", async () => {
