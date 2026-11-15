@@ -60,9 +60,32 @@ By participating in this project, you agree to abide by our [Code of Conduct](./
 ## 3. Contribution Workflow
 
 ### Step 1: Pick or Propose an Issue
-- Browse existing open issues or check our pinned [Epics](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3Aarchitecture).
+- Find something to work on as described in [Finding work](#finding-work).
 - For significant changes or new features, please open an issue using the appropriate issue template before starting work.
 - Comment on the issue to request assignment.
+
+### Finding work
+[GitHub Issues](https://github.com/PxA-Labs/AutoMaintainer/issues) is the only
+backlog. The repository has no second, hand-maintained issue list. A file
+like that drifts out of date as soon as an issue is closed on GitHub.
+
+- **Epics** are large initiatives with the
+  [`epic`](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3Aepic)
+  label. Each epic body has a scope checklist. New issues should link to the
+  epic they belong to.
+- **Area labels**: `backend`, `frontend`, `security`, `testing`,
+  `architecture`, `documentation`, `ci/cd`, `docker`.
+- **Priority labels**: `critical`, `high-priority`, `medium-priority`,
+  `low-priority`.
+- **Starter issues**:
+  [`good first issue`](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  and
+  [`help wanted`](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
+- **Workflow labels** set by maintainers: `status: needs triage`,
+  `status: under review`, `status: on-hold`, `blocked`, `needs-discussion`.
+
+To keep the backlog in one place, do not add issue lists to markdown files.
+Link to a label query instead.
 
 ### Step 2: Create a Feature Branch
 Create a branch named according to the change type:
