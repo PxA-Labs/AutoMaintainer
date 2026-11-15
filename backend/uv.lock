@@ -318,7 +318,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters" },
     { name = "langgraph" },
     { name = "litellm", specifier = ">=1.105.1" },
-    { name = "mcp" },
+    { name = "mcp", specifier = ">=1.24,<2" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-exporter-prometheus" },
