@@ -6,3 +6,8 @@
 .dockerignore text eol=lf
 Dockerfile text eol=lf
 *.sh text eol=lf
+
+# Generated dependency files: uv writes LF on every platform, and the CI sync
+# check (scripts/export-backend-requirements.sh --check) compares byte-for-byte.
+backend/uv.lock text eol=lf
+backend/requirements.txt text eol=lf
