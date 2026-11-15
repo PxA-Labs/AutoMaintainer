@@ -184,7 +184,7 @@ function AdminDashboard() {
         <div className="text-center p-8">
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h1 className="text-2xl font-bold text-zinc-100 mb-2">Admin Access Required</h1>
-          <p className="text-zinc-500">Please sign in with an admin account.</p>
+          <p className="text-muted">Please sign in with an admin account.</p>
         </div>
       </div>
     );
@@ -204,7 +204,7 @@ function AdminDashboard() {
         <div className="text-center">
           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
           <h1 className="text-2xl font-bold text-zinc-100 mb-2">Failed to Load Metrics</h1>
-          <p className="text-zinc-500 mb-4">{error}</p>
+          <p className="text-muted mb-4">{error}</p>
           <button 
             onClick={() => { void fetchMetrics(); }}
             className="px-4 py-2 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg hover:bg-indigo-500/20 transition-colors"
@@ -282,9 +282,9 @@ function AdminDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-2xl font-bold">{activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}</h2>
-              <p className="text-zinc-500 text-sm">System administration and monitoring</p>
+              <p className="text-muted text-sm">System administration and monitoring</p>
             </div>
-            <div className="flex items-center gap-4 text-sm text-zinc-500">
+            <div className="flex items-center gap-4 text-sm text-muted">
               <span className="flex items-center gap-1">
                 <span className={`w-2 h-2 rounded-full ${metrics.system.supabaseHealthy ? 'bg-emerald-400' : 'bg-red-400'}`} />
                 Supabase: {metrics.system.supabaseHealthy === null ? 'Unknown' : metrics.system.supabaseHealthy ? 'Healthy' : 'Unhealthy'}
@@ -310,7 +310,7 @@ function AdminDashboard() {
 
         {/* Tab Content */}
         {activeTab === 'overview' && (
-          <div className="flex-1 overflow-y-auto space-y-6">
+          <ScrollPanel label="Overview" className="space-y-6">
             {/* Key Metrics Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <MetricCard 
@@ -395,12 +395,12 @@ function AdminDashboard() {
                       style={{ height: `${Math.max(barPercent(day.tokens, maxDailyTokens(metrics)), 2)}%`, minHeight: '4px' }}
                       title={`${day.date}: ${formatNumber(day.tokens)} tokens`}
                     />
-                    <span className="text-[10px] text-zinc-500">{day.date.split('-').slice(1).join('-')}</span>
+                    <span className="text-[10px] text-muted">{day.date.split('-').slice(1).join('-')}</span>
                   </div>
                 ))}
               </div>
             </ChartCard>
-          </div>
+          </ScrollPanel>
         )}
 
         {activeTab === 'orgs' && (
@@ -446,15 +446,39 @@ function MetricCard({ title, value, icon: Icon, color, subtitle }: {
     >
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{title}</p>
+          <p className="text-xs text-muted uppercase tracking-wider mb-1">{title}</p>
           <p className="text-3xl font-bold font-mono text-zinc-100">{value}</p>
-          {subtitle && <p className="text-xs text-zinc-500 mt-1">{subtitle}</p>}
+          {subtitle && <p className="text-xs text-muted mt-1">{subtitle}</p>}
         </div>
         <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${colors[color]}`}>
           <Icon className="w-6 h-6" />
         </div>
       </div>
     </motion.div>
+  );
+}
+
+/**
+ * Scrollable tab content. A scroll container with no focusable children
+ * (metric cards, read-only tables) is unreachable by keyboard, so it is made
+ * focusable itself and named as a region (WCAG 2.1.1, axe
+ * scrollable-region-focusable).
+ */
+function ScrollPanel({ label, className = '', children }: {
+  label: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      role="region"
+      aria-label={label}
+      // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- scrollable region must be keyboard reachable
+      tabIndex={0}
+      className={`flex-1 overflow-y-auto rounded-lg focus-visible:outline-2 focus-visible:outline-indigo-400 ${className}`}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -477,7 +501,7 @@ function ChartCard({ title, icon: Icon, children, className = '' }: {
 
 function OrgTable({ metrics }: { metrics: AdminMetrics }) {
   return (
-    <div className="flex-1 overflow-y-auto">
+    <ScrollPanel label="Organizations">
       <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl overflow-hidden">
         <div className="px-5 py-4 border-b border-zinc-800/50">
           <h3 className="font-medium text-zinc-300">Organizations ({metrics.orgs.total})</h3>
@@ -487,14 +511,14 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
             <thead>
               <tr className="border-b border-zinc-800/50 bg-zinc-800/30">
                 {['Organization', 'Plan', 'Members', 'Repos', 'Runs (24h)', 'Cost (30d)', 'Last Active'].map((col) => (
-                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">{col}</th>
+                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">{col}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
               {metrics.organizations.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-zinc-500">
+                  <td colSpan={7} className="px-4 py-12 text-center text-muted">
                     No organization metrics are available.
                   </td>
                 </tr>
@@ -503,7 +527,7 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
                   <tr key={organization.org_id} className="hover:bg-zinc-800/30">
                     <td className="px-4 py-3">
                       <div className="font-mono text-zinc-200">{organization.org_name}</div>
-                      <div className="text-xs text-zinc-500">{organization.slug}</div>
+                      <div className="text-xs text-muted">{organization.slug}</div>
                     </td>
                     <td className="px-4 py-3">
                       <span className="px-2 py-0.5 rounded text-xs font-medium bg-indigo-500/20 text-indigo-400">
@@ -516,7 +540,7 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
                     <td className="px-4 py-3 font-mono text-zinc-300">
                       ${Number(organization.estimated_cost_30d_usd || 0).toFixed(2)}
                     </td>
-                    <td className="px-4 py-3 text-xs text-zinc-500">
+                    <td className="px-4 py-3 text-xs text-muted">
                       {organization.last_run_at
                         ? new Date(organization.last_run_at).toLocaleString()
                         : "No runs"}
@@ -527,11 +551,11 @@ function OrgTable({ metrics }: { metrics: AdminMetrics }) {
             </tbody>
           </table>
         </div>
-        <div className="px-5 py-4 border-t border-zinc-800/50 text-xs text-zinc-500">
+        <div className="px-5 py-4 border-t border-zinc-800/50 text-xs text-muted">
           Showing {metrics.organizations.length} organization{metrics.organizations.length === 1 ? "" : "s"} in your organization scope.
         </div>
       </div>
-    </div>
+    </ScrollPanel>
   );
 }
 
@@ -599,7 +623,7 @@ function RunsTable() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <ScrollPanel label="Recent agent runs">
       <div className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl overflow-hidden">
         <div className="px-5 py-4 border-b border-zinc-800/50 flex items-center justify-between">
           <h3 className="font-medium text-zinc-300">Recent Agent Runs ({runs.length})</h3>
@@ -609,14 +633,14 @@ function RunsTable() {
             <thead>
               <tr className="border-b border-zinc-800/50 bg-zinc-800/30">
                 {['Run ID', 'Org', 'Repo', 'Mode', 'Status', 'Agent', 'Iteration', 'Created', 'Duration'].map((col) => (
-                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">{col}</th>
+                  <th key={col} className="px-4 py-3 text-left text-xs font-medium text-muted uppercase tracking-wider">{col}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800/50">
               {runs.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-zinc-500">No runs found</td>
+                  <td colSpan={9} className="px-4 py-12 text-center text-muted">No runs found</td>
                 </tr>
               ) : (
                 runs.slice(0, 50).map((run) => (
@@ -630,8 +654,8 @@ function RunsTable() {
                     <td className="px-4 py-3">{statusBadge(run.status)}</td>
                     <td className="px-4 py-3 text-zinc-400">{run.current_agent || '-'}</td>
                     <td className="px-4 py-3 text-zinc-300">{run.iteration || 0}/{run.max_iterations || 3}</td>
-                    <td className="px-4 py-3 text-xs text-zinc-500">{new Date(run.created_at).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-xs text-zinc-500">
+                    <td className="px-4 py-3 text-xs text-muted">{new Date(run.created_at).toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs text-muted">
                       {run.completed_at && run.started_at 
                         ? Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000) + 's'
                         : run.status === 'running' ? 'In progress' : '-'
@@ -644,13 +668,13 @@ function RunsTable() {
           </table>
         </div>
       </div>
-    </div>
+    </ScrollPanel>
   );
 }
 
 function UsageTable({ metrics }: { metrics: AdminMetrics }) {
   return (
-    <div className="flex-1 overflow-y-auto space-y-6">
+    <ScrollPanel label="Usage" className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="Usage by Event Type" icon={Activity}>
           <div className="space-y-3">
@@ -700,18 +724,18 @@ function UsageTable({ metrics }: { metrics: AdminMetrics }) {
                 style={{ height: `${Math.max(barPercent(day.tokens, maxDailyTokens(metrics)), 2)}%`, minHeight: '4px' }}
                 title={`${day.date}: ${formatNumber(day.tokens)} tokens • ${formatCost(day.costCents)}`}
               />
-              <span className="text-[10px] text-zinc-500">{day.date.split('-').slice(1).join('-')}</span>
+              <span className="text-[10px] text-muted">{day.date.split('-').slice(1).join('-')}</span>
             </div>
           ))}
         </div>
       </ChartCard>
-    </div>
+    </ScrollPanel>
   );
 }
 
 function SystemHealth({ metrics }: { metrics: AdminMetrics }) {
   return (
-    <div className="flex-1 overflow-y-auto space-y-6">
+    <ScrollPanel label="System health" className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <HealthCard 
           title="Supabase Database" 
@@ -760,11 +784,11 @@ function SystemHealth({ metrics }: { metrics: AdminMetrics }) {
 
         <ChartCard title="Recent Alerts" icon={AlertCircle}>
           <div className="space-y-2">
-            <p className="text-sm text-zinc-500">No live alert feed is configured for this dashboard.</p>
+            <p className="text-sm text-muted">No live alert feed is configured for this dashboard.</p>
           </div>
         </ChartCard>
       </div>
-    </div>
+    </ScrollPanel>
   );
 }
 
@@ -807,7 +831,7 @@ function HealthCard({ title, status, icon: Icon, checks }: {
                 check.status === 'unknown' ? 'bg-zinc-500' :
                 'bg-red-400'
               }`} />
-              {check.detail && <span className="text-xs text-zinc-500">{check.detail}</span>}
+              {check.detail && <span className="text-xs text-muted">{check.detail}</span>}
             </div>
           </div>
         ))}
