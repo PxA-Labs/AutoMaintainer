@@ -23,6 +23,17 @@ updates:
     labels:
       - "dependencies"
       - "javascript"
+    groups:
+      # next and eslint-config-next are pinned to the same exact version.
+      nextjs:
+        patterns:
+          - "next"
+          - "eslint-config-next"
+      # tailwindcss core and its PostCSS plugin must stay on the same version.
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
