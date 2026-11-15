@@ -35,7 +35,15 @@ from urllib.parse import urlsplit
 # Celery integration
 from celery_app import celery_app
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
-from github_app import handle_github_webhook
+from github_app import (
+    AUTH_MODE_APP,
+    GitHubAuthError,
+    InstallationClaimError,
+    credentials_for_installation,
+    get_auth_mode,
+    handle_github_webhook,
+    verify_installation_claim,
+)
 
 # Observability
 from observability import (
@@ -840,6 +848,41 @@ async def inline_assist(
 # --- File operations ---
 
 
+async def _github_client_for_repo(repo_name: str, org_id: str) -> Github:
+    """PyGithub client acting as ``repo_name``'s GitHub App installation.
+
+    The installation comes from the org-scoped repositories row, so a caller
+    can only ever obtain a client for an installation linked to their own org.
+    In the explicit single-tenant ``pat`` mode (see github_app) this is the
+    GITHUB_TOKEN client instead, and no installation lookup is needed.
+    """
+    installation_id = None
+    try:
+        if get_auth_mode() == AUTH_MODE_APP:
+            from agents import supabase as agents_supabase
+
+            if not agents_supabase:
+                raise HTTPException(status_code=503, detail="Database not configured")
+            _, installation_id = await validate_repo_access(
+                repo_name, org_id, "", agents_supabase
+            )
+        creds = credentials_for_installation(
+            installation_id, purpose=f"{repo_name} file API"
+        )
+        token = await asyncio.to_thread(creds.token)
+    except GitHubAuthError as e:
+        logger.error(f"No GitHub credentials for {repo_name}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub access is not configured for this repository",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise internal_error(502, "Could not obtain GitHub credentials", e)
+    return Github(token)
+
+
 def _get_github_repo(gh: Github, repo_name: str):
     try:
         return gh.get_repo(repo_name)
@@ -893,10 +936,7 @@ async def update_repo_file(
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, payload.file_path)
 
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="GitHub token not configured")
-    gh = Github(token)
+    gh = await _github_client_for_repo(repo_name, org_id)
     repo = _get_github_repo(gh, repo_name)
     try:
         file = repo.get_contents(payload.file_path)
@@ -940,10 +980,7 @@ async def create_repo_file(
     repo_dir = get_safe_repo_dir(repo_name)
     target_path = get_safe_target_path(repo_dir, actual_path)
 
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="GitHub token not configured")
-    gh = Github(token)
+    gh = await _github_client_for_repo(repo_name, org_id)
     repo = _get_github_repo(gh, repo_name)
 
     message = (
@@ -971,10 +1008,7 @@ async def delete_repo_file(
     if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
         raise HTTPException(status_code=400, detail="Invalid file path")
 
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="GitHub token not configured")
-    gh = Github(token)
+    gh = await _github_client_for_repo(repo_name, org_id)
     repo = _get_github_repo(gh, repo_name)
 
     try:
@@ -1036,11 +1070,7 @@ async def propose_changes(
         raise HTTPException(status_code=503, detail="Database not configured")
     await validate_repo_access(repo_name, org_id, user_id, agents_supabase)
 
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="GitHub token not configured")
-
-    gh = Github(token)
+    gh = await _github_client_for_repo(repo_name, org_id)
     repo = _get_github_repo(gh, repo_name)
 
     # Get default branch
@@ -1117,6 +1147,108 @@ async def propose_changes(
         except Exception:
             pass
         raise internal_error(500, "Failed to propose changes", e)
+
+
+# --- GitHub App installation claim ---
+#
+# The only way an installation becomes linked to an org: clients can no longer
+# insert github_installations rows (the RLS insert policy is service-role
+# only), and this endpoint proves ownership against GitHub before writing.
+
+
+class InstallationClaimRequest(BaseModel):
+    installation_id: int
+
+
+@app.post("/github/installations/claim")
+async def claim_github_installation(
+    payload: InstallationClaimRequest,
+    user: dict = Depends(get_current_user),
+    x_github_user_token: Annotated[str | None, Header()] = None,
+):
+    """Link a GitHub App installation to the caller's org.
+
+    Requires an org owner/admin, plus the caller's GitHub user token in
+    ``X-GitHub-User-Token`` (the dashboard sends the Supabase GitHub
+    provider_token). GitHub must confirm the installation is accessible to
+    that user and that its account is the user or an org they administer
+    (github_app.verify_installation_claim). An installation already linked to
+    another org is never moved (409).
+    """
+    if user.get("role") not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization owners and admins can link GitHub installations",
+        )
+    if payload.installation_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid installation id")
+    user_token = (x_github_user_token or "").strip()
+    if not user_token:
+        raise HTTPException(
+            status_code=400, detail="Missing X-GitHub-User-Token header"
+        )
+
+    from agents import supabase as sb
+
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    org_id = user["org_id"]
+
+    try:
+        record = await verify_installation_claim(user_token, payload.installation_id)
+    except InstallationClaimError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except Exception as e:
+        raise internal_error(502, "Could not verify the installation with GitHub", e)
+
+    try:
+        existing = await asyncio.to_thread(
+            lambda: sb.table("github_installations")
+            .select("id, org_id")
+            .eq("id", record["id"])
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        raise internal_error(500, "Failed to look up installation", e)
+    rows = existing.data if isinstance(existing.data, list) else []
+    if rows and str(rows[0].get("org_id")) != str(org_id):
+        logger.warning(
+            f"Org {org_id} tried to claim installation {record['id']}, "
+            f"which is linked to org {rows[0].get('org_id')}"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="This installation is already linked to another organization",
+        )
+
+    row = {**record, "org_id": org_id}
+    try:
+        if rows:
+            # Same org re-claiming: refresh GitHub-derived fields only.
+            await asyncio.to_thread(
+                lambda: sb.table("github_installations")
+                .update(row)
+                .eq("id", record["id"])
+                .eq("org_id", org_id)
+                .execute()
+            )
+        else:
+            # A plain insert, not an upsert: if another org links the same id
+            # concurrently, the primary key rejects this write instead of
+            # moving the row.
+            await asyncio.to_thread(
+                lambda: sb.table("github_installations").insert(row).execute()
+            )
+    except Exception as e:
+        raise internal_error(409, "Failed to link installation", e)
+
+    return {
+        "status": "claimed",
+        "installation_id": record["id"],
+        "account_login": record["account_login"],
+        "account_type": record["account_type"],
+    }
 
 
 # --- Terminal WebSocket ---

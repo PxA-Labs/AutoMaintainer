@@ -41,6 +41,16 @@ from events import (
 # Rate limiting
 from rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
 
+# GitHub credentials (App installation tokens, or the single-tenant PAT)
+from github_app import (
+    AUTH_MODE_APP,
+    AUTH_MODE_PAT,
+    GitHubAuthError,
+    GitHubCredentials,
+    credentials_for_installation,
+    get_auth_mode,
+)
+
 load_dotenv()
 current_run_id = ContextVar("current_run_id")
 current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
@@ -48,8 +58,45 @@ current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
 )
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-gh = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+# GitHub credentials of the run executing in the current context. Bound by
+# run_agent_loop from the repository's App installation (or, in the explicit
+# single-tenant ``pat`` mode, GITHUB_TOKEN). A ContextVar rather than a module
+# global because one worker process can execute runs for different tenants,
+# and LangGraph node tasks inherit the context of run_agent_loop.
+_run_github_credentials: ContextVar[Optional[GitHubCredentials]] = ContextVar(
+    "run_github_credentials", default=None
+)
+
+
+class _RunGithubClient:
+    """Stands in for a PyGithub ``Github`` client bound to the current run.
+
+    The nodes use the module-level ``gh`` (``if gh:`` / ``gh.get_repo(...)``).
+    This proxy keeps that interface while resolving every access against the
+    current run's credentials, so a token refreshed mid-run is picked up and
+    no run can act with another run's (or a global) credential. Falsy when the
+    run has no GitHub credentials, which the nodes already handle.
+    """
+
+    def __bool__(self) -> bool:
+        return _run_github_credentials.get() is not None
+
+    def __getattr__(self, name):
+        creds = _run_github_credentials.get()
+        if creds is None:
+            raise RuntimeError("No GitHub credentials are bound to this run")
+        return getattr(creds.client(), name)
+
+
+gh = _RunGithubClient()
+
+
+def _run_github_token() -> Optional[str]:
+    """Token for git operations of the current run, or None (anonymous)."""
+    creds = _run_github_credentials.get()
+    return creds.token() if creds else None
+
+
 # Largest file (in characters) the Implementer will rewrite in full.
 IMPLEMENTER_MAX_FILE_CHARS = int(os.getenv("IMPLEMENTER_MAX_FILE_CHARS", "60000"))
 
@@ -1016,7 +1063,8 @@ async def architect_node(state: AgentState):
     # exposed it in argv. Exit codes and timeouts are handled in the helper;
     # on failure we continue with whatever cached clone exists.
     try:
-        if not await sync_repo_clone(repo, repo_dir, GITHUB_TOKEN):
+        clone_token = await asyncio.to_thread(_run_github_token)
+        if not await sync_repo_clone(repo, repo_dir, clone_token):
             logger.warning(f"Could not sync clone of {repo}; using cached copy")
     except Exception as e:
         logger.warning(f"Failed to sync clone of {repo}, continuing with cache: {e}")
@@ -1972,12 +2020,55 @@ async def _fail_run(
     }
 
 
+async def _bind_run_github_credentials(
+    run_id: str, repo_name: str, github_installation_id: Optional[int]
+) -> Optional[str]:
+    """Bind this run's GitHub credentials; return a failure message or None.
+
+    ``app`` mode: the installation token is minted up front so a revoked or
+    misconfigured installation fails the run before any LLM work, and a
+    missing installation id is refused (credentials_for_installation logs it
+    at ERROR) instead of falling back to GITHUB_TOKEN. ``pat`` mode without a
+    GITHUB_TOKEN keeps the old behaviour: the run proceeds without GitHub
+    access and the nodes degrade as they did before.
+    """
+    _run_github_credentials.set(None)
+    purpose = f"run {run_id} on {repo_name}"
+    mode = None
+    try:
+        mode = get_auth_mode()
+        creds = credentials_for_installation(github_installation_id, purpose=purpose)
+        if creds.mode == AUTH_MODE_APP:
+            await asyncio.to_thread(creds.token)
+    except GitHubAuthError as e:
+        if mode == AUTH_MODE_PAT:
+            logger.warning("%s runs without GitHub access: %s", purpose, e)
+            return None
+        return f"GitHub credentials unavailable: {e}"
+    except Exception:
+        logger.exception("Could not obtain a GitHub installation token for %s", purpose)
+        return (
+            "Could not obtain a GitHub token for this repository's App "
+            "installation. Check that the App is still installed."
+        )
+    _run_github_credentials.set(creds)
+    return None
+
+
 async def run_agent_loop(
     repo_name: str,
     target_issue: int | None = None,
     run_id: str = None,
     emitter: Optional[EventEmitter] = None,
+    github_installation_id: Optional[int] = None,
 ):
+    """Run the agent graph for ``repo_name``.
+
+    ``github_installation_id`` is the GitHub App installation of the
+    repository (``repositories.github_installation_id``); every GitHub call of
+    the run acts with that installation's token. In ``app`` auth mode a run
+    without one is refused rather than run with the global PAT.
+    """
     if not run_id:
         import uuid
 
@@ -2030,6 +2121,14 @@ async def run_agent_loop(
             )
         )
         return {"status": "failed", "error": error_msg}
+
+    auth_failure = await _bind_run_github_credentials(
+        run_id, repo_name, github_installation_id
+    )
+    if auth_failure:
+        return await _fail_run(
+            run_id, "GITHUB_AUTH_UNAVAILABLE", auth_failure, AgentPhase.SYSTEM, None
+        )
 
     initial_state = {
         "repo_name": repo_name,

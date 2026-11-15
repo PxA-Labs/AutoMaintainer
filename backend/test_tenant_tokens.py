@@ -1,0 +1,675 @@
+"""Per-tenant GitHub credentials (epic #412): installation tokens per
+repository, the explicit PAT fallback, verified installation claims, and
+repository sync never moving a repository between orgs.
+
+No real GitHub or Supabase: tokens are minted by a fake, user-token calls go
+through httpx.MockTransport, and the database is an in-memory double.
+"""
+
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+import agents
+import github_app
+import main
+import tasks
+from events import NullEmitter
+from main import app
+
+client = TestClient(app)
+
+
+# --- fixtures ----------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def clean(monkeypatch):
+    monkeypatch.delenv("GITHUB_AUTH_MODE", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", None)
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", None)
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY_PATH", None)
+    github_app._installation_token_cache.clear()
+    yield
+    github_app._installation_token_cache.clear()
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def app_creds(monkeypatch):
+    """GitHub App configured; installation N mints token 'inst-N-token'."""
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
+    minted = []
+
+    def mint(installation_id):
+        minted.append(int(installation_id))
+        return f"inst-{int(installation_id)}-token"
+
+    monkeypatch.setattr(github_app, "get_installation_token_sync", mint)
+    return minted
+
+
+class Rows:
+    """PostgREST query double over a list of dict rows (eq/in_ filters)."""
+
+    def __init__(self, store, table):
+        self.store, self.table = store, table
+        self.filters = []
+        self.op = ("select", None)
+
+    def select(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a):
+        return self
+
+    def single(self):
+        self.op = ("single", None)
+        return self
+
+    def eq(self, col, val):
+        self.filters.append(lambda r: r.get(col) == val)
+        return self
+
+    def in_(self, col, vals):
+        self.filters.append(lambda r: r.get(col) in vals)
+        return self
+
+    def insert(self, row):
+        self.op = ("insert", row)
+        return self
+
+    def update(self, row):
+        self.op = ("update", row)
+        return self
+
+    def upsert(self, row, on_conflict=None):
+        self.op = ("upsert", row)
+        return self
+
+    def execute(self):
+        rows = self.store.setdefault(self.table, [])
+        kind, row = self.op
+        self.store.setdefault("_writes", []).append((self.table, kind, row))
+        matched = [r for r in rows if all(f(r) for f in self.filters)]
+        if kind == "insert":
+            if any(r["id"] == row["id"] for r in rows):
+                raise Exception("duplicate key value violates unique constraint")
+            rows.append(dict(row))
+        elif kind in ("update", "upsert"):
+            hits = (
+                matched
+                if kind == "update"
+                else [r for r in rows if r["id"] == row["id"]]
+            )
+            for r in hits:
+                r.update(row)
+            if kind == "upsert" and not hits:
+                rows.append(dict(row))
+        elif kind == "single":
+            return SimpleNamespace(data=matched[0] if matched else None)
+        return SimpleNamespace(data=matched)
+
+
+def fake_db(**tables):
+    store = {k: [dict(r) for r in v] for k, v in tables.items()}
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: Rows(store, name)
+    return sb, store
+
+
+def writes(store, table, kind=None):
+    return [
+        row
+        for t, k, row in store.get("_writes", [])
+        if t == table
+        and k in ("insert", "update", "upsert")
+        and (kind is None or k == kind)
+    ]
+
+
+# --- auth mode / PAT fallback rules -----------------------------------------
+
+
+def test_mode_defaults_to_app_when_app_credentials_are_configured(app_creds):
+    assert github_app.get_auth_mode() == "app"
+
+
+def test_mode_defaults_to_pat_without_app_credentials():
+    assert github_app.get_auth_mode() == "pat"
+
+
+def test_pat_mode_logs_a_startup_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="github_app"):
+        github_app._log_auth_mode_at_startup()
+    assert "single-tenant" in caplog.text
+
+
+def test_explicit_mode_overrides_default(monkeypatch, app_creds):
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "pat")
+    assert github_app.get_auth_mode() == "pat"
+
+
+def test_unknown_mode_is_rejected_not_guessed(monkeypatch):
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "apps")
+    with pytest.raises(github_app.GitHubAuthError):
+        github_app.get_auth_mode()
+
+
+def test_app_mode_uses_the_installation_token_even_if_a_pat_is_set(
+    monkeypatch, app_creds
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    creds = github_app.credentials_for_installation(7, purpose="t")
+    assert creds.token() == "inst-7-token"
+
+
+def test_app_mode_refuses_pat_fallback_and_logs_loudly(monkeypatch, app_creds, caplog):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    with caplog.at_level(logging.ERROR, logger="github_app"):
+        with pytest.raises(github_app.GitHubAuthError):
+            github_app.credentials_for_installation(None, purpose="run r1")
+    assert "REFUSING" in caplog.text and "run r1" in caplog.text
+
+
+def test_explicit_app_mode_without_app_credentials_is_refused(monkeypatch):
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "app")
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    with pytest.raises(github_app.GitHubAuthError):
+        github_app.credentials_for_installation(7, purpose="t")
+
+
+def test_pat_mode_uses_github_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    creds = github_app.credentials_for_installation(7, purpose="t")
+    assert creds.mode == "pat" and creds.token() == "global-pat"
+    assert "global-pat" not in repr(creds)
+
+
+def test_pat_mode_without_github_token_is_an_error():
+    with pytest.raises(github_app.GitHubAuthError):
+        github_app.credentials_for_installation(7, purpose="t")
+
+
+# --- token cache (fake clock) ------------------------------------------------
+
+
+def test_installation_token_is_cached_until_shortly_before_expiry(monkeypatch):
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    issued = []
+
+    def get_installation_auth(installation_id):
+        issued.append(installation_id)
+        return SimpleNamespace(
+            token=f"tok-{len(issued)}",
+            expires_at=datetime.fromtimestamp(now[0] + 3600, tz=timezone.utc),
+        )
+
+    integration = MagicMock(get_installation_auth=get_installation_auth)
+    monkeypatch.setattr(github_app, "get_github_integration", lambda: integration)
+
+    assert github_app.get_installation_token_sync(5) == "tok-1"
+    now[0] += 3600 - github_app.TOKEN_REFRESH_MARGIN_SECONDS - 1
+    assert github_app.get_installation_token_sync(5) == "tok-1"
+    now[0] += 2  # now inside the refresh margin
+    assert github_app.get_installation_token_sync(5) == "tok-2"
+    # Separate installations never share a cached token.
+    assert github_app.get_installation_token_sync(6) == "tok-3"
+
+
+def test_credentials_client_is_rebuilt_after_token_refresh(monkeypatch):
+    tokens = iter(["t1", "t1", "t2"])
+    monkeypatch.setattr(
+        github_app, "get_installation_token_sync", lambda _id: next(tokens)
+    )
+    creds = github_app.GitHubCredentials(installation_id=1)
+    first = creds.client()
+    assert creds.client() is first
+    assert creds.client() is not first
+
+
+# --- token selection per repository: /repo routes ---------------------------
+
+
+REPO_ROWS = [
+    {"id": 1, "org_id": "org-a", "full_name": "a/app", "github_installation_id": 11},
+    {"id": 2, "org_id": "org-b", "full_name": "b/app", "github_installation_id": 22},
+    {
+        "id": 3,
+        "org_id": "org-a",
+        "full_name": "a/legacy",
+        "github_installation_id": None,
+    },
+]
+
+
+@pytest.fixture
+def repo_routes(monkeypatch, tmp_path):
+    """Authenticated member of ``org`` hitting the file API; records tokens."""
+    monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path))
+    sb, _ = fake_db(repositories=REPO_ROWS)
+    monkeypatch.setattr(agents, "supabase", sb)
+    used = []
+    repo = MagicMock()
+    repo.get_contents.return_value = SimpleNamespace(path="a.py", sha="s")
+    repo.default_branch = "main"
+    repo.create_pull.return_value = SimpleNamespace(number=1, html_url="https://pr")
+
+    def fake_github(token):
+        used.append(token)
+        return MagicMock(get_repo=lambda _name: repo)
+
+    monkeypatch.setattr(main, "Github", fake_github)
+
+    def as_member(org):
+        async def user():
+            return {"user_id": "u", "org_id": org, "role": "member", "email": "e"}
+
+        app.dependency_overrides[main.get_current_user] = user
+        app.dependency_overrides[main.require_repo_access] = lambda: org
+
+    return SimpleNamespace(used=used, as_member=as_member)
+
+
+def test_each_repo_route_uses_its_own_installation_token(
+    monkeypatch, app_creds, repo_routes
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+
+    repo_routes.as_member("org-a")
+    r1 = client.post("/repo/a/app/file", json={"file_path": "a.py", "content": "x"})
+    repo_routes.as_member("org-b")
+    r2 = client.post("/repo/b/app/file", json={"file_path": "a.py", "content": "x"})
+
+    assert r1.status_code == r2.status_code == 200
+    assert repo_routes.used == ["inst-11-token", "inst-22-token"]
+    assert app_creds == [11, 22]
+
+
+def test_repo_route_never_uses_another_orgs_installation(app_creds, repo_routes):
+    # org-a asking for org-b's repository finds no row in its own org.
+    repo_routes.as_member("org-a")
+    r = client.delete("/repo/b/app/file?file_path=a.py")
+    assert r.status_code == 404
+    assert repo_routes.used == [] and app_creds == []
+
+
+def test_repo_without_installation_is_refused_in_app_mode(
+    monkeypatch, app_creds, repo_routes
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    repo_routes.as_member("org-a")
+    r = client.post("/repo/a/legacy/file/create", json={"file_path": "b.py"})
+    assert r.status_code == 503
+    assert repo_routes.used == []
+
+
+def test_pat_mode_repo_route_uses_github_token(monkeypatch, repo_routes):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    repo_routes.as_member("org-a")
+    r = client.post("/repo/a/app/file", json={"file_path": "a.py", "content": "x"})
+    assert r.status_code == 200
+    assert repo_routes.used == ["global-pat"]
+
+
+def test_propose_changes_uses_installation_token(app_creds, repo_routes):
+    repo_routes.as_member("org-b")
+    r = client.post(
+        "/repo/b/app/propose-changes",
+        json={"title": "t", "changes": [{"path": "a.py", "content": "x"}]},
+    )
+    assert r.status_code == 200
+    assert repo_routes.used == ["inst-22-token"]
+
+
+# --- token selection per run: run_agent_loop --------------------------------
+
+
+class GraphProbe:
+    """Stands in for the compiled graph; records what a node would see."""
+
+    def __init__(self, delay=0.0):
+        self.seen = []
+        self.delay = delay
+
+    async def astream(self, state, stream_mode=None):
+        await asyncio.sleep(self.delay)
+        self.seen.append(
+            (state["repo_name"], bool(agents.gh), agents._run_github_token())
+        )
+        yield {**state, "log_messages": []}
+
+
+@pytest.fixture
+def probe(monkeypatch):
+    monkeypatch.setattr(agents, "supabase", None)
+    graph = GraphProbe()
+    monkeypatch.setattr(agents, "app", graph)
+    return graph
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runs_each_act_with_their_own_installation(app_creds, probe):
+    probe.delay = 0.01
+    results = await asyncio.gather(
+        agents.run_agent_loop(
+            "a/app", run_id="ra", emitter=NullEmitter(), github_installation_id=11
+        ),
+        agents.run_agent_loop(
+            "b/app", run_id="rb", emitter=NullEmitter(), github_installation_id=22
+        ),
+    )
+    assert [r["status"] for r in results] == ["completed", "completed"]
+    assert sorted(probe.seen) == [
+        ("a/app", True, "inst-11-token"),
+        ("b/app", True, "inst-22-token"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gh_proxy_resolves_to_the_runs_installation_client(
+    monkeypatch, app_creds
+):
+    clients = {}
+
+    def client_for(self):
+        return clients.setdefault(self.installation_id, MagicMock())
+
+    monkeypatch.setattr(github_app.GitHubCredentials, "client", client_for)
+    token = agents._run_github_credentials.set(
+        github_app.GitHubCredentials(installation_id=4)
+    )
+    try:
+        agents.gh.get_repo("o/r")
+    finally:
+        agents._run_github_credentials.reset(token)
+    clients[4].get_repo.assert_called_once_with("o/r")
+    assert not agents.gh  # nothing bound outside a run
+
+
+@pytest.mark.asyncio
+async def test_run_without_installation_is_refused_in_app_mode(
+    monkeypatch, app_creds, probe, caplog
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    with caplog.at_level(logging.ERROR, logger="github_app"):
+        result = await agents.run_agent_loop(
+            "a/app", run_id="r1", emitter=NullEmitter()
+        )
+    assert result["status"] == "failed"
+    assert result["error_code"] == "GITHUB_AUTH_UNAVAILABLE"
+    assert probe.seen == []  # the graph never ran
+    assert "REFUSING" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_fails_fast_when_installation_token_cannot_be_minted(
+    monkeypatch, probe
+):
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
+
+    def revoked(_id):
+        raise RuntimeError("404 installation not found")
+
+    monkeypatch.setattr(github_app, "get_installation_token_sync", revoked)
+    result = await agents.run_agent_loop(
+        "a/app", run_id="r1", emitter=NullEmitter(), github_installation_id=11
+    )
+    assert result["error_code"] == "GITHUB_AUTH_UNAVAILABLE"
+    assert "404" not in result["error"]
+    assert probe.seen == []
+
+
+@pytest.mark.asyncio
+async def test_pat_mode_run_uses_github_token(monkeypatch, probe):
+    monkeypatch.setenv("GITHUB_TOKEN", "global-pat")
+    await agents.run_agent_loop(
+        "a/app", run_id="r1", emitter=NullEmitter(), github_installation_id=11
+    )
+    assert probe.seen == [("a/app", True, "global-pat")]
+
+
+@pytest.mark.asyncio
+async def test_pat_mode_without_token_runs_without_github_access(probe):
+    result = await agents.run_agent_loop("a/app", run_id="r1", emitter=NullEmitter())
+    assert result["status"] == "completed"
+    assert probe.seen == [("a/app", False, None)]
+
+
+def test_celery_task_passes_installation_id_to_the_real_run_agent_loop():
+    kwargs = tasks._agent_loop_kwargs(
+        repo_name="o/r", target_issue=None, run_id="r", github_installation_id=9
+    )
+    assert kwargs["github_installation_id"] == 9
+
+
+# --- installation claim -----------------------------------------------------
+
+
+def github_api(installations, login="alice", memberships=None, user_status=200):
+    """MockTransport for the user-token GitHub endpoints."""
+    memberships = memberships or {}
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer gh-user-token"
+        path = request.url.path
+        if path == "/user":
+            return httpx.Response(user_status, json={"login": login})
+        if path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": len(installations),
+                    "installations": installations,
+                },
+            )
+        if path.startswith("/user/memberships/orgs/"):
+            org = path.rsplit("/", 1)[1]
+            if org in memberships:
+                return httpx.Response(200, json=memberships[org])
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    factory = lambda: httpx.AsyncClient(  # noqa: E731
+        base_url=github_app.GITHUB_API_URL, transport=transport
+    )
+    return factory, seen
+
+
+def installation(iid=555, login="acme", account_type="Organization"):
+    return {
+        "id": iid,
+        "account": {"login": login, "type": account_type, "avatar_url": "https://a"},
+        "target_type": account_type,
+        "repository_selection": "selected",
+        "permissions": {"contents": "write"},
+        "events": ["push"],
+        "suspended_at": None,
+    }
+
+
+@pytest.fixture
+def claim(monkeypatch):
+    def setup(role="owner", org="org-a", installations=(), **api):
+        sb, store = fake_db(github_installations=installations)
+        monkeypatch.setattr(agents, "supabase", sb)
+
+        async def user():
+            return {"user_id": "u", "org_id": org, "role": role, "email": "e"}
+
+        app.dependency_overrides[main.get_current_user] = user
+        return store
+
+    def use_api(*args, **kwargs):
+        factory, seen = github_api(*args, **kwargs)
+        monkeypatch.setattr(github_app, "_user_api_client", factory)
+        return seen
+
+    return SimpleNamespace(setup=setup, api=use_api)
+
+
+def post_claim(iid=555, token="gh-user-token"):
+    headers = {"X-GitHub-User-Token": token} if token else {}
+    return client.post(
+        "/github/installations/claim", json={"installation_id": iid}, headers=headers
+    )
+
+
+def test_claim_links_installation_the_user_administers(claim):
+    store = claim.setup()
+    claim.api(
+        [installation()], memberships={"acme": {"state": "active", "role": "admin"}}
+    )
+
+    r = post_claim()
+
+    assert r.status_code == 200, r.text
+    [row] = writes(store, "github_installations", "insert")
+    assert row["id"] == 555 and row["org_id"] == "org-a"
+    assert row["account_login"] == "acme" and row["permissions"] == {
+        "contents": "write"
+    }
+
+
+def test_claim_of_users_own_account_installation(claim):
+    store = claim.setup(role="admin")
+    claim.api([installation(login="Alice", account_type="User")], login="alice")
+    assert post_claim().status_code == 200
+    assert writes(store, "github_installations", "insert")
+
+
+def test_claim_rejects_installation_not_accessible_to_user(claim):
+    store = claim.setup()
+    claim.api([installation(iid=999)])
+    r = post_claim(555)
+    assert r.status_code == 403
+    assert writes(store, "github_installations") == []
+
+
+def test_claim_rejects_org_collaborator_who_is_not_org_admin(claim):
+    store = claim.setup()
+    claim.api(
+        [installation()], memberships={"acme": {"state": "active", "role": "member"}}
+    )
+    assert post_claim().status_code == 403
+    assert writes(store, "github_installations") == []
+
+
+def test_claim_rejects_another_users_personal_installation(claim):
+    store = claim.setup()
+    claim.api([installation(login="mallory", account_type="User")], login="alice")
+    assert post_claim().status_code == 403
+    assert writes(store, "github_installations") == []
+
+
+@pytest.mark.parametrize("role", ["member", "viewer", None])
+def test_claim_requires_org_owner_or_admin(claim, role):
+    store = claim.setup(role=role)
+    seen = claim.api([installation()])
+    assert post_claim().status_code == 403
+    assert seen == []  # GitHub is not even asked
+    assert writes(store, "github_installations") == []
+
+
+def test_claim_requires_github_user_token(claim):
+    claim.setup()
+    seen = claim.api([installation()])
+    assert post_claim(token=None).status_code == 400
+    assert seen == []
+
+
+def test_claim_with_invalid_user_token_is_401(claim):
+    claim.setup()
+    claim.api([installation()], user_status=401)
+    assert post_claim().status_code == 401
+
+
+def test_claim_never_moves_installation_from_another_org(claim):
+    store = claim.setup(
+        installations=[{"id": 555, "org_id": "org-b", "account_login": "acme"}]
+    )
+    claim.api(
+        [installation()], memberships={"acme": {"state": "active", "role": "admin"}}
+    )
+
+    assert post_claim().status_code == 409
+    assert writes(store, "github_installations") == []
+    assert store["github_installations"][0]["org_id"] == "org-b"
+
+
+def test_reclaim_by_same_org_updates_in_place(claim):
+    store = claim.setup(
+        installations=[{"id": 555, "org_id": "org-a", "account_login": "old"}]
+    )
+    claim.api(
+        [installation()], memberships={"acme": {"state": "active", "role": "admin"}}
+    )
+
+    assert post_claim().status_code == 200
+    [row] = store["github_installations"]
+    assert row["org_id"] == "org-a" and row["account_login"] == "acme"
+    assert writes(store, "github_installations", "insert") == []
+
+
+# --- repository sync ---------------------------------------------------------
+
+
+def _gh_repo(rid, full_name):
+    owner, name = full_name.split("/")
+    return {
+        "id": rid,
+        "full_name": full_name,
+        "name": name,
+        "owner_login": owner,
+        "owner_type": "Organization",
+        "private": True,
+        "default_branch": "main",
+        "description": None,
+        "language": None,
+        "topics": [],
+        "avatar_url": "",
+        "html_url": "",
+        "archived": False,
+        "disabled": False,
+        "pushed_at": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_never_reassigns_a_repository_owned_by_another_org(caplog):
+    sb, store = fake_db(
+        repositories=[
+            {"id": 1, "org_id": "org-victim", "full_name": "v/app"},
+            {"id": 2, "org_id": "org-a", "full_name": "a/mine"},
+        ]
+    )
+    repos = [_gh_repo(1, "v/app"), _gh_repo(2, "a/mine"), _gh_repo(3, "a/new")]
+
+    with patch.object(
+        github_app, "get_installation_repositories", new=AsyncMock(return_value=repos)
+    ), caplog.at_level(logging.WARNING, logger="github_app"):
+        synced = await github_app.sync_installation_repositories(sb, 7, "org-a")
+
+    assert synced == 2
+    by_id = {r["id"]: r for r in store["repositories"]}
+    assert by_id[1]["org_id"] == "org-victim"
+    assert "github_installation_id" not in by_id[1]
+    assert by_id[2]["org_id"] == "org-a" and by_id[2]["github_installation_id"] == 7
+    assert by_id[3]["org_id"] == "org-a"
+    assert [w["id"] for w in writes(store, "repositories", "upsert")] == [2, 3]
+    assert "already belongs to org org-victim" in caplog.text

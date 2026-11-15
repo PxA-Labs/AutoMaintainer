@@ -370,14 +370,23 @@ CREATE POLICY "github_install_select" ON github_installations
     FOR SELECT TO authenticated
     USING (org_id = ANY(current_user_org_ids()));
 
-CREATE POLICY "github_install_insert_admin" ON github_installations
-    FOR INSERT TO authenticated
-    WITH CHECK (user_is_org_admin(org_id));
+-- Installations are linked only by the backend (service role), after
+-- POST /github/installations/claim has verified with GitHub that the caller
+-- controls the installation. Client-side insert/update used to be allowed for
+-- any org admin, which let one tenant claim another tenant's installation id
+-- (and, via repository sync, its repositories). The DROPs are no-ops on a
+-- fresh install and remove the old policies when this block is re-run as a
+-- migration on an existing database.
+DROP POLICY IF EXISTS "github_install_insert_admin" ON github_installations;
+DROP POLICY IF EXISTS "github_install_update_admin" ON github_installations;
 
-CREATE POLICY "github_install_update_admin" ON github_installations
-    FOR UPDATE TO authenticated
-    USING (user_is_org_admin(org_id))
-    WITH CHECK (user_is_org_admin(org_id));
+CREATE POLICY "github_install_insert_service" ON github_installations
+    FOR INSERT TO service_role
+    WITH CHECK (true);
+
+CREATE POLICY "github_install_update_service" ON github_installations
+    FOR UPDATE TO service_role
+    USING (true);
 
 -- Repositories: visible to org members
 CREATE POLICY "repos_select" ON repositories
