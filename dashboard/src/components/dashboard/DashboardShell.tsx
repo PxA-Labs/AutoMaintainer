@@ -239,6 +239,7 @@ export function DashboardShell() {
               runs={runs}
               loading={loadingRuns}
               onRefresh={fetchRuns}
+              currentRunId={effectiveRunId}
               onSelectRun={(runId) => {
                 setSelectedRunId(runId);
                 setActiveTab("dashboard");
