@@ -204,7 +204,12 @@ run.
 | Repository: *Commit statuses* | write | Post the verification status on the agent's commit. |
 | Repository: *Metadata* | read | Mandatory for every App; repository listing for sync. |
 | Repository: *Checks* | read | Optional. Needed only for `MERGE_POLICY=ci`, which reads check runs; without it that merge fails closed. |
-| Organization: *Members* | read | Lets `POST /github/installations/claim` confirm that the claiming user is an owner of the installing organization. |
+| Organization: *Members* | read | Lets the install callback and `POST /github/installations/claim` confirm that the installing user is an owner of the installing organization. |
+
+*Workflows* is deliberately not requested, even if the App registration
+grants it. Agent commits and IDE saves that touch `.github/workflows/*` are
+refused by GitHub (403/404), so an agent cannot change a repository's CI.
+Edit workflow files outside AutoMaintainer.
 
 Tokens are narrower than the App registration. In `GITHUB_AUTH_MODE=app` the
 backend never uses an installation's full grant:
@@ -214,18 +219,58 @@ backend never uses an installation's full grant:
   read, plus `checks`: read when the installation has granted it. When the
   caller names the repository (`credentials_for_installation(...,
   repository="owner/name")`), the token is limited to that one repository.
+  **Not yet in effect:** the run and repository-route call sites do not pass
+  a repository yet, so their tokens still cover every repository the
+  installation can access (with the narrowed permissions above).
 - Repository sync mints a `metadata: read` token.
 - Before minting, the backend refuses an installation whose row is marked
   suspended (the `installation` suspend/deleted webhooks set
   `github_installations.suspended_at`) or that GitHub reports as suspended or
-  no longer installed. No token is issued or cached for it.
+  no longer installed. No token is issued or cached for it. The webhook also
+  drops cached tokens, but only in the process that handles it (normally the
+  Celery worker); tokens already cached by the API server or agent processes
+  remain cached for up to about an hour, and GitHub rejects them itself.
 
-Set the App's **Setup URL** to `<backend origin>/github/app/setup` and enable
-*Redirect on update*. GitHub sends the browser there after an install with
-`installation_id` and `setup_action`. That id is not trusted: the route
-writes nothing and only redirects to the dashboard (`DASHBOARD_URL`, an exact
-origin, or the API's own `/` when unset), which links the installation through
-the verified `POST /github/installations/claim`.
+**Upgrading an existing App.** Run tokens now request every required
+permission up front. An installation that has not granted one of them (for
+example *Commit statuses: write*, which older registrations did not ask for)
+has every run refused with an error naming the missing permission until an
+owner of that account accepts the App's updated permissions on GitHub. Add
+the permissions to the App registration before deploying, and ask installers
+to accept them.
+
+#### Install flow (Setup URL)
+
+Configure the App registration:
+
+- Enable **Request user authorization (OAuth) during installation**.
+- Set the **Callback URL** and the **Setup URL** to
+  `<backend origin>/github/app/setup`, and enable *Redirect on update*.
+
+And the backend:
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_APP_SLUG` | The App's URL name, for `https://github.com/apps/<slug>/installations/new`. |
+| `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` | The App's OAuth client credentials, used to exchange the install-time code. The secret also keys the HMAC that signs the install `state`, so rotating it invalidates installs that are in progress (at most 10 minutes old). |
+| `DASHBOARD_URL` | Exact dashboard origin the callback redirects to; when unset or not a bare origin, the API's own `/`. |
+
+The flow: an org owner/admin calls `POST /github/app/install-url` with their
+GitHub user token in `X-GitHub-User-Token` and is sent to the returned URL.
+Its `state` is HMAC-signed, expires after 10 minutes and is bound to the
+AutoMaintainer user, their org and their GitHub user id. After the install,
+GitHub sends the browser to `/github/app/setup` with `installation_id`,
+`setup_action`, `state` and an OAuth `code`. The route verifies the state,
+re-checks the user's org role, exchanges the code for the installer's user
+token, and runs the same ownership check and write as
+`POST /github/installations/claim` (the installer must be the GitHub user the
+state names). Only then is the installation linked. It redirects to
+`DASHBOARD_URL` with `github_setup=<outcome>` (`linked`, `unverified`,
+`invalid`, `expired`, `forbidden`, `unauthorized`, `conflict`, `requested`,
+`unavailable` or `error`) and, when linked, `github_installation_id`. The
+`installation_id` in the URL is never trusted on its own; a callback without
+`state` and `code` links nothing (`unverified`), and the installation can
+still be linked with `POST /github/installations/claim`.
 
 ### Tuning and observability (optional)
 
