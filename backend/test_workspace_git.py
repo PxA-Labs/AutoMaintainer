@@ -85,6 +85,52 @@ def test_repo_name_rejects_invalid(name):
         get_safe_repo_dir(name)
 
 
+# --- workspace keyed by GitHub repository id (#392) ------------------------------
+
+
+def test_renamed_or_transferred_repo_keeps_one_clone():
+    before = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert get_safe_repo_dir("acme/app-renamed", github_repo_id=42) == before
+    assert get_safe_repo_dir("other-owner/app", github_repo_id=42) == before
+
+
+def test_recreated_repo_with_same_name_gets_a_fresh_clone():
+    """A deleted and recreated repository has a new id; it must not inherit
+    the old repository's working tree."""
+    old = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert get_safe_repo_dir("acme/app", github_repo_id=43) != old
+
+
+def test_id_keyed_dir_is_inside_the_workspace_and_disjoint_from_name_keys():
+    base = workspace.get_base_workspace_dir()
+    by_id = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert by_id == base / workspace.REPO_ID_DIR / "42"
+    assert by_id.parent.is_dir()
+    # No repository name maps onto the id directory or into it.
+    for name in ("_by_id", "_by_id/42", "acme/app"):
+        try:
+            assert not get_safe_repo_dir(name).is_relative_to(by_id.parent)
+        except HTTPException:
+            pass
+
+
+def test_without_an_id_the_name_hash_is_kept():
+    assert get_safe_repo_dir("acme/app", github_repo_id=None) == get_safe_repo_dir(
+        "acme/app"
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "42", "../x", 4.2])
+def test_invalid_repo_id_is_rejected(bad):
+    with pytest.raises(HTTPException):
+        get_safe_repo_dir("acme/app", github_repo_id=bad)
+
+
+def test_id_key_still_validates_the_name():
+    with pytest.raises(HTTPException):
+        get_safe_repo_dir("../etc", github_repo_id=42)
+
+
 # --- git credentials -----------------------------------------------------------
 
 
@@ -121,7 +167,7 @@ def test_sync_never_puts_token_in_argv(monkeypatch, tmp_path):
     assert asyncio.run(sync_repo_clone("o/r", repo_dir, TOKEN))
 
     subcommands = [argv[1] for argv, _ in calls]
-    assert subcommands == ["clone", "fetch", "reset"]
+    assert subcommands == ["clone", "remote", "fetch", "reset"]
     for argv, env in calls:
         assert not any(TOKEN in a or "extraheader" in a for a in argv), argv
         assert "-c" not in argv
@@ -147,7 +193,8 @@ def test_sync_scrubs_token_persisted_by_old_clones(upstream, tmp_path):
     including clones under the previous (unhashed) directory naming."""
     repo_dir = str(get_safe_repo_dir("o/r"))
     legacy_dir = str(workspace.get_base_workspace_dir() / "o_r")
-    for d in (repo_dir, legacy_dir):
+    id_dir = str(get_safe_repo_dir("o/other", github_repo_id=9))
+    for d in (repo_dir, legacy_dir, id_dir):
         result = git(
             "clone",
             "-q",
@@ -164,7 +211,7 @@ def test_sync_scrubs_token_persisted_by_old_clones(upstream, tmp_path):
         sync_repo_clone("o/r", repo_dir, TOKEN, remote_url=str(upstream))
     )
 
-    for d in (repo_dir, legacy_dir):
+    for d in (repo_dir, legacy_dir, id_dir):
         assert "FAKE" not in open(os.path.join(d, ".git", "config")).read(), d
 
 
@@ -184,6 +231,104 @@ def test_sync_recovers_dirty_clone_and_keeps_untracked(upstream):
 
     assert open(os.path.join(repo_dir, "app.py")).read() == "v2\n"
     assert os.path.isdir(os.path.join(repo_dir, ".gitnexus"))
+
+
+@requires_git
+def test_sync_follows_a_renamed_repository_into_its_existing_clone(upstream, tmp_path):
+    """A clone keyed by repository id outlives a rename; updating it must use
+    the repository's current URL, not the clone's stale origin."""
+    repo_dir = str(get_safe_repo_dir("o/old", github_repo_id=7))
+    assert asyncio.run(
+        sync_repo_clone("o/old", repo_dir, None, remote_url=str(upstream))
+    )
+
+    moved = tmp_path / "renamed"
+    upstream.rename(moved)
+    (moved / "app.py").write_text("v2\n")
+    git("commit", "-qam", "c2", cwd=moved)
+
+    assert str(get_safe_repo_dir("o/new", github_repo_id=7)) == repo_dir
+    assert asyncio.run(sync_repo_clone("o/new", repo_dir, None, remote_url=str(moved)))
+    assert open(os.path.join(repo_dir, "app.py")).read() == "v2\n"
+
+
+@requires_git
+def test_sync_points_origin_at_the_current_location(upstream, tmp_path):
+    """Runners push to "origin". After a rename, a stale origin would push to
+    whatever repository is later created at the old name."""
+    repo_dir = str(get_safe_repo_dir("o/old", github_repo_id=7))
+    assert asyncio.run(
+        sync_repo_clone("o/old", repo_dir, None, remote_url=str(upstream))
+    )
+    moved = tmp_path / "renamed"
+    upstream.rename(moved)
+    # A different repository now lives at the old location.
+    impostor = tmp_path / "upstream"
+    impostor.mkdir()
+    git("init", "-q", "-b", "main", cwd=impostor)
+
+    assert asyncio.run(sync_repo_clone("o/new", repo_dir, None, remote_url=str(moved)))
+
+    origin = git("remote", "get-url", "origin", cwd=repo_dir).stdout.strip()
+    assert origin == str(moved)
+
+
+@requires_git
+def test_sync_restores_a_missing_origin(upstream):
+    repo_dir = str(get_safe_repo_dir("o/r", github_repo_id=8))
+    assert asyncio.run(sync_repo_clone("o/r", repo_dir, None, remote_url=str(upstream)))
+    git("remote", "remove", "origin", cwd=repo_dir)
+
+    assert asyncio.run(sync_repo_clone("o/r", repo_dir, None, remote_url=str(upstream)))
+
+    origin = git("remote", "get-url", "origin", cwd=repo_dir).stdout.strip()
+    assert origin == str(upstream)
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+        (
+            "https://x-access-token:ghs_secret@github.com/o/r.git",
+            "https://github.com/o/r.git",
+        ),
+        ("https://user@github.com:443/o/r.git", "https://github.com:443/o/r.git"),
+        ("/srv/git/o/r", "/srv/git/o/r"),
+    ],
+)
+def test_origin_url_never_carries_credentials(url, expected):
+    assert workspace._without_userinfo(url) == expected
+
+
+def test_sync_sets_origin_without_credentials(monkeypatch, tmp_path):
+    calls = []
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*argv, **kwargs):
+        calls.append(argv)
+        return Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+
+    assert asyncio.run(
+        sync_repo_clone(
+            "o/r",
+            str(repo_dir),
+            TOKEN,
+            remote_url="https://x-access-token:secret@github.com/o/r.git",
+        )
+    )
+
+    [set_url] = [a for a in calls if a[1] == "remote"]
+    assert set_url[1:] == ("remote", "set-url", "origin", "https://github.com/o/r.git")
 
 
 @requires_git

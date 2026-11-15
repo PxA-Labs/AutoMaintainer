@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
 
@@ -35,16 +36,46 @@ def get_base_workspace_dir() -> Path:
     return Path(os.path.abspath(os.path.join(tempfile.gettempdir(), "automaintainer")))
 
 
-def get_safe_repo_dir(repo_name: str) -> Path:
+# Clones keyed by GitHub repository id live in this subdirectory of the
+# workspace. Name-keyed directories are always "<slug>-<12 hex>", so no
+# repository name can map onto it.
+REPO_ID_DIR = "_by_id"
+
+
+def _repo_id_key(github_repo_id) -> Optional[str]:
+    """The id as a directory name, or None when no id is known.
+
+    Anything but a positive integer is rejected: the id becomes a path
+    component.
+    """
+    if github_repo_id is None:
+        return None
+    if isinstance(github_repo_id, bool) or not isinstance(github_repo_id, int):
+        raise HTTPException(status_code=400, detail="Invalid repository id")
+    if github_repo_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid repository id")
+    return str(github_repo_id)
+
+
+def get_safe_repo_dir(repo_name: str, github_repo_id: Optional[int] = None) -> Path:
     """Safely resolves and creates the directory path for a target repository.
 
     Validates repository name against strict allowlist and prevents path traversal.
 
-    The directory name is a readable slug plus a hash of the full name, so the
-    mapping is one-to-one: flattening "/" alone made "a/b_c" and "a_b/c" share
-    one clone (and therefore one tenant could read another's working tree).
-    The hash is over the lower-cased name because GitHub names are
-    case-insensitive -- "Owner/Repo" and "owner/repo" are the same repository.
+    With ``github_repo_id`` (``repositories.id``, GitHub's repository id) the
+    directory is ``<base>/_by_id/<id>``. The id survives a rename or a
+    transfer, so the repository keeps one clone, and a repository deleted and
+    recreated under the same name gets a new id and therefore a fresh clone
+    rather than the old repository's working tree. The name is still
+    validated, because callers pass it to git.
+
+    Without an id the directory is a readable slug plus a hash of the full
+    name, so the mapping is still one-to-one: flattening "/" alone made
+    "a/b_c" and "a_b/c" share one clone (and therefore one tenant could read
+    another's working tree). The hash is over the lower-cased name because
+    GitHub names are case-insensitive -- "Owner/Repo" and "owner/repo" are
+    the same repository. Callers that know the id should pass it; the name
+    key cannot tell a recreated repository from the old one.
     """
     if not repo_name or not isinstance(repo_name, str):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -57,11 +88,18 @@ def get_safe_repo_dir(repo_name: str) -> Path:
     slug = repo_name.lower().replace("/", "_")
     if ".." in slug or slug.strip(".") == "":
         raise HTTPException(status_code=400, detail="Invalid repository name")
-    digest = hashlib.sha256(repo_name.lower().encode("utf-8")).hexdigest()[:12]
-    clean_name = f"{slug}-{digest}"
+
+    id_key = _repo_id_key(github_repo_id)
+    if id_key is not None:
+        clean_name = os.path.join(REPO_ID_DIR, id_key)
+    else:
+        digest = hashlib.sha256(repo_name.lower().encode("utf-8")).hexdigest()[:12]
+        clean_name = f"{slug}-{digest}"
 
     base_dir = get_base_workspace_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
+    if id_key is not None:
+        (base_dir / REPO_ID_DIR).mkdir(exist_ok=True)
 
     base_str = os.path.abspath(str(base_dir))
     target_str = os.path.abspath(os.path.join(base_str, clean_name))
@@ -232,8 +270,25 @@ async def scrub_workspace_credentials() -> None:
     if not base.is_dir():
         return
     for entry in base.iterdir():
-        if entry.is_dir() and not entry.is_symlink():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        if entry.name == REPO_ID_DIR:
+            # Id-keyed clones never persisted a token, but scrub them too so
+            # this stays true for every clone the workspace holds.
+            for clone in entry.iterdir():
+                if clone.is_dir() and not clone.is_symlink():
+                    await scrub_clone_credentials(str(clone))
+        else:
             await scrub_clone_credentials(str(entry))
+
+
+def _without_userinfo(url: str) -> str:
+    """``url`` with any ``user:password@`` removed (http(s) URLs only)."""
+    parts = urlsplit(url)
+    if parts.scheme in ("http", "https") and "@" in parts.netloc:
+        host = parts.netloc.rsplit("@", 1)[1]
+        return urlunsplit(parts._replace(netloc=host))
+    return url
 
 
 async def sync_repo_clone(
@@ -271,7 +326,22 @@ async def sync_repo_clone(
         return True
 
     await scrub_clone_credentials(repo_dir)
-    rc = await _run_git(["fetch", "--quiet", "origin", "HEAD"], repo_dir, env, timeout)
+    # A clone keyed by repository id outlives a rename or transfer, so its
+    # "origin" may still name the old owner/name. Point origin at the current
+    # URL before fetching: runners push to "origin", and if someone recreates
+    # a repository at the old name, a stale origin would send this
+    # repository's branch there. Never written with credentials in it.
+    origin = _without_userinfo(remote)
+    rc = await _run_git(
+        ["remote", "set-url", "origin", origin], repo_dir, env, timeout, quiet=True
+    )
+    if rc != 0:
+        rc = await _run_git(["remote", "add", "origin", origin], repo_dir, env, timeout)
+        if rc != 0:
+            return False
+    rc = await _run_git(
+        ["fetch", "--quiet", "--", remote, "HEAD"], repo_dir, env, timeout
+    )
     if rc != 0:
         return False
     # Untracked files (e.g. the .gitnexus index) are deliberately kept.

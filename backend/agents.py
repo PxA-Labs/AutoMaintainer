@@ -2942,7 +2942,11 @@ async def _bind_run_github_credentials(
     mode = None
     try:
         mode = get_auth_mode()
-        creds = credentials_for_installation(github_installation_id, purpose=purpose)
+        # Scope the token to this run's repository only (RUN_TOKEN_PERMISSIONS
+        # on one repository), not every repository of the installation.
+        creds = credentials_for_installation(
+            github_installation_id, purpose=purpose, repository=repo_name
+        )
         if creds.mode == AUTH_MODE_APP:
             await asyncio.to_thread(creds.token)
     except GitHubAuthError as e:
