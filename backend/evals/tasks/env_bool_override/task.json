@@ -1,0 +1,9 @@
+{
+  "id": "env_bool_override",
+  "title": "APP_DEBUG=false turns debug mode on",
+  "body": "`load_settings` in `appconfig/settings.py` converts environment overrides with the type of the default value. For booleans this calls `bool(raw)`, so any non-empty string, including `\"false\"`, becomes `True`. Boolean overrides should accept `true`, `1`, `yes`, `on` and `false`, `0`, `no`, `off` in any letter case, and raise `ValueError` for anything else. Other types must keep their current behaviour.",
+  "target_file": "appconfig/settings.py",
+  "kind": "bugfix",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

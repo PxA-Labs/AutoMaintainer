@@ -1,0 +1,9 @@
+{
+  "id": "version_compare",
+  "title": "compare_versions orders 1.10 before 1.9",
+  "body": "`compare_versions` in `pkgtools/versions.py` compares the dotted parts as strings, so `compare_versions(\"1.10.0\", \"1.9.0\")` returns -1. Parts must be compared as numbers. A missing trailing part counts as zero, so `\"1.2\"` and `\"1.2.0\"` are equal.",
+  "target_file": "pkgtools/versions.py",
+  "kind": "bugfix",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}
