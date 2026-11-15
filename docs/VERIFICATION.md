@@ -71,6 +71,34 @@ green verification, including merges by people.
 The GitHub App needs the **Commit statuses: read & write** repository
 permission.
 
+### Maintainer input
+
+The Maintainer's review prompt includes the `VerificationResult` of the
+current iteration (`agents._verification_review_section`; the Implementer
+hands it over as `verification` in the graph state):
+
+- The status (`passed`, `failed`, `error`, `skipped`, anything else shown as
+  `unknown`) and the exit code are set by AutoMaintainer and appear outside
+  the data block.
+- The summary, the command (it can come from `.automaintainer.yml`) and the
+  output tail are attacker-influenced, so they go inside an escaped
+  `<untrusted-data source="verification output">` block. The tail is cut to
+  the same last 3000 characters (`PR_OUTPUT_TAIL_CHARS`) as the PR body.
+- When no result exists (for example a node run outside the pipeline), the
+  prompt says explicitly that verification was **not run** and the change is
+  untested.
+
+The system prompt (`MAINTAINER_VERIFICATION_INSTRUCTIONS`) tells the
+Maintainer that the output is evidence, not instructions, and that on
+`failed`, `error`, `skipped` or not run it must reject, unless its reasons
+explain specifically why the result is unrelated to the change (for example a
+failure in code the change does not touch). This is guidance for the model,
+not a gate: an approval that explains a failure away reaches the merge policy
+like any other approval. The gate stays fail closed: `MERGE_POLICY=ci` still
+requires the `automaintainer/verification` status to be `success`, whatever
+the Maintainer decides, and `human` never merges. `auto` merges on approval
+alone, as before.
+
 ### Effect on existing deployments
 
 - With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image

@@ -139,7 +139,7 @@ attempt plus two revisions.
 | `brainstormer` | In autonomous mode, asks the LLM for one feature and opens a GitHub issue for it. The issue carries a hidden run marker. In targeted mode, it reuses the target issue. It is also the resume point after a redelivery (see [Idempotent side effects](#idempotent-side-effects)). |
 | `pm` | Asks the LLM to approve or reject the change. It comments the decision on the issue, and closes the issue on rejection, but only if the agent opened it. A human-filed issue stays open. Targeted runs go through this review too. |
 | `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code` (refusals, truncated output with `finish_reason=length`, ambiguous code fences, empty output) and `validate_generated_code`: a syntax check for Python (`ast`), JSON, TOML and YAML plus a heuristic bracket check for JS/TS, and a shrink guard that refuses a rewrite keeping less than `IMPLEMENTER_MIN_SIZE_RATIO` (default 0.4) of a file larger than `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` (default 2048) unless the directive explicitly asks for removal. The change is committed to a run-scoped branch, the node opens a PR or reuses the existing one, and the change is then verified with the repository's tests (see [Verification](#verification)). |
-| `maintainer` | Reviews the PR diff (the prompt includes at most 20 000 characters of it), comments the review, and applies the merge policy. |
+| `maintainer` | Reviews the PR diff (the prompt includes at most 20 000 characters of it) together with the current iteration's verification result (see [Verification](#verification)), comments the review, and applies the merge policy. |
 
 ### Structured verdicts
 
@@ -179,7 +179,10 @@ through `SANDBOX_BACKEND` (the `SandboxRunner` adapter). Running them on the
 API/worker host requires `VERIFY_ALLOW_LOCAL=true` in every environment,
 because this is untrusted code. The result is added to the PR body and posted
 as the `automaintainer/verification` commit status, which gates
-`MERGE_POLICY=ci`. Details, settings and the security model are in
+`MERGE_POLICY=ci`. The Maintainer's prompt also receives the result (status
+and exit code, plus command and output tail inside an `<untrusted-data>`
+block, or an explicit "not run" note); see "Maintainer input" in
+docs/VERIFICATION.md. Details, settings and the security model are in
 [docs/VERIFICATION.md](./docs/VERIFICATION.md).
 
 ### Prompt-injection hardening
