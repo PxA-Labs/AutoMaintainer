@@ -94,7 +94,10 @@ def _redis_ssl_options():
 
 # Celery app
 celery_app = Celery(
-    "automaintainer", broker=REDIS_URL, backend=REDIS_URL, include=["tasks"]
+    "automaintainer",
+    broker=REDIS_URL,
+    backend=REDIS_URL,
+    include=["tasks", "webhook_processor"],
 )
 
 # Celery configuration
@@ -118,6 +121,7 @@ celery_app.conf.update(
         "tasks.run_agent_loop_task": {"queue": "agent_runs"},
         "tasks.cleanup_stale_runs": {"queue": "maintenance"},
         "tasks.sync_repositories": {"queue": "github_sync"},
+        "webhook_processor.process_webhook_events": {"queue": "github_sync"},
     },
     # Queue definitions
     task_queues=(
@@ -149,6 +153,11 @@ celery_app.conf.update(
             # minute=0 is required: crontab's minute defaults to "*", so
             # hour="*/6" alone fired every minute of those hours (240/day).
             "schedule": crontab(minute=0, hour="*/6"),  # Once every 6 hours
+        },
+        # Sweep for webhook rows whose enqueue failed or that await a retry.
+        "process-webhook-events": {
+            "task": "webhook_processor.process_webhook_events",
+            "schedule": crontab(minute="*/5"),
         },
     },
     # Monitoring

@@ -35,7 +35,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 # Celery integration
-from celery_app import celery_app
+from celery_app import celery_app, redis_configured
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
 from github_app import (
     AUTH_MODE_APP,
@@ -47,6 +47,7 @@ from github_app import (
     verify_installation_claim,
 )
 from quotas import assist_limiter
+from webhook_processor import process_pending_events, process_webhook_events_task
 
 # Observability
 from observability import (
@@ -511,9 +512,45 @@ app.add_middleware(
 )
 
 
+def _process_webhook_inline(sb, delivery_id: str) -> None:
+    """Background-task body when no broker is configured (local development)."""
+    try:
+        process_pending_events(sb, delivery_id=delivery_id)
+    except Exception:
+        logger.exception("Inline processing of webhook %s failed", delivery_id)
+
+
+async def _schedule_webhook_processing(
+    delivery_id: str, background_tasks: BackgroundTasks, sb
+) -> None:
+    """Hand a stored delivery to webhook_processor.
+
+    The row is already persisted, so a failure to enqueue is logged rather
+    than reported to GitHub: the periodic sweep processes pending rows.
+    Without REDIS_URL there is no worker, so the event is processed in this
+    process after the response is sent, like tasks.start_agent_task does.
+    """
+    if not redis_configured():
+        background_tasks.add_task(_process_webhook_inline, sb, delivery_id)
+        return
+    try:
+        await asyncio.to_thread(
+            process_webhook_events_task.apply_async,
+            kwargs={"delivery_id": delivery_id},
+            queue="github_sync",
+        )
+    except Exception:
+        logger.warning(
+            "Could not enqueue webhook %s; the periodic sweep will process it",
+            delivery_id,
+            exc_info=True,
+        )
+
+
 @app.post("/webhooks/github")
-async def github_webhook(request: Request):
-    """Receive and persist signed GitHub App webhook deliveries."""
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Receive and persist signed GitHub App webhook deliveries, then
+    enqueue their processing."""
     from agents import supabase as agents_supabase
 
     if not os.getenv("GITHUB_WEBHOOK_SECRET"):
@@ -525,7 +562,7 @@ async def github_webhook(request: Request):
 
     raw_body = await request.body()
     try:
-        return await handle_github_webhook(
+        result = await handle_github_webhook(
             raw_body,
             dict(request.headers),
             agents_supabase,
@@ -535,6 +572,13 @@ async def github_webhook(request: Request):
     except Exception:
         logger.exception("GitHub webhook processing failed")
         raise HTTPException(status_code=500, detail="Failed to queue GitHub webhook")
+
+    # Only newly stored rows; duplicates were enqueued on first delivery.
+    if result.get("status") == "queued":
+        await _schedule_webhook_processing(
+            result["delivery_id"], background_tasks, agents_supabase
+        )
+    return result
 
 
 @app.get("/healthz")
