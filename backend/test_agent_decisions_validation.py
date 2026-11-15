@@ -121,6 +121,15 @@ def test_existing_syntax_problems_do_not_block_a_change():
         validate_generated_code("def f(:\n", "legacy.py", original="x = 1\n")
 
 
+@pytest.mark.parametrize("path", ["deep.json", "deep.yaml", "deep.toml"])
+def test_too_deep_nesting_is_a_syntax_error_not_a_crash(path):
+    deep = ("a = " if path.endswith(".toml") else "") + "[" * 50000
+    with pytest.raises(GeneratedCodeError, match="not valid"):
+        validate_generated_code(deep, path)
+    # An original that already hits the limit takes the "already fails" path.
+    validate_generated_code(deep + "1", path, original=deep)
+
+
 # --- truncated rewrites ---------------------------------------------------------
 
 BIG = "".join(f"def f{i}(x):\n    return x + {i}\n\n\n" for i in range(150))
