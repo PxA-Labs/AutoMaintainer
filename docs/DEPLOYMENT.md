@@ -72,6 +72,65 @@ Compose sets `ENVIRONMENT=production` unless you export
 `ENVIRONMENT=development`. The `env_file` `required: false` syntax needs
 Docker Compose v2.24 or later.
 
+`api`, `worker` and `beat` start only after Redis answers `redis-cli ping`
+(`depends_on: condition: service_healthy`). The worker's healthcheck is a
+`celery inspect ping` of its own node. If the worker is down, `POST /start`
+answers `503` ("No agent worker is available") instead of queueing a run
+nobody consumes; Redis itself keeps queued tasks (`appendonly yes`,
+`noeviction`) across restarts.
+
+### Smoke test
+
+[`scripts/compose-smoke.sh`](../scripts/compose-smoke.sh) runs this topology
+end to end. CI runs it on pull requests that touch the `Dockerfile`,
+`docker-compose.yml` or `backend/` (workflow `compose-smoke.yml`). To run it
+locally you need Docker with Compose v2.24.4 or later, `curl`, `python3`, and
+host port 8000 free:
+
+```bash
+bash scripts/compose-smoke.sh                               # builds the image
+COMPOSE_SMOKE_SKIP_BUILD=1 bash scripts/compose-smoke.sh    # reuse automaintainer:local
+```
+
+It starts `api`, `worker`, `beat` and `redis` under the project name
+`automaintainer-smoke`, so the volumes of a dev stack are not touched. Then it
+checks, in order:
+
+1. `GET /healthz` answers `200`.
+2. The worker answers `celery inspect ping`.
+3. A file the worker writes to the `workspaces` volume is visible from `api`.
+4. `POST /start` is accepted. `/start` returns `503` when no worker consumes
+   `agent_runs`, so this proves the path from the API through Redis to the
+   worker.
+5. The run reaches a terminal state, and has a `celery_task_id` (set by the
+   API) and a `started_at` (set by the worker when it picks the run up).
+
+The test uses no credentials. The override file
+[`scripts/compose-smoke/compose.smoke.yml`](../scripts/compose-smoke/compose.smoke.yml)
+does the following, for this test only:
+
+- It adds `fake-supabase`, an in-memory stand-in for Supabase's REST API
+  (`scripts/compose-smoke/fake_supabase.py`, standard library only). It is
+  seeded with one repository.
+- It sets `ENVIRONMENT=development` and `AUTH_DEV_BYPASS=true`. The base
+  `docker-compose.yml` keeps its production defaults.
+- It sets `GITHUB_AUTH_MODE=app` without App credentials.
+- It skips `backend/.env` (`env_file: !reset []`) and blanks the GitHub and
+  Groq variables, so real secrets on the machine never reach the stack.
+
+The run therefore ends `failed` with `GitHub credentials unavailable`. The
+worker stops at its first GitHub step, before any call to GitHub or Groq. The
+script treats exactly that outcome as success: the run went from `queued`
+through the worker to a terminal state. A run that ends in `completed` needs
+real GitHub and LLM credentials and is not automated.
+
+The script always prints `docker compose ps` and the logs of every service,
+then runs `docker compose down --volumes`, whether it passes or fails. The
+fake server answers only the PostgREST filters it implements (`eq`, `neq`,
+`is`, `in`) and returns an error for any other. If a periodic `beat` task such
+as stale-run cleanup fires during the test, that error appears in the worker
+log. This is expected and does not affect the result.
+
 ## Option B: Render
 
 [`render.yaml`](../render.yaml) is a Blueprint with three services:
@@ -227,8 +286,11 @@ tests in `backend/tests/test_deployment_config.py`. Those tests check the
 non-root user, `ENVIRONMENT=production`, pinned versions, the absence of a
 toolchain in the runtime stage, the shared workspace volume, and that no
 dangerous flags are set. The `docker-publish` workflow also builds the image
-on PRs that touch it. A full `docker compose up` end-to-end run, from `queued`
-to `completed`, has not yet been automated.
+on PRs that touch it. The `compose-smoke` workflow runs the whole Compose
+stack and drives one run from `queued` to a terminal state (see
+[Smoke test](#smoke-test)). That run ends `failed` for lack of credentials. A
+run that reaches `completed` needs real GitHub and LLM credentials, and is
+not automated.
 
 ## Upgrade notes
 
