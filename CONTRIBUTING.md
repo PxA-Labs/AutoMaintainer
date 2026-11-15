@@ -113,8 +113,8 @@ git checkout -b feat/183-pydantic-config-schema
   # Check code style with Flake8
   uvx flake8 backend/ --max-line-length=120 --exclude=backend/.venv,backend/venv
 
-  # Verify Next.js build
-  cd dashboard && npm run build && cd ..
+  # Dashboard: lint (incl. jsx-a11y), unit tests, build, end-to-end smoke tests
+  cd dashboard && npm run lint && npm test && npm run build && npm run test:e2e && cd ..
   ```
 
 ### Managing backend dependencies

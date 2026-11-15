@@ -121,10 +121,10 @@ flowchart TD
     __start__ --> architect
     architect --> brainstormer
     brainstormer --> pm
-    pm -->|"VERDICT: APPROVE"| implementer
-    pm -->|"anything else"| __end__
+    pm -->|"decision: approve"| implementer
+    pm -->|"reject or unparseable"| __end__
     implementer --> maintainer
-    maintainer -->|"VERDICT: APPROVE, then MERGE_POLICY"| __end__
+    maintainer -->|"approve, then MERGE_POLICY"| __end__
     maintainer -->|"reject, iteration < 3"| implementer
     maintainer -->|"reject, iteration >= 3"| __end__
 ```
@@ -138,16 +138,20 @@ attempt plus two revisions.
 | `architect` | **Targeted mode** (`target_issue` set): fetches that issue and uses it as the directive. The run aborts if the issue cannot be fetched, if the number is a pull request, or if the text names no repository file. **Autonomous mode**: reads the root file list and README through the GitHub API, syncs the local clone, indexes it with GitNexus, builds an AST map (`ast_indexer.py`, tree-sitter), and asks the LLM for a directive. The run aborts if the directive names no target file. |
 | `brainstormer` | In autonomous mode, asks the LLM for one feature and opens a GitHub issue for it. The issue carries a hidden run marker. In targeted mode, it reuses the target issue. It is also the resume point after a redelivery (see [Idempotent side effects](#idempotent-side-effects)). |
 | `pm` | Asks the LLM to approve or reject the change. It comments the decision on the issue, and closes the issue on rejection, but only if the agent opened it. A human-filed issue stays open. Targeted runs go through this review too. |
-| `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code`, which rejects refusals, truncated output (`finish_reason=length`), ambiguous code fences and empty output. The change is committed to a run-scoped branch, and the node opens a PR or reuses the existing one. |
+| `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code` (refusals, truncated output with `finish_reason=length`, ambiguous code fences, empty output) and `validate_generated_code`: a syntax check for Python (`ast`), JSON, TOML and YAML plus a heuristic bracket check for JS/TS, and a shrink guard that refuses a rewrite keeping less than `IMPLEMENTER_MIN_SIZE_RATIO` (default 0.4) of a file larger than `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` (default 2048) unless the directive explicitly asks for removal. The change is committed to a run-scoped branch, the node opens a PR or reuses the existing one, and the change is then verified with the repository's tests (see [Verification](#verification)). |
 | `maintainer` | Reviews the PR diff (the prompt includes at most 20 000 characters of it), comments the review, and applies the merge policy. |
 
 ### Structured verdicts
 
-The PM and the Maintainer must answer with `VERDICT: APPROVE` or
-`VERDICT: REJECT` as the first line. `is_approved_verdict` accepts only that
-exact first line. It treats anything else as a rejection: Markdown
-decoration, a missing line, or a later `VERDICT: REJECT` in the text. It fails
-closed.
+The PM and the Maintainer answer with a JSON object validated by pydantic
+(`AgentDecision`, `MaintainerDecision` in `backend/agents.py`):
+`{"verdict": "approve" | "reject", "reasons": [...], "blocking_issues": [...]}`,
+plus `requested_changes` for the Maintainer (`decision` is accepted as an alias
+of `verdict`). An approval that lists blocking issues is invalid. A reply that
+does not parse or validate gets one corrective retry; a second failure is a
+rejection, so the step fails closed. The older `VERDICT: APPROVE` /
+`VERDICT: REJECT` first line is still accepted, but it is rejected when the
+text after it carries another decision.
 
 ### Merge policy
 
@@ -157,13 +161,25 @@ Maintainer approves a PR:
 | Value | Behaviour |
 | --- | --- |
 | `human` (default; also used for unknown values) | Never merges. Leaves the PR open with `merge_status=awaiting_human_review` and requests a review from the issue's assignees, or from the repository owner if it is a user account. |
-| `ci` | Merges only if every commit status and check run on the PR head is in a passing state (`success`, `neutral` or `skipped`, see `_PASSING_CHECK_STATES`) and at least one reported `success`. The check runs once, right after the review, so pending checks block the merge. |
+| `ci` | Merges only if the `automaintainer/verification` commit status on the PR head is `success` (see [Verification](#verification)) **and** every other commit status and check run is in a passing state (`success`, `neutral` or `skipped`, see `_PASSING_CHECK_STATES`). The check runs once, right after the review, so pending checks block the merge. Without a sandbox (and without `VERIFY_ALLOW_LOCAL=true`) verification reports an error, so `ci` never merges. |
 | `auto` | Merges on the Maintainer's approval alone. Not recommended. |
 
 Under `ci` and `auto`, the merge is also skipped in two cases: the review
 comment could not be posted, or the diff the Maintainer saw was incomplete
 (truncated, or a file without a patch). The merge pins the reviewed head SHA,
 so GitHub refuses it if the branch moved after the review.
+
+### Verification
+
+After each Implementer push, `backend/verification.py` checks out the PR
+head and runs the repository's tests: the command from `.automaintainer.yml`
+at the repository root, otherwise a detected `pytest` or `npm test`. They run
+through `SANDBOX_BACKEND` (the `SandboxRunner` adapter). Running them on the
+API/worker host requires `VERIFY_ALLOW_LOCAL=true` in every environment,
+because this is untrusted code. The result is added to the PR body and posted
+as the `automaintainer/verification` commit status, which gates
+`MERGE_POLICY=ci`. Details, settings and the security model are in
+[docs/VERIFICATION.md](./docs/VERIFICATION.md).
 
 ### Prompt-injection hardening
 
@@ -378,10 +394,11 @@ Source: `backend/observability.py`.
 
 ## Not yet wired in
 
-- `backend/runners/` (`LocalRunner`, `SandboxRunner`) defines an execution
-  interface, but the agent pipeline does not use it. Agents act through the
-  GitHub API and the shared clone, and **no tests of the target repository
-  are run before review or merge**.
+- No sandbox backend ships with the project: `SANDBOX_BACKEND` must point to
+  one you provide (see [docs/VERIFICATION.md](./docs/VERIFICATION.md)), so by
+  default verification reports an error and `MERGE_POLICY=ci` never merges.
+- `LocalRunner` (no shell, scrubbed environment, timeouts) is not used by the
+  agent pipeline.
 - The Implementer edits one file per run.
 
 Open work is tracked in the GitHub epics; see

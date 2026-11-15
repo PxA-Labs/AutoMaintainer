@@ -98,13 +98,18 @@ has the details.
   requests. Under `ci` and `auto`, a merge is also refused when the review was
   not posted or the reviewed diff was incomplete, and it is pinned to the
   reviewed commit SHA.
-- PM and Maintainer verdicts must be an exact `VERDICT: APPROVE` line.
-  Anything else is a rejection.
+- PM and Maintainer decisions are schema-validated JSON; an invalid reply
+  gets one corrective retry and is then a rejection. An approval that lists
+  blocking issues is invalid.
+- Under `MERGE_POLICY=ci`, a merge also requires the repository's tests to
+  pass (`automaintainer/verification`). Those tests are untrusted code: they
+  run in a sandbox, and on the host only with `VERIFY_ALLOW_LOCAL=true`.
 - Repository and issue content reaches the model inside escaped
   `<untrusted-data>` blocks with an instruction to treat it as data. This
   reduces prompt-injection risk but does not remove it.
 - Generated code is validated before commit (refusals, truncation, ambiguous
-  fences). LLM errors abort the run instead of being written to GitHub.
+  fences, syntax for Python/JSON/TOML/YAML, and a shrink guard against
+  truncated rewrites). LLM errors abort the run instead of being written to GitHub.
 - Run side effects are idempotent across task redeliveries.
 
 **Workspace and IDE**
