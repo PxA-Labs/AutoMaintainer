@@ -85,6 +85,52 @@ def test_repo_name_rejects_invalid(name):
         get_safe_repo_dir(name)
 
 
+# --- workspace keyed by GitHub repository id (#392) ------------------------------
+
+
+def test_renamed_or_transferred_repo_keeps_one_clone():
+    before = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert get_safe_repo_dir("acme/app-renamed", github_repo_id=42) == before
+    assert get_safe_repo_dir("other-owner/app", github_repo_id=42) == before
+
+
+def test_recreated_repo_with_same_name_gets_a_fresh_clone():
+    """A deleted and recreated repository has a new id; it must not inherit
+    the old repository's working tree."""
+    old = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert get_safe_repo_dir("acme/app", github_repo_id=43) != old
+
+
+def test_id_keyed_dir_is_inside_the_workspace_and_disjoint_from_name_keys():
+    base = workspace.get_base_workspace_dir()
+    by_id = get_safe_repo_dir("acme/app", github_repo_id=42)
+    assert by_id == base / workspace.REPO_ID_DIR / "42"
+    assert by_id.parent.is_dir()
+    # No repository name maps onto the id directory or into it.
+    for name in ("_by_id", "_by_id/42", "acme/app"):
+        try:
+            assert not get_safe_repo_dir(name).is_relative_to(by_id.parent)
+        except HTTPException:
+            pass
+
+
+def test_without_an_id_the_name_hash_is_kept():
+    assert get_safe_repo_dir("acme/app", github_repo_id=None) == get_safe_repo_dir(
+        "acme/app"
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "42", "../x", 4.2])
+def test_invalid_repo_id_is_rejected(bad):
+    with pytest.raises(HTTPException):
+        get_safe_repo_dir("acme/app", github_repo_id=bad)
+
+
+def test_id_key_still_validates_the_name():
+    with pytest.raises(HTTPException):
+        get_safe_repo_dir("../etc", github_repo_id=42)
+
+
 # --- git credentials -----------------------------------------------------------
 
 
@@ -184,6 +230,25 @@ def test_sync_recovers_dirty_clone_and_keeps_untracked(upstream):
 
     assert open(os.path.join(repo_dir, "app.py")).read() == "v2\n"
     assert os.path.isdir(os.path.join(repo_dir, ".gitnexus"))
+
+
+@requires_git
+def test_sync_follows_a_renamed_repository_into_its_existing_clone(upstream, tmp_path):
+    """A clone keyed by repository id outlives a rename; updating it must use
+    the repository's current URL, not the clone's stale origin."""
+    repo_dir = str(get_safe_repo_dir("o/old", github_repo_id=7))
+    assert asyncio.run(
+        sync_repo_clone("o/old", repo_dir, None, remote_url=str(upstream))
+    )
+
+    moved = tmp_path / "renamed"
+    upstream.rename(moved)
+    (moved / "app.py").write_text("v2\n")
+    git("commit", "-qam", "c2", cwd=moved)
+
+    assert str(get_safe_repo_dir("o/new", github_repo_id=7)) == repo_dir
+    assert asyncio.run(sync_repo_clone("o/new", repo_dir, None, remote_url=str(moved)))
+    assert open(os.path.join(repo_dir, "app.py")).read() == "v2\n"
 
 
 @requires_git
