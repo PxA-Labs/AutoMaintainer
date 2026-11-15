@@ -29,6 +29,10 @@ python -m evals.run --mode replay --out replay.json
 # Call the model. Needs GROQ_API_KEY. --record saves cassettes for later replay.
 GROQ_API_KEY=... python -m evals.run --mode live --record my-cassettes --out live.json
 
+# Safer: generate with the key, then score in a process without it (as CI does).
+GROQ_API_KEY=... python -m evals.run --mode live --generate-only --record my-cassettes
+python -m evals.run --mode replay --cassettes my-cassettes --fail-on-stale --out live.json
+
 # Compare two runs task by task.
 python -m evals.compare before.json after.json
 
@@ -38,14 +42,17 @@ python -m pytest -q evals
 
 Other options: `--tasks a,b`, `--jobs N` (tasks evaluated in parallel),
 `--timeout S` (limit per pytest run), `--model`, `--temperature` (default 0),
-`--seed` (default 1234) and `--cassettes DIR`.
+`--seed` (default 1234), `--cassettes DIR`, `--fail-on-stale` (replay:
+exit 1 if any cassette answered a different prompt) and `--generate-only`
+(live: only record cassettes into `--record DIR`; no candidate code runs and
+the results file has `aggregate: null`).
 
 Exit codes:
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | A `--min-resolve-rate` or `--max-resolve-rate` gate failed |
+| 1 | A `--min-resolve-rate` / `--max-resolve-rate` gate failed, or `--fail-on-stale` found stale cassettes |
 | 2 | Harness or infrastructure error: missing key, missing cassette, or a failed LLM call |
 
 ## Modes and baselines
@@ -118,6 +125,23 @@ ability, not performance on real-world issues.
 The backend suite never collects files under `tasks/`; `evals/conftest.py`
 excludes them.
 
+### How a pass is verified
+
+pytest's exit code is not trusted on its own: candidate code that calls
+`os._exit(0)` at import makes pytest exit 0 without running a test. Each run
+writes a JUnit report into a fresh directory, and a run counts as passed only
+if pytest exits 0, the report exists, and exactly as many tests passed as
+`pytest --collect-only` finds on the reference solution (no failures, errors
+or skips). The repository tests and the hidden tests run in two separate
+fresh copies, so the hidden tests do not exist on disk while the candidate
+runs the first time, and nothing that run writes (edited tests, a planted
+`conftest.py` or `sitecustomize.py`) carries over.
+
+The target file is resolved from the issue text with
+`agents.extract_target_file`, as `implementer_node` does when no plan names
+it. If that gives no path or a different path, the task is recorded as
+`target_mismatch`: unresolved, not an error, and no model call is made.
+
 ## Reading results
 
 `results.json` has three parts:
@@ -132,7 +156,10 @@ excludes them.
   - `resolve_rate_ci95`: a 95% Wilson score interval
   - `output_rejected` and its rate
   - `regressions` and its rate
-  - `timed_out`, `errors` and `stale_cassettes`
+  - `target_mismatches`, `timed_out`, `errors` and `stale_cassettes`
+  - when `errors > 0`, `resolve_rate` and `resolve_rate_ci95` are `null`:
+    the run is incomplete, and neither counting errored tasks as failures nor
+    dropping them gives an honest rate
   - `latency_ms_mean` and `latency_ms_median`
   - `tokens`: input, output and total, when the provider reports them
 - `tasks`: one record per task, described below.
@@ -144,6 +171,7 @@ Fields of each task record:
 | `resolved` | The hidden tests pass **and** the pre-existing tests still pass (fail-to-pass plus pass-to-pass). |
 | `hidden_tests_passed` | The hidden tests alone pass. |
 | `regression` | A pre-existing test failed after the change. `null` if the change was never applied. |
+| `target_mismatch` / `target_resolved` | `extract_target_file` on the issue text did not return the task's `target_file`; `target_resolved` is what it returned. |
 | `output_rejected` / `rejection_reason` | `normalize_generated_code` raised: refusal, truncation (`finish_reason=length`), ambiguous fences, empty output. Production aborts the run in this case. |
 | `patch` | Unified diff of the applied change, for failure analysis. |
 | `test_output` | Tail of the failing pytest output. |
@@ -164,6 +192,15 @@ change to `normalize_generated_code` that starts rejecting well-formed output
 fails the PR. To track real model behavior offline, record a set with
 `--mode live --record evals/cassettes/<name>` and replay it with
 `--cassettes`.
+
+Every cassette stores the hash of the prompt it answered. CI replays with
+`--fail-on-stale`, so a PR that changes the Implementer prompt fails until the
+cassettes are dealt with explicitly. For the synthetic set, run
+`python -m evals.rehash`: its responses test the normalizer, not the model, so
+re-binding them is correct. `evals.rehash` refuses real-model cassettes; those
+must be re-recorded, because their answers were for the old prompt. A stale
+synthetic set never tells you how the new prompt performs; only a live run
+does.
 
 ## Determinism
 
@@ -210,8 +247,19 @@ sorted by task id, so `--jobs` does not change them.
   Epic #414 plans real-issue tasks with dated splits.
 - **Not a sandbox.** Model-written code runs in a local `pytest` subprocess.
   The subprocess gets a minimal environment with no API keys and a timeout,
-  but it keeps network access and file-system access. Run live evals only
-  where that is acceptable. The containerized sandbox runner is the planned
-  replacement.
+  but it keeps network access and file-system access and runs as the same
+  user. A stripped environment does not hide secrets from it: on Linux it can
+  read `/proc/<ppid>/environ` of the `evals.run` process, which holds
+  `GROQ_API_KEY` in a one-step live run. Use `--generate-only` and score the
+  recorded cassettes in a separate process without the key, as the workflow's
+  live job does. Code that targets the harness (for example by forging the
+  JUnit report it can locate) is also out of scope for these checks. Run live
+  evals only where that is acceptable. The containerized sandbox runner is the
+  planned replacement.
 - **One sample per task.** There are no repeated seeds or bootstrap intervals
   yet.
+- **Not production quality.** Live mode differs from production in three
+  ways at once: no MCP tool loop, `temperature=0` instead of the provider
+  default, and one sample per task. Read a live resolve rate as a regression
+  signal for the prompt and normalizer, not as the Implementer's quality in
+  production, and do not quote it without repeated seeds.

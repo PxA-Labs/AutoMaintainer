@@ -73,9 +73,11 @@ jobs:
 
     # The committed cassettes are synthetic: 6 of 10 are correct fixes. A drop
     # means normalize_generated_code or the harness started rejecting or
-    # mis-applying output it used to handle.
+    # mis-applying output it used to handle. --fail-on-stale: a PR that
+    # changes the Implementer prompt must re-bind the cassettes on purpose
+    # (python -m evals.rehash) instead of silently replaying old answers.
     - name: Cassette replay
-      run: python -m evals.run --mode replay --jobs 4 --out eval-results/replay.json --min-resolve-rate 0.6
+      run: python -m evals.run --mode replay --jobs 4 --out eval-results/replay.json --min-resolve-rate 0.6 --fail-on-stale
 
     - name: Upload results
       if: always()
@@ -121,14 +123,26 @@ jobs:
 
     # Inputs reach the shell through env vars, never via ${{ }} interpolation
     # inside the script, so they cannot inject commands.
-    - name: Live run
+    # Generation and scoring are separate steps (separate processes): the one
+    # holding GROQ_API_KEY only calls the model and records cassettes and never
+    # runs model-written code, which could read its parent's environment
+    # (/proc/<ppid>/environ). Scoring replays the cassettes without the secret.
+    - name: Live generation (records cassettes, runs no tests)
       env:
         GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         EVAL_TASKS: ${{ inputs.tasks }}
         EVAL_MODEL: ${{ inputs.model }}
       run: |
-        python -m evals.run --mode live --tasks "$EVAL_TASKS" --model "$EVAL_MODEL" \
-          --record eval-results/cassettes --out eval-results/live.json
+        python -m evals.run --mode live --generate-only --tasks "$EVAL_TASKS" \
+          --model "$EVAL_MODEL" --record eval-results/cassettes \
+          --out eval-results/generation.json
+
+    - name: Score recorded outputs (no secrets)
+      env:
+        EVAL_TASKS: ${{ inputs.tasks }}
+      run: |
+        python -m evals.run --mode replay --tasks "$EVAL_TASKS" --fail-on-stale \
+          --cassettes eval-results/cassettes --out eval-results/live.json
 
     - name: Upload results and recorded cassettes
       if: always()
