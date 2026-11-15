@@ -145,7 +145,9 @@ export function Sidebar({
             return (
               <button
                 key={item.id}
+                type="button"
                 onClick={() => onSelectTab(item.id)}
+                aria-current={isActive ? "page" : undefined}
                 className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
                   isActive
                     ? "bg-zinc-800 text-zinc-100 shadow-sm"
@@ -154,6 +156,7 @@ export function Sidebar({
               >
                 <span
                   className={isActive ? "text-indigo-400" : "text-zinc-500"}
+                  aria-hidden="true"
                 >
                   {item.icon}
                 </span>
@@ -172,10 +175,11 @@ export function Sidebar({
           <div className="space-y-2">
             {/* Target Repo Input */}
             <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-lg p-2">
+              {/* While not editing there is no input: the label then points at
+                  the edit button, so clicking it still starts editing. */}
               <label
-                htmlFor="target-repo-input"
+                htmlFor={isEditingRepo ? "target-repo-input" : "target-repo-edit"}
                 className="text-[10px] font-medium text-zinc-500 flex items-center gap-1.5 mb-1 cursor-pointer"
-                onClick={() => onSetIsEditingRepo(true)}
               >
                 <GitBranch className="w-3 h-3 text-zinc-400" />
                 Repository Identifier
@@ -190,13 +194,16 @@ export function Sidebar({
                   onCancel={() => onSetIsEditingRepo(false)}
                 />
               ) : (
-                <div
+                <button
+                  id="target-repo-edit"
+                  type="button"
                   onClick={() => onSetIsEditingRepo(true)}
-                  className="text-xs font-mono text-zinc-300 truncate cursor-pointer hover:text-white transition-colors py-0.5"
+                  aria-label={`Repository Identifier ${repoUrl || "owner/repo"} (edit)`}
+                  className="block w-full text-left text-xs font-mono text-zinc-300 truncate cursor-pointer hover:text-white transition-colors py-0.5"
                   title="Click to edit target repository"
                 >
                   {repoUrl || "owner/repo"}
-                </div>
+                </button>
               )}
             </div>
 

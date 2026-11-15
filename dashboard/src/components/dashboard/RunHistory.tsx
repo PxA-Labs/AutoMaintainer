@@ -10,6 +10,8 @@ interface RunHistoryProps {
   loading: boolean;
   onRefresh: () => void;
   onSelectRun?: (runId: string) => void;
+  /** The run whose logs the dashboard currently shows; marked aria-current. */
+  currentRunId?: string | null;
 }
 
 export function RunHistory({
@@ -17,6 +19,7 @@ export function RunHistory({
   loading,
   onRefresh,
   onSelectRun,
+  currentRunId = null,
 }: RunHistoryProps) {
   const getStatusVariant = (
     status: string
@@ -75,20 +78,35 @@ export function RunHistory({
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
+          <ul className="space-y-3" aria-label="Runs">
             {runs.map((run) => (
-              <div
+              // The run id is a real <button> whose ::after overlay stretches
+              // over the whole card, so the entire card stays clickable while
+              // keyboard users get a single focusable control. The PR link is
+              // raised above the overlay instead of being nested in a button.
+              <li
                 key={run.id}
-                onClick={() => onSelectRun?.(run.id)}
-                className={`bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-4 transition-all hover:border-zinc-700/80 ${
-                  onSelectRun ? "cursor-pointer" : ""
+                className={`relative bg-zinc-900/40 border border-zinc-800/60 rounded-xl p-4 transition-all hover:border-zinc-700/80 focus-within:border-indigo-500/60 ${
+                  run.id === currentRunId ? "border-indigo-500/40" : ""
                 }`}
               >
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-xs font-medium text-zinc-300">
-                      {run.id.substring(0, 8)}
-                    </span>
+                    {onSelectRun ? (
+                      <button
+                        type="button"
+                        onClick={() => onSelectRun(run.id)}
+                        aria-current={run.id === currentRunId ? "true" : undefined}
+                        aria-label={`View logs for run ${run.id.substring(0, 8)} (${run.status}${run.repo_name ? `, ${run.repo_name}` : ""})`}
+                        className="font-mono text-xs font-medium text-zinc-300 cursor-pointer focus:outline-none after:absolute after:inset-0 after:rounded-xl after:content-['']"
+                      >
+                        {run.id.substring(0, 8)}
+                      </button>
+                    ) : (
+                      <span className="font-mono text-xs font-medium text-zinc-300">
+                        {run.id.substring(0, 8)}
+                      </span>
+                    )}
                     <Badge variant={getStatusVariant(run.status)}>
                       {run.status}
                     </Badge>
@@ -120,17 +138,16 @@ export function RunHistory({
                       href={run.pr_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
-                      onClick={(e) => e.stopPropagation()}
+                      className="relative z-10 inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
                     >
                       <GitCommit className="w-3.5 h-3.5" />
                       View Generated Pull Request
                     </a>
                   </div>
                 )}
-              </div>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </div>
     </div>

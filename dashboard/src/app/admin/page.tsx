@@ -247,14 +247,16 @@ function AdminDashboard() {
           ].map((tab) => (
             <button
               key={tab.id}
+              type="button"
               onClick={() => setActiveTab(tab.id as AdminTab)}
+              aria-current={activeTab === tab.id ? "page" : undefined}
               className={`w-full flex items-center gap-3 p-3 rounded-lg transition-all text-sm ${
                 activeTab === tab.id 
                   ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' 
                   : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
               }`}
             >
-              <tab.icon className="w-5 h-5" />
+              <tab.icon className="w-5 h-5" aria-hidden="true" />
               {tab.label}
             </button>
           ))}

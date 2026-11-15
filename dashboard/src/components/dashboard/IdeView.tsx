@@ -50,7 +50,9 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
       <div className="h-56 border-t border-zinc-800 bg-zinc-950 flex flex-col shrink-0">
         <div className="h-8 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 gap-4 shrink-0">
           <button
+            type="button"
             onClick={() => setTerminalMode("logs")}
+            aria-pressed={terminalMode === "logs"}
             className={`flex items-center gap-1.5 text-xs font-mono transition-colors ${
               terminalMode === "logs"
                 ? "text-zinc-200 font-medium"
@@ -62,7 +64,9 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
           </button>
           <div className="w-px h-3 bg-zinc-700"></div>
           <button
+            type="button"
             onClick={() => setTerminalMode("pty")}
+            aria-pressed={terminalMode === "pty"}
             className={`flex items-center gap-1.5 text-xs font-mono transition-colors ${
               terminalMode === "pty"
                 ? "text-indigo-400 font-medium"

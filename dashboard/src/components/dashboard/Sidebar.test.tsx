@@ -49,3 +49,31 @@ describe("Sidebar repository input", () => {
     expect(onSetIsEditingRepo).toHaveBeenCalledWith(false);
   });
 });
+
+describe("Sidebar accessibility (#407)", () => {
+  it("marks the active nav item and exposes the repository as an edit button", () => {
+    const onSetIsEditingRepo = vi.fn();
+    render(
+      <Sidebar
+        user={null}
+        onSignOut={() => {}}
+        activeTab="runs"
+        onSelectTab={() => {}}
+        repoUrl="octo/hello"
+        onRepoUrlChange={() => {}}
+        isEditingRepo={false}
+        onSetIsEditingRepo={onSetIsEditingRepo}
+        targetIssue=""
+        onTargetIssueChange={() => {}}
+        agentStatus={{}}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Run History" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "Dashboard" }).getAttribute("aria-current")).toBeNull();
+
+    const edit = screen.getByRole("button", { name: /repository identifier octo\/hello/i });
+    fireEvent.click(edit);
+    expect(onSetIsEditingRepo).toHaveBeenCalledWith(true);
+    expect(screen.getByLabelText(/issue number/i).tagName).toBe("INPUT");
+  });
+});

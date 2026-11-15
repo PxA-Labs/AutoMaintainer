@@ -5,6 +5,8 @@ interface HeaderProps {
   isRunning: boolean;
   /** A start/stop request is in flight; the control is disabled meanwhile. */
   isPending?: boolean;
+  /** The pending request is re-attaching to a run after a reload. */
+  isRestoring?: boolean;
   tokensUsed: number;
   latency: number;
   onStartStop: () => void;
@@ -13,6 +15,7 @@ interface HeaderProps {
 export function Header({
   isRunning,
   isPending = false,
+  isRestoring = false,
   tokensUsed,
   latency,
   onStartStop,
@@ -50,7 +53,7 @@ export function Header({
           {isPending ? (
             <>
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              {isRunning ? "Stopping" : "Starting"}
+              {isRestoring ? "Restoring" : isRunning ? "Stopping" : "Starting"}
             </>
           ) : isRunning ? (
             <>

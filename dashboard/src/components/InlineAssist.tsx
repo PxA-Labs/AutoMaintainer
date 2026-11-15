@@ -218,7 +218,12 @@ export default function InlineAssist({
   const isAcceptDisabled = isLoading || suggestion === null || suggestion.trim().length === 0;
 
   return (
+    // A non-modal popover over the editor: it already handles Escape (cancel)
+    // and Cmd/Ctrl+Enter (accept) in handleKeyDown, and focus stays free to
+    // move back into the editor, so there is no focus trap here.
     <div
+      role="dialog"
+      aria-label="Inline Assist"
       className="absolute z-50 w-[520px] bg-[#1e1e2e] border border-indigo-500/40 rounded-xl shadow-2xl overflow-hidden font-sans text-zinc-100 backdrop-blur-md transition-all"
       style={{
         top: Math.max(10, Math.min(position.top, window.innerHeight - 380)),
@@ -283,12 +288,15 @@ export default function InlineAssist({
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="Ask AI to edit or generate code... (Cmd+K)"
+              aria-label="Inline Assist instruction"
               disabled={isLoading}
               className="w-full bg-[#11111b] border border-zinc-700/80 focus:border-indigo-500 rounded-lg pl-3 pr-10 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none transition-colors"
             />
             <button
+              type="button"
               onClick={() => handleSubmit()}
               disabled={!prompt.trim() || isLoading}
+              aria-label="Generate suggestion"
               className="absolute right-2 p-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white transition-colors"
             >
               {isLoading ? (

@@ -8,11 +8,13 @@ import { IdeView } from "./IdeView";
 import { RunHistory } from "./RunHistory";
 import { CodeGraph } from "./CodeGraph";
 import { AuthGate } from "./AuthGate";
+import { ResumeRunBanner } from "./ResumeRunBanner";
 import { useAuth } from "@/lib/auth";
 import { useAgentRun, type LogEntry } from "@/lib/hooks/use-agent-run";
 import { useLogs } from "@/lib/hooks/use-logs";
 import { useSupabaseHealth } from "@/lib/hooks/use-health";
 import { getBackendUrl } from "@/lib/config";
+import { findResumableRun } from "@/lib/run-status";
 import { AlertCircle, Loader2 } from "lucide-react";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -49,6 +51,21 @@ export function DashboardShell() {
   );
 
   const effectiveRunId = selectedRunId || runState.activeRunId;
+
+  // A queued/running run for the selected repository that this tab is not
+  // tracking (started elsewhere, or the ?run= link was lost). Offered, not
+  // auto-resumed. Dismissal is per run id so a newer run is offered again.
+  const [dismissedResumeId, setDismissedResumeId] = useState<string | null>(null);
+  const resumableRun =
+    runState.phase === "idle" ? findResumableRun(runs, runState.repoUrl) : null;
+  // The run this tab last tracked is excluded: once it finished, the (not yet
+  // refreshed) /runs list may still show it as running.
+  const offeredRun =
+    resumableRun &&
+    resumableRun.id !== dismissedResumeId &&
+    resumableRun.id !== runState.activeRunId
+      ? resumableRun
+      : null;
 
   // Realtime logs and telemetry hook
   const {
@@ -179,10 +196,28 @@ export function DashboardShell() {
           </div>
         )}
 
+        {offeredRun && (
+          <ResumeRunBanner
+            runId={offeredRun.id}
+            repoName={offeredRun.repo_name}
+            status={offeredRun.status}
+            onResume={() => {
+              setSelectedRunId(null);
+              // A run that already finished means the list is stale: refresh
+              // it so the offer disappears.
+              void runActions.resumeRun(offeredRun.id).then((resumed) => {
+                if (!resumed) void fetchRuns();
+              });
+            }}
+            onDismiss={() => setDismissedResumeId(offeredRun.id)}
+          />
+        )}
+
         {/* Global Header */}
         <Header
           isRunning={runState.isRunning}
           isPending={runState.isPending}
+          isRestoring={runState.phase === "restoring"}
           tokensUsed={systemHealth.tokensUsed}
           latency={systemHealth.latency}
           onStartStop={runActions.startStop}
@@ -204,6 +239,7 @@ export function DashboardShell() {
               runs={runs}
               loading={loadingRuns}
               onRefresh={fetchRuns}
+              currentRunId={effectiveRunId}
               onSelectRun={(runId) => {
                 setSelectedRunId(runId);
                 setActiveTab("dashboard");
