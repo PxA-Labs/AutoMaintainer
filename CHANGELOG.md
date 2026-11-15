@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **changelog**: Keep earlier entries and stop stacking separators ([#457](https://github.com/PxA-Labs/AutoMaintainer/pull/457)) - @purvanshjoshi
 - Add signed GitHub webhook ingestion ([#216](https://github.com/PxA-Labs/AutoMaintainer/pull/216)) (closes [#215](https://github.com/PxA-Labs/AutoMaintainer/issues/215)) - @SriRamkunamsetty
 - **dashboard**: Handle selectedRunId reset on new run and guest auth prompt on start ([#247](https://github.com/PxA-Labs/AutoMaintainer/pull/247)) - @purvanshjoshi
 - **backend**: Include target host diagnostic in healthz_supabase error response ([#244](https://github.com/PxA-Labs/AutoMaintainer/pull/244)) - @purvanshjoshi
