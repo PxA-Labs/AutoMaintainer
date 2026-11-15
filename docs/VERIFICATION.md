@@ -81,7 +81,8 @@ permission.
   write** now stops every run with `VERIFICATION_STATUS_FAILED`.
 - `MERGE_POLICY=ci` with `VERIFY_CHANGES=false` never merges (the result is
   `skipped`).
-- docs/DEPLOYMENT.md does not cover these yet; that is a follow-up.
+- These settings are also listed in the environment reference in
+  docs/DEPLOYMENT.md.
 
 ## Configuration
 
