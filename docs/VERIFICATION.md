@@ -158,15 +158,128 @@ agent just wrote from an untrusted issue. Treat it as hostile.
 - **A sandbox backend** should run the command in an ephemeral container or
   micro-VM with no secrets, network egress denied (or limited to package
   mirrors) and CPU, memory and time limits. Those properties are the backend's
-  responsibility; this repository only defines the interface
-  (`runners/sandbox.py`) and does not ship a backend yet. The host waits at
+  responsibility; `runners/sandbox.py` defines the interface and
+  `runners/docker_sandbox.py` ships one implementation (see
+  [Docker sandbox backend](#docker-sandbox-backend)). The host waits at
   most `timeout_seconds` + 30 s for the backend, then reports `error`. The
   host does not bound memory for the backend's reply: `exec_command` returns
   stdout and stderr as whole strings, which are only then cut to
-  `VERIFY_MAX_OUTPUT_BYTES`, so a backend should cap its own output.
+  `VERIFY_MAX_OUTPUT_BYTES`, so a backend should cap its own output (the
+  Docker backend does).
 - **Output is untrusted.** In the PR body it is placed in a code fence longer
   than any backtick run it contains, so it cannot inject Markdown or
   `@mentions`.
+
+## Docker sandbox backend
+
+`runners/docker_sandbox.py` is the shipped production backend. Each
+`exec_command` starts one ephemeral container with the `docker` CLI (an
+argument list, never a shell; no Docker SDK dependency), waits for it on the
+host and returns its exit code and output.
+
+### Configuration
+
+```
+SANDBOX_BACKEND=runners.docker_sandbox:create
+SANDBOX_IMAGE=ghcr.io/your-org/test-runner@sha256:<digest>   # recommended
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SANDBOX_IMAGE` | `python:3.12-slim` | Image the tests run in. The default has only the standard library: it does not contain pytest or node. Build an image with the tools your repositories need (dependencies are not installed at run time, and the network is off) and pin it by digest (`name@sha256:...`) so a re-tagged image cannot change what runs. |
+| `SANDBOX_NETWORK` | `none` | Docker network for the container. Name a network that only reaches a package mirror if tests must install packages. `host` is refused. |
+| `SANDBOX_RUNTIME` | unset (Docker's default, usually `runc`) | `runsc` runs the container under gVisor (must be installed and registered with the daemon). Recommended. |
+| `SANDBOX_MEMORY` | `1g` | `--memory`; swap is disabled (`--memory-swap` equals it). |
+| `SANDBOX_CPUS` | `1` | `--cpus`. |
+| `SANDBOX_PIDS_LIMIT` | `256` | `--pids-limit`, against fork bombs. |
+| `SANDBOX_TMPFS_SIZE` | `256m` | Size of the writable `/tmp` (also `HOME`). |
+| `SANDBOX_USER` | the worker's `uid:gid`, or `65534:65534` when the worker is root or on Windows | Numeric, never `0`. A non-root worker must own files the tests create in the copy to delete it afterwards. |
+| `SANDBOX_DOCKER` | `docker` | Path to the CLI (any CLI accepting the same `run` flags). |
+| `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Also caps the output the backend keeps while reading. |
+
+Every value is validated and passed as `--flag=value`, so a setting cannot
+inject another docker flag. The worker needs the `docker` CLI (the shipped
+image does not include it) and access to a daemon, via the socket or
+`DOCKER_HOST`.
+
+### What one run does
+
+```
+copy the working copy -> private temp dir (symlinks kept as links, never followed)
+docker run --rm --name=automaintainer-sandbox-<uuid>
+  --network=none --read-only --tmpfs=/tmp:rw,nosuid,nodev,size=256m
+  --cap-drop=ALL --security-opt=no-new-privileges
+  --pids-limit=256 --memory=1g --memory-swap=1g --cpus=1
+  --user=<uid:gid> --workdir=/workspace
+  --mount=type=bind,source=<copy>,target=/workspace
+  [--runtime=runsc] --env=HOME=/tmp ... <image> <test command>
+on timeout, error or cancellation: docker rm --force <name>
+delete the copy
+```
+
+- **The host clone is never mounted.** The container gets a fresh copy per
+  command, deleted afterwards, so a test cannot change files (or plant git
+  configuration) that a later step reads. `get_git_diff` runs `git diff
+  --no-ext-diff --no-textconv HEAD` on the host clone.
+- **Environment:** only `HOME`/`TMPDIR=/tmp`, `CI=true`, `NO_COLOR`,
+  `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `GIT_TERMINAL_PROMPT=0` and a
+  `safe.directory` git setting; `PATH` comes from the image. Nothing from
+  the worker's environment is passed, and the docker CLI process itself only
+  gets the variables it needs to find the daemon.
+- **Timeout:** enforced by the worker. When it expires the container is
+  force-removed and the result is `error` (timed out). `--rm` removes it on a
+  normal exit.
+- **Output:** stdout and stderr interleaved, cut to the last
+  `VERIFY_MAX_OUTPUT_BYTES` while reading, with a truncation note.
+- **Exit code 125** (docker could not start the container: missing image,
+  unknown runtime, daemon down) is reported as `error`, not as a failing test.
+- File operations act on the host working copy and refuse paths that escape
+  it. `commit_and_push` raises `NotImplementedError`: verification never
+  pushes.
+
+### Threat model
+
+Isolated from the tests:
+
+- the worker's secrets and environment variables, and its files outside the
+  copy (no host mount other than the copy);
+- the network, unless `SANDBOX_NETWORK` opts into one;
+- the host clone and later pipeline steps (copy-in);
+- privilege escalation inside the container (no capabilities,
+  `no-new-privileges`, non-root user, read-only root filesystem);
+- resource exhaustion beyond the memory, CPU, pids, `/tmp` and time limits.
+
+Not isolated:
+
+- **Access to the Docker daemon is root-equivalent on the daemon's host.**
+  The worker that holds the socket (or `DOCKER_HOST` credentials) can start a
+  privileged container at will, so a compromised worker is a compromised
+  daemon host. Do not mount the production host's socket into the worker.
+  Prefer a **dedicated sandbox host** (a VM with nothing else on it) reached
+  through `DOCKER_HOST`, **rootless Docker**, or both.
+- **Kernel escapes.** With the default `runc` runtime the tests share the
+  host kernel; a kernel vulnerability escapes the container. `SANDBOX_RUNTIME=runsc`
+  (gVisor) puts a user-space kernel in between; a micro-VM backend
+  (Firecracker) is stronger still.
+- **What the tests print.** Output is untrusted and handled as described
+  above; with a non-`none` network a test can also exfiltrate the repository
+  contents (which it could read anyway) to whatever that network reaches.
+- **Disk use** of the copy on the worker is not limited, and a test can fill
+  the copy up to the free space of the worker's temp directory.
+- **The change influencing its own tests** (see Limitations): the sandbox
+  bounds what the tests can do to the host, not whether they are honest.
+
+### Testing
+
+`backend/test_docker_sandbox.py` mocks the docker CLI and checks the exact
+argument list, the absence of host variables, the timeout kill, the output
+cap and cleanup on errors. `backend/test_docker_sandbox_integration.py` runs
+real containers and is skipped unless Docker can run Linux containers and
+`DOCKER_SANDBOX_TESTS=1`; the `Sandbox Integration` workflow
+(`.github/workflows/sandbox.yml`) runs it on `ubuntu-latest` whenever
+`backend/runners/**` or `backend/verification.py` change: a passing, a
+failing and a hanging repository, and one whose tests try the network and a
+host environment variable.
 
 ## Limitations
 
@@ -202,6 +315,6 @@ agent just wrote from an untrusted issue. Treat it as hostile.
   well should make their CI job a required check in branch protection.
 - **Test output does not reach the Maintainer prompt yet**; the Maintainer
   sees it only through the PR. Feeding it into the review is a follow-up of
-  #411, as are the Docker/gVisor backend, change limits and audit rows.
+  #411, as are change limits and audit rows.
 - **Windows hosts** kill the process tree with `taskkill /T`; POSIX hosts use
   a new session and `killpg`.
