@@ -7,6 +7,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+# Seconds a runner command may take when the caller does not say otherwise.
+DEFAULT_COMMAND_TIMEOUT = 60
+
 
 class RunnerError(Exception):
     """Base exception for all runner-related errors."""
@@ -89,13 +92,18 @@ class BaseRunner(ABC):
 
     @abstractmethod
     async def exec_command(
-        self, cmd: Union[str, List[str]], timeout: int = 60
+        self, cmd: Union[str, List[str]], timeout: int = DEFAULT_COMMAND_TIMEOUT
     ) -> Tuple[int, str, str]:
         """
-        Execute a shell or subprocess command within the repository workspace.
+        Execute a command within the repository workspace.
+
+        Commands are never interpreted by a shell: pass an argv list
+        (preferred), or a string that is tokenized like a POSIX command line
+        (``shlex.split``), so ``;``, ``|``, ``$(...)`` and redirections are
+        passed to the program as literal arguments.
 
         Args:
-            cmd: Command string or list of argument strings.
+            cmd: List of argument strings, or a command string to tokenize.
             timeout: Maximum execution duration in seconds.
         Returns:
             Tuple of (returncode, stdout, stderr).

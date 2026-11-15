@@ -5,18 +5,109 @@ LocalRunner adapter for executing operations directly against a local workspace.
 import asyncio
 import fnmatch
 import os
+import shlex
 import shutil
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Tuple, Union
 
 from .base import (
+    DEFAULT_COMMAND_TIMEOUT,
     BaseRunner,
     CommandTimeoutError,
     PathTraversalError,
     RunnerError,
     WorkspaceError,
 )
+
+# Variables a child process may inherit. Everything else (database URLs,
+# service keys, GitHub/Groq tokens, ...) is dropped. An allowlist rather than
+# a denylist, so a newly added secret is excluded by default. The Windows
+# entries are needed for programs (python, git) to start at all there.
+CHILD_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        # Windows
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    }
+)
+
+# Belt and braces on top of the allowlist: never pass these even if a future
+# edit allowlists them by mistake.
+_SECRET_PREFIXES = ("SUPABASE_", "GITHUB_", "GROQ")
+_SECRET_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+
+
+def _is_secret_name(name: str) -> bool:
+    upper = name.upper()
+    return upper.startswith(_SECRET_PREFIXES) or upper.endswith(_SECRET_SUFFIXES)
+
+
+def child_environment(source: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    """Minimal environment for commands run in a workspace.
+
+    Keeps only allowlisted variables from ``source`` (default ``os.environ``)
+    and drops anything that looks like a credential. Git is told never to
+    prompt, so a command needing credentials fails instead of hanging.
+    """
+    source = os.environ if source is None else source
+    env = {
+        k: v
+        for k, v in source.items()
+        if k.upper() in CHILD_ENV_ALLOWLIST and not _is_secret_name(k)
+    }
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _to_argv(cmd: Union[str, List[str]]) -> List[str]:
+    """Turn a command into an argv list without involving a shell.
+
+    Strings are tokenized with POSIX ``shlex`` rules, so quoting works but
+    shell metacharacters (``;``, ``&&``, ``|``, ``$(...)``, ``>``) reach the
+    program as literal text. Trade-off: shell features such as pipes, globs
+    and variable expansion are unavailable; callers needing them must run an
+    explicit program (e.g. ``["sh", "-c", ...]``) and own that decision. On
+    Windows, prefer lists: POSIX rules treat backslashes as escapes.
+    """
+    if isinstance(cmd, str):
+        try:
+            argv = shlex.split(cmd)
+        except ValueError as e:
+            raise RunnerError(f"Could not parse command {cmd!r}: {e}") from e
+    elif isinstance(cmd, (list, tuple)):
+        argv = list(cmd)
+    else:
+        raise RunnerError(f"Command must be a string or a list, not {type(cmd)!r}")
+    if not argv or not all(isinstance(a, str) for a in argv):
+        raise RunnerError("Command must be a non-empty list of strings")
+    return argv
 
 
 class LocalRunner(BaseRunner):
@@ -148,36 +239,30 @@ class LocalRunner(BaseRunner):
         return results
 
     async def exec_command(
-        self, cmd: Union[str, List[str]], timeout: int = 60
+        self, cmd: Union[str, List[str]], timeout: int = DEFAULT_COMMAND_TIMEOUT
     ) -> Tuple[int, str, str]:
         """
         Executes a command asynchronously in the workspace directory.
+
+        The command never goes through a shell (see ``_to_argv``) and the child
+        gets ``child_environment()`` rather than the backend's own environment,
+        so repository code (tests, build scripts) cannot read service secrets.
+        A missing or non-positive ``timeout`` falls back to the default.
         """
-        if isinstance(cmd, list):
-            cmd_str = " ".join(cmd)
-            use_shell = False
-            program = cmd[0]
-            args = cmd[1:]
-        else:
-            cmd_str = cmd
-            use_shell = True
+        argv = _to_argv(cmd)
+        cmd_str = shlex.join(argv)
+        if not timeout or timeout <= 0:
+            timeout = DEFAULT_COMMAND_TIMEOUT
 
         try:
-            if use_shell:
-                proc = await asyncio.create_subprocess_shell(
-                    cmd_str,
-                    cwd=str(self.repo_path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            else:
-                proc = await asyncio.create_subprocess_exec(
-                    program,
-                    *args,
-                    cwd=str(self.repo_path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(self.repo_path),
+                env=child_environment(),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
