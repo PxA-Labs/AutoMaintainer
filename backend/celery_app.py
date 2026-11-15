@@ -165,8 +165,10 @@ celery_app.conf.update(
     task_send_sent_event=True,
 )
 
-# Auto-discover tasks
-celery_app.autodiscover_tasks(["backend"])
+# Task modules are listed in include= above. Do not add
+# autodiscover_tasks(["backend"]): the worker runs from inside backend/ (in the
+# image, /app/backend), where no "backend" package exists, and the failed
+# import kills the worker at startup.
 
 if __name__ == "__main__":
     celery_app.start()

@@ -65,7 +65,11 @@ _ComposeLoader.add_constructor("!override", _tagged)
 
 
 def _override() -> dict:
-    return yaml.load(OVERRIDE.read_text(encoding="utf-8"), Loader=_ComposeLoader)
+    # _ComposeLoader subclasses yaml.SafeLoader and only adds two tag
+    # constructors, so this cannot instantiate arbitrary objects.
+    return yaml.load(  # nosec B506
+        OVERRIDE.read_text(encoding="utf-8"), Loader=_ComposeLoader
+    )
 
 
 def _seed_from_override() -> dict:
