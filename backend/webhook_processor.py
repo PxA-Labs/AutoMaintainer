@@ -6,7 +6,9 @@ with status 'pending' (github_app.handle_github_webhook). This module turns
 those rows into state changes:
 
 - ``installation``: ``deleted`` and ``suspend`` set the installation's
-  ``suspended_at``, which the periodic repository sync already skips;
+  ``suspended_at`` (GitHub's timestamp when the payload has one) and drop
+  this process's cached tokens for it. The periodic repository sync skips
+  such installations and github_app refuses to mint tokens for them.
   ``unsuspend`` clears it and re-syncs the installation's repositories.
 - ``installation_repositories`` (``added`` / ``removed``): re-sync that
   installation's repositories through github_app.sync_installation_repositories.
@@ -37,7 +39,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from celery_app import celery_app
-from github_app import sync_installation_repositories
+from github_app import invalidate_installation_tokens, sync_installation_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +100,13 @@ def _handle(sb, event: dict) -> None:
 
     if event_type == "installation":
         if action in DEACTIVATING_ACTIONS:
-            _set_suspended_at(sb, installation_id, org_id, _now())
+            # GitHub's own timestamp when the payload carries one (suspend).
+            payload_installation = (event.get("payload") or {}).get("installation")
+            suspended_at = (payload_installation or {}).get("suspended_at") or _now()
+            _set_suspended_at(sb, installation_id, org_id, suspended_at)
+            # Tokens this process already holds must not outlive the
+            # suspension; minting re-checks suspended_at (github_app).
+            invalidate_installation_tokens(installation_id)
             return
         if action == "unsuspend":
             _set_suspended_at(sb, installation_id, org_id, None)

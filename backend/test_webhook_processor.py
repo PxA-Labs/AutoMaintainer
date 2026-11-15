@@ -133,6 +133,34 @@ def test_installation_deleted_or_suspended_is_deactivated(sync, action):
     sync.assert_not_called()
 
 
+@pytest.mark.parametrize("action", ["deleted", "suspend"])
+def test_deactivation_drops_cached_installation_tokens(sync, action):
+    github_app._installation_token_cache.clear()
+    github_app._installation_token_cache[(7, "o/r", None)] = ("tok", 9e12)
+    github_app._installation_token_cache[(8, None, None)] = ("other", 9e12)
+    ev = event("installation", action)
+    db = FakeDB(webhook_events=[ev], github_installations=[installation()])
+
+    try:
+        assert process_event(db, dict(ev)) == "completed"
+        assert list(github_app._installation_token_cache) == [(8, None, None)]
+    finally:
+        github_app._installation_token_cache.clear()
+
+
+def test_suspend_records_githubs_suspension_time(sync):
+    ev = event(
+        "installation",
+        "suspend",
+        payload={"installation": {"id": 7, "suspended_at": "2026-11-01T10:00:00Z"}},
+    )
+    db = FakeDB(webhook_events=[ev], github_installations=[installation()])
+
+    assert process_event(db, dict(ev)) == "completed"
+
+    assert db["github_installations"][0]["suspended_at"] == "2026-11-01T10:00:00Z"
+
+
 def test_installation_unsuspend_reactivates_and_resyncs(sync):
     ev = event("installation", "unsuspend")
     db = FakeDB(
