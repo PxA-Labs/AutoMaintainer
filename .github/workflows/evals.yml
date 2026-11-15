@@ -12,6 +12,8 @@ on:
     paths:
       - 'backend/agents.py'
       - 'backend/evals/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
       - '.github/workflows/evals.yml'
   workflow_dispatch:
     inputs:
@@ -25,6 +27,12 @@ on:
         default: 'llama-3.3-70b-versatile'
 
 permissions: read-all
+
+# Same uv version as ci-backend.yml (keep in step with the Dockerfile).
+env:
+  UV_VERSION: "0.13.8"
+  UV_PYTHON: "3.11"
+  UV_PYTHON_DOWNLOADS: never
 
 concurrency:
   group: evals-${{ github.ref }}
@@ -52,13 +60,18 @@ jobs:
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: "3.11"
-        cache: 'pip'
 
-    - name: Install dependencies
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest pytest-asyncio
-        pip install -r requirements.txt
+        uv sync --frozen --group dev
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
     - name: Harness unit tests
       run: python -m pytest -q -p no:cacheprovider evals
@@ -108,13 +121,18 @@ jobs:
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: "3.11"
-        cache: 'pip'
 
-    - name: Install dependencies
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest
-        pip install -r requirements.txt
+        uv sync --frozen --group dev
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
     - name: Oracle baseline (harness sanity check)
       env:
