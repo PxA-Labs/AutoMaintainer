@@ -185,10 +185,15 @@ async def handle_github_webhook(
     Process incoming GitHub webhook event.
     Validates the signature against the raw request body and queues for processing.
     """
+    # HTTP header names are case-insensitive, and the ASGI server lower-cases
+    # them: main.py passes dict(request.headers), so a lookup of
+    # "X-Hub-Signature-256" on that plain dict missed every real delivery.
+    headers = {str(k).lower(): v for k, v in headers.items()}
+
     # Verify webhook signature over the exact bytes GitHub signed.
     if not GITHUB_WEBHOOK_SECRET:
         raise ValueError("GitHub webhook secret is not configured")
-    signature = headers.get("X-Hub-Signature-256", "")
+    signature = headers.get("x-hub-signature-256", "")
     if not verify_webhook_signature(raw_body, signature):
         raise ValueError("Invalid webhook signature")
 
@@ -197,8 +202,8 @@ async def handle_github_webhook(
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"Invalid webhook payload: {e}")
 
-    event_type = headers.get("X-GitHub-Event")
-    delivery_id = headers.get("X-GitHub-Delivery")
+    event_type = headers.get("x-github-event")
+    delivery_id = headers.get("x-github-delivery")
     if not event_type or not delivery_id:
         raise ValueError("Missing required GitHub webhook headers")
 

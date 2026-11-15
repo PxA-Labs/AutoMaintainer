@@ -502,44 +502,20 @@ async def architect_node(state: AgentState):
             readme_content = "Inaccessible."
 
     # Clone the repo locally and analyze it with GitNexus so the MCP server has data
-    import subprocess
     import shutil
-    import base64
-    from workspace import get_safe_repo_dir
+    from workspace import get_safe_repo_dir, sync_repo_clone
 
     repo_dir = str(get_safe_repo_dir(repo))
-    safe_repo_url = f"https://github.com/{repo}.git"
 
-    auth_header = (
-        f"AUTHORIZATION: basic {base64.b64encode(f'x-access-token:{GITHUB_TOKEN}'.encode()).decode()}"
-        if GITHUB_TOKEN
-        else None
-    )
-
-    if not os.path.exists(repo_dir):
-        try:
-            cmd = ["git", "clone"]
-            if auth_header:
-                cmd.extend(["-c", f"http.extraheader={auth_header}"])
-            cmd.extend([safe_repo_url, repo_dir])
-            clone_proc = await asyncio.create_subprocess_exec(
-                *cmd, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-            )
-            await clone_proc.communicate()
-        except Exception as e:
-            print(f"Failed to clone repo {safe_repo_url}: {e}")
-    else:
-        try:
-            cmd = ["git"]
-            if auth_header:
-                cmd.extend(["-c", f"http.extraheader={auth_header}"])
-            cmd.extend(["pull", "--ff-only"])
-            pull_proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=repo_dir, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-            )
-            await pull_proc.communicate()
-        except Exception as e:
-            print(f"Failed to pull repo {safe_repo_url}, continuing with cache: {e}")
+    # The token reaches git through its environment only: `clone -c
+    # http.extraheader=...` persisted it in plaintext in .git/config and
+    # exposed it in argv. Exit codes and timeouts are handled in the helper;
+    # on failure we continue with whatever cached clone exists.
+    try:
+        if not await sync_repo_clone(repo, repo_dir, GITHUB_TOKEN):
+            logger.warning(f"Could not sync clone of {repo}; using cached copy")
+    except Exception as e:
+        logger.warning(f"Failed to sync clone of {repo}, continuing with cache: {e}")
 
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:
@@ -1068,13 +1044,13 @@ async def implementer_node(state: AgentState):
             }
         )
 
-    from workspace import get_safe_repo_dir
-
-    repo_dir = get_safe_repo_dir(state["repo_name"])
-    if repo_dir.exists():
-        local_path = repo_dir / path
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_text(code, encoding="utf-8")
+    # Deliberately no write into the local clone. That clone is the shared
+    # mirror of the DEFAULT branch, while this code lives only on the PR branch
+    # until it is merged: writing it there showed unmerged code in the IDE and
+    # dirtied the tree so every later sync failed. The write also used
+    # `repo_dir / path` without containment checks, so a symlinked directory
+    # committed to the target repo redirected it outside the workspace.
+    # Nothing reads the PR content back from disk; GitHub has it.
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Implementer": "idle"}})
     return {

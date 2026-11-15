@@ -1,8 +1,21 @@
+import asyncio
+import base64
+import hashlib
+import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
+from typing import Optional
+
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
+
+# owner/repo or a bare name. Used with re.fullmatch: re.match with "$" would
+# also accept a trailing newline ("owner/repo\n").
+REPO_NAME_PATTERN = re.compile(r"[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?")
 
 # Top-level entries inside a repository that are never served or written
 # through the filesystem API.
@@ -26,17 +39,25 @@ def get_safe_repo_dir(repo_name: str) -> Path:
     """Safely resolves and creates the directory path for a target repository.
 
     Validates repository name against strict allowlist and prevents path traversal.
+
+    The directory name is a readable slug plus a hash of the full name, so the
+    mapping is one-to-one: flattening "/" alone made "a/b_c" and "a_b/c" share
+    one clone (and therefore one tenant could read another's working tree).
+    The hash is over the lower-cased name because GitHub names are
+    case-insensitive -- "Owner/Repo" and "owner/repo" are the same repository.
     """
     if not repo_name or not isinstance(repo_name, str):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
     # Strict allowlist check: owner/repo or single name
-    if not re.match(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
+    if not REPO_NAME_PATTERN.fullmatch(repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
-    clean_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", repo_name)
-    if ".." in clean_name or not clean_name:
+    slug = repo_name.replace("/", "_")
+    if ".." in slug or slug.strip(".") == "":
         raise HTTPException(status_code=400, detail="Invalid repository name")
+    digest = hashlib.sha256(repo_name.lower().encode("utf-8")).hexdigest()[:12]
+    clean_name = f"{slug}-{digest}"
 
     base_dir = get_base_workspace_dir()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -104,3 +125,156 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
         )
 
     return Path(real_target)
+
+
+# --- Server-side git clone/sync ---------------------------------------------
+
+GIT_TIMEOUT_SECONDS = float(os.getenv("GIT_TIMEOUT_SECONDS", "300"))
+
+# The only URL prefix the auth header is sent to. Scoping it means a remote
+# pointing anywhere else never receives the token.
+_GITHUB_URL_PREFIX = "https://github.com/"
+
+_workspace_scrubbed = False
+
+
+def git_auth_env(token: Optional[str]) -> dict:
+    """Environment for a git child process that authenticates to GitHub.
+
+    The token is passed as configuration through GIT_CONFIG_COUNT /
+    GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n (git >= 2.31). Unlike
+    ``git clone -c http.extraheader=...``, which writes the header into the new
+    clone's .git/config, environment configuration is never persisted, and
+    unlike any ``-c`` it does not appear in the process argv (``ps``).
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        # Overrides any GIT_CONFIG_COUNT inherited from the server environment;
+        # the backend does not rely on one.
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": f"http.{_GITHUB_URL_PREFIX}.extraheader",
+                "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+            }
+        )
+    return env
+
+
+async def _run_git(
+    args: list, cwd: Optional[str], env: dict, timeout: float, quiet: bool = False
+) -> Optional[int]:
+    """Run git and return its exit code, or None if it timed out (and was killed)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.warning("git %s timed out after %ss", args[0], timeout)
+        return None
+    if proc.returncode != 0 and not quiet:
+        logger.warning(
+            "git %s failed (exit %s): %s",
+            args[0],
+            proc.returncode,
+            stderr.decode("utf-8", errors="replace")[-500:].strip(),
+        )
+    return proc.returncode
+
+
+async def scrub_clone_credentials(repo_dir: str) -> None:
+    """Remove a persisted http.extraheader (the clone token) from .git/config.
+
+    Clones made before credentials moved to the environment carry
+    ``AUTHORIZATION: basic <token>`` in plaintext in their config, readable by
+    anything with filesystem access to the workspace (including the web
+    terminal).
+    """
+    config = os.path.join(repo_dir, ".git", "config")
+    try:
+        with open(config, "r", encoding="utf-8", errors="replace") as f:
+            if "extraheader" not in f.read().lower():
+                return
+    except OSError:
+        return
+    # Exit code 5 ("no such key") is expected for whichever key is absent.
+    for key in ("http.extraheader", f"http.{_GITHUB_URL_PREFIX}.extraheader"):
+        await _run_git(
+            ["config", "--local", "--unset-all", key],
+            cwd=repo_dir,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=30,
+            quiet=True,
+        )
+
+
+async def scrub_workspace_credentials() -> None:
+    """Scrub persisted tokens from every clone in the workspace, once per process.
+
+    This also reaches clones under the previous directory naming scheme, which
+    get_safe_repo_dir no longer returns and so would otherwise never be touched.
+    """
+    global _workspace_scrubbed
+    if _workspace_scrubbed:
+        return
+    _workspace_scrubbed = True
+    base = get_base_workspace_dir()
+    if not base.is_dir():
+        return
+    for entry in base.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            await scrub_clone_credentials(str(entry))
+
+
+async def sync_repo_clone(
+    repo_name: str,
+    repo_dir: str,
+    token: Optional[str],
+    *,
+    remote_url: Optional[str] = None,
+    timeout: float = GIT_TIMEOUT_SECONDS,
+) -> bool:
+    """Clone ``repo_name`` into ``repo_dir``, or bring an existing clone up to date.
+
+    Returns True on success. On failure the reason is logged and an existing
+    clone is left as it was, so callers can continue with the cached copy.
+
+    The clone is a server-managed mirror of the default branch, so an existing
+    one is reset to the remote's HEAD instead of ``pull --ff-only``. Local edits
+    there are either already committed upstream (IDE saves) or must not be
+    there at all (unmerged PR code written by older Implementer runs, which
+    made every later fast-forward fail and left the clone permanently stale).
+    """
+    remote = remote_url or f"{_GITHUB_URL_PREFIX}{repo_name}.git"
+    env = git_auth_env(token)
+    await scrub_workspace_credentials()
+
+    if not os.path.exists(repo_dir):
+        rc = await _run_git(
+            ["clone", "--quiet", "--", remote, repo_dir], None, env, timeout
+        )
+        if rc != 0:
+            # A killed or failed clone can leave a partial directory behind,
+            # which the next run would mistake for a usable clone.
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            return False
+        return True
+
+    await scrub_clone_credentials(repo_dir)
+    rc = await _run_git(["fetch", "--quiet", "origin", "HEAD"], repo_dir, env, timeout)
+    if rc != 0:
+        return False
+    # Untracked files (e.g. the .gitnexus index) are deliberately kept.
+    rc = await _run_git(
+        ["reset", "--hard", "--quiet", "FETCH_HEAD"], repo_dir, env, timeout
+    )
+    return rc == 0
