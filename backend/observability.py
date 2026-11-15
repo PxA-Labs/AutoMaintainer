@@ -529,22 +529,43 @@ class TraceContextFilter(logging.Filter):
         return True
 
 
-def setup_structured_logging(level: int = logging.INFO):
-    """Setup structured logging with trace context."""
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s"
-    )
-    handler.setFormatter(formatter)
+STRUCTURED_LOG_FORMAT = (
+    "%(asctime)s %(levelname)s [%(name)s] "
+    "[trace_id=%(trace_id)s span_id=%(span_id)s] %(message)s"
+)
+_EMPTY_TRACE_FIELDS = {"trace_id": "0" * 32, "span_id": "0" * 16}
 
+
+def make_structured_handler(stream=None) -> logging.Handler:
+    """Build a handler that stamps trace context on every record it emits.
+
+    The filter lives on the *handler*, not on a logger: logger-level filters
+    only run for records created on that exact logger, so records from child
+    loggers (``logging.getLogger("x.y")``) that propagate to the root handler
+    would skip them and fail to format. The formatter also carries defaults
+    for the trace fields so a record can never raise ``KeyError`` here.
+    """
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(
+        logging.Formatter(STRUCTURED_LOG_FORMAT, defaults=_EMPTY_TRACE_FIELDS)
+    )
+    handler.addFilter(TraceContextFilter())
+    handler._automaintainer_structured = True  # marker for idempotent setup
+    return handler
+
+
+def setup_structured_logging(level: int = logging.INFO):
+    """Setup structured logging with trace context.
+
+    Idempotent: calling it again (e.g. once per app lifespan) does not stack
+    duplicate handlers on the root logger.
+    """
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    root_logger.addHandler(handler)
-    root_logger.addFilter(TraceContextFilter())
-
-    # Also add to specific loggers
-    for logger_name in ["uvicorn", "fastapi", "celery", "httpx"]:
-        logging.getLogger(logger_name).addFilter(TraceContextFilter())
+    if not any(
+        getattr(h, "_automaintainer_structured", False) for h in root_logger.handlers
+    ):
+        root_logger.addHandler(make_structured_handler())
 
 
 # --- Health Check for Observability ---

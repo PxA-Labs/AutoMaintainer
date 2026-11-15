@@ -451,6 +451,11 @@ function ProposeChangesDialog({
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="e.g., Add user authentication module"
                     className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-2 text-white focus:border-blue-500 focus:outline-none"
+                    // Mounted only when the user presses "Propose Changes",
+                    // which unmounts that button; without this, focus would
+                    // fall to <body> inside an open modal. Not a page-load
+                    // autofocus, which is what the rule guards against.
+                    // eslint-disable-next-line jsx-a11y/no-autofocus
                     autoFocus
                   />
                 </div>
