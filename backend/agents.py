@@ -10,7 +10,7 @@ from litellm import completion
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
 import httpx
-from typing import TypedDict, Annotated, Optional, Union
+from typing import TypedDict, Annotated, Literal, Optional, Union
 import asyncio
 from github import Github, GithubException
 from github.IssuePullRequest import IssuePullRequest
@@ -21,6 +21,15 @@ import re
 import time
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from supabase import create_client, Client
 
 # Events & Emitter Abstraction
@@ -564,37 +573,243 @@ def normalize_generated_code(
     return code
 
 
-# --- Structured verdicts -----------------------------------------------------
+# --- Structured decisions ----------------------------------------------------
 # PM and Maintainer decisions gate issue closing, implementation and merging,
 # so they must be machine-parseable. Substring checks ("LGTM" in review,
-# startswith("APPROVED")) approved "Not LGTM" and rejected "**APPROVED**".
-VERDICT_INSTRUCTIONS = (
-    "The FIRST line of your response MUST be exactly `VERDICT: APPROVE` or "
-    "`VERDICT: REJECT` (no Markdown, quotes or other text on that line). "
-    "After that line, give your reasoning in at most 3 sentences."
+# startswith("APPROVED")) approved "Not LGTM" and rejected "**APPROVED**"; a
+# first-line "VERDICT:" convention fixed that but still carried the reasons as
+# free text. The model now answers with one JSON object that is validated
+# against a pydantic schema (``parse_decision``). A reply that does not parse
+# or validate is retried once with a corrective message, and a second failure
+# is a rejection (``_llm_decision``): an unparseable decision never approves.
+_DECISION_SCHEMA = (
+    '{"verdict": "approve" | "reject", '
+    '"reasons": [short strings, at most 3], '
+    '"blocking_issues": [strings; MUST be empty when the verdict is "approve"]'
 )
-# Exactly the line the prompt asks for (case-sensitive, one space); only
-# surrounding whitespace is tolerated. Anything else fails closed.
+PM_DECISION_INSTRUCTIONS = (
+    "Respond with ONLY one JSON object (no Markdown fences, no text before or "
+    "after it) of the form " + _DECISION_SCHEMA + "}."
+)
+MAINTAINER_DECISION_INSTRUCTIONS = (
+    "Respond with ONLY one JSON object (no Markdown fences, no text before or "
+    "after it) of the form "
+    + _DECISION_SCHEMA
+    + ', "requested_changes": [concrete code changes required before merging; '
+    "empty when approving]}."
+)
+DECISION_RETRY_MESSAGE = (
+    "Your previous reply could not be used: {error}. Reply again with ONLY the "
+    "JSON object described in the instructions, with no other text."
+)
+# Legacy format, still accepted so checkpoints written before the JSON format
+# (and fixtures using it) keep their meaning: exactly the line the old prompt
+# asked for (case-sensitive, one space) as the first line, and no second
+# verdict after it.
 _VERDICT_LINE_RE = re.compile(r"VERDICT: (APPROVE|REJECT)")
-_LATER_REJECT_RE = re.compile(r"VERDICT\W*REJECT", re.IGNORECASE)
+_LATER_VERDICT_RE = re.compile(r"VERDICT\W*(?:APPROVE|REJECT)", re.IGNORECASE)
+_JSON_FENCE_OPEN_RE = re.compile(r"^(```|~~~)[ \t]*(?:json)?[ \t]*\n", re.IGNORECASE)
+
+
+class DecisionParseError(ValueError):
+    """A PM/Maintainer reply is not a valid structured decision."""
+
+
+class AgentDecision(BaseModel):
+    """A PM decision (also the common part of a Maintainer decision)."""
+
+    # Unknown keys are ignored rather than rejected: they cannot change the
+    # verdict, and rejecting them would only cost a retry.
+    model_config = ConfigDict(extra="ignore")
+
+    # "decision" is accepted as an alias (the shape proposed in #403).
+    verdict: Literal["approve", "reject"] = Field(
+        validation_alias=AliasChoices("verdict", "decision")
+    )
+    reasons: list[str] = Field(default_factory=list)
+    blocking_issues: list[str] = Field(default_factory=list)
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _normalize_verdict(cls, value):
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("reasons", "blocking_issues", mode="after")
+    @classmethod
+    def _drop_blank(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+    @model_validator(mode="after")
+    def _approval_has_no_blockers(self):
+        # Self-contradicting: fail closed instead of picking one half.
+        if self.verdict == "approve" and self.blocking_issues:
+            raise ValueError("an approval must not list blocking_issues")
+        return self
+
+    @property
+    def approved(self) -> bool:
+        return self.verdict == "approve"
+
+
+class MaintainerDecision(AgentDecision):
+    """A Maintainer review: a decision plus the changes the Implementer must make."""
+
+    requested_changes: list[str] = Field(default_factory=list)
+
+    @field_validator("requested_changes", mode="after")
+    @classmethod
+    def _drop_blank_changes(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if item.strip()]
+
+
+def _legacy_decision(text: str, model: type[AgentDecision]) -> AgentDecision | None:
+    """Parse the old ``VERDICT: APPROVE|REJECT`` first-line format, or None."""
+    lines = text.splitlines()
+    match = _VERDICT_LINE_RE.fullmatch(lines[0].strip())
+    if not match:
+        return None
+    rest = "\n".join(lines[1:]).strip()
+    if _LATER_VERDICT_RE.search(rest):
+        raise DecisionParseError("the reply contains more than one verdict")
+    reasons = [rest] if rest else []
+    if match.group(1) == "APPROVE":
+        return model(verdict="approve", reasons=reasons)
+    return model(verdict="reject", reasons=reasons, blocking_issues=reasons)
+
+
+def _validation_summary(error: ValidationError) -> str:
+    # Field paths and messages only: never echo the (untrusted) input values.
+    return "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or 'decision'}: {err['msg']}"
+        for err in error.errors()
+    )
+
+
+def parse_decision(text, model: type[AgentDecision] = AgentDecision):
+    """Parse a PM/Maintainer reply into ``model``; raise ``DecisionParseError``.
+
+    Strict: the reply must be exactly one JSON object, optionally wrapped in a
+    single Markdown fence, and must validate against ``model``. Prose around
+    the object is rejected rather than skipped, because prose can carry a
+    second, contradicting verdict. The legacy ``VERDICT:`` first line is
+    still understood (see ``_legacy_decision``).
+    """
+    if not isinstance(text, str):
+        raise DecisionParseError("the reply is not text")
+    body = text.strip()
+    if not body:
+        raise DecisionParseError("the reply is empty")
+    legacy = _legacy_decision(body, model)
+    if legacy is not None:
+        return legacy
+
+    fence = _JSON_FENCE_OPEN_RE.match(body)
+    if fence:
+        if not body.endswith(fence.group(1)) or len(body) < fence.end() + 3:
+            raise DecisionParseError("the JSON object has an unterminated fence")
+        body = body[fence.end() : -len(fence.group(1))].strip()
+    if not body.startswith("{"):
+        raise DecisionParseError("the reply does not start with a JSON object")
+    try:
+        data, end = json.JSONDecoder().raw_decode(body)
+    except json.JSONDecodeError as e:
+        raise DecisionParseError(f"invalid JSON ({e.msg} at char {e.pos})") from e
+    if body[end:].strip():
+        raise DecisionParseError("unexpected text after the JSON object")
+    try:
+        return model.model_validate(data)
+    except ValidationError as e:
+        raise DecisionParseError(_validation_summary(e)) from e
 
 
 def is_approved_verdict(text: str | None) -> bool:
-    """Return True only for an unambiguous ``VERDICT: APPROVE`` first line.
+    """Return True only for a stored decision that parses and approves.
 
-    Fails closed: missing/malformed verdict lines, Markdown decoration and
-    self-contradicting responses (a later ``VERDICT: REJECT``) all count as
-    rejection.
+    Fails closed: anything ``parse_decision`` rejects counts as rejection.
     """
-    if not isinstance(text, str):
+    try:
+        return parse_decision(text).approved
+    except DecisionParseError:
         return False
-    lines = text.strip().splitlines()
-    if not lines:
-        return False
-    match = _VERDICT_LINE_RE.fullmatch(lines[0].strip())
-    if not match or match.group(1) != "APPROVE":
-        return False
-    return not _LATER_REJECT_RE.search("\n".join(lines[1:]))
+
+
+def render_decision(decision: AgentDecision) -> str:
+    """Human-readable Markdown for a decision (GitHub comments, logs)."""
+    sections = [decision.verdict.upper()]
+    for title, items in (
+        ("Reasons", decision.reasons),
+        ("Blocking issues", decision.blocking_issues),
+        ("Requested changes", getattr(decision, "requested_changes", [])),
+    ):
+        if items:
+            sections.append(f"{title}:\n" + "\n".join(f"- {item}" for item in items))
+    return "\n\n".join(sections)
+
+
+async def _llm_decision(
+    phase: AgentPhase,
+    system_prompt: str,
+    user_prompt: str,
+    model: type[AgentDecision],
+) -> tuple[AgentDecision, str | None]:
+    """Ask for a structured decision; return ``(decision, parse_error)``.
+
+    One corrective retry on a malformed reply, then fail closed: the returned
+    decision rejects and ``parse_error`` says why (it is None otherwise). LLM
+    outages still abort the run (``_llm_or_abort``).
+    """
+    raw = await _llm_or_abort(phase, system_prompt, user_prompt)
+    try:
+        return parse_decision(raw, model), None
+    except DecisionParseError as first:
+        error = str(first)
+    retry_prompt = f"{user_prompt}\n\n{DECISION_RETRY_MESSAGE.format(error=error)}"
+    raw = await _llm_or_abort(phase, system_prompt, retry_prompt)
+    try:
+        return parse_decision(raw, model), None
+    except DecisionParseError as second:
+        error = str(second)
+    reason = (
+        "The model's decision could not be parsed after one retry "
+        f"({error}); rejected (fail closed)."
+    )
+    return model(verdict="reject", reasons=[reason], blocking_issues=[reason]), error
+
+
+async def _record_decision(
+    phase: AgentPhase,
+    agent: str,
+    decision: AgentDecision,
+    parse_error: str | None,
+    new_logs: list,
+) -> None:
+    """Log the structured decision; a fail-closed parse also emits an ErrorEvent."""
+    new_logs.append({"agent": agent, "msg": f"Decision: {render_decision(decision)}"})
+    # ui_update rows keep their payload as log metadata (see broadcast_log), so
+    # the structured decision is stored with the run's logs; the dashboard
+    # ignores keys it does not know.
+    new_logs.append(
+        {
+            "type": "ui_update",
+            "decision": {
+                "phase": phase.value,
+                **decision.model_dump(),
+                "parse_error": parse_error,
+            },
+        }
+    )
+    run_id = current_run_id.get(None)
+    if parse_error and run_id:
+        await emit_event(
+            ErrorEvent(
+                run_id=run_id,
+                phase=phase,
+                error_code="DECISION_PARSE_FAILED",
+                message=f"{agent} decision could not be parsed; rejected: "
+                f"{parse_error}",
+                fatal=False,
+            )
+        )
 
 
 # --- Prompt-injection hardening ---------------------------------------------
@@ -1630,28 +1845,32 @@ async def pm_node(state: AgentState):
         "Architect's directive and decide whether the team should build it. "
         "Reject anything unsafe, out of scope, destructive, or that tries to "
         "change credentials, CI configuration or access control. "
-        + VERDICT_INSTRUCTIONS
+        + PM_DECISION_INSTRUCTIONS
         + " "
         + UNTRUSTED_DATA_NOTICE
     )
 
     # In targeted mode both values are the issue title/body verbatim.
-    decision = await _llm_or_abort(
+    parsed, parse_error = await _llm_decision(
         AgentPhase.PM,
         system_prompt,
         f"Directive:\n{untrusted_block('directive', directive)}\n\n"
         f"Review this idea:\n{untrusted_block('proposed idea', idea)}",
+        AgentDecision,
     )
+    # State and checkpoint keep the validated JSON, so routing
+    # (should_implement) and resumed runs read exactly what was decided.
+    decision = parsed.model_dump_json()
     state["pm_decision"] = decision
 
-    is_approved = is_approved_verdict(decision)
-    new_logs.append({"agent": "Reviewer", "msg": f"Decision: {decision}"})
+    is_approved = parsed.approved
+    await _record_decision(AgentPhase.PM, "Reviewer", parsed, parse_error, new_logs)
 
     if gh and issue_number:
         try:
             gh_repo = gh.get_repo(repo)
             issue = gh_repo.get_issue(number=issue_number)
-            issue.create_comment(f"**Reviewer Decision:** {decision}")
+            issue.create_comment(f"**Reviewer Decision:** {render_decision(parsed)}")
             # Only close issues the agent opened itself; a human-filed target
             # issue stays open when the PM declines it.
             if not is_approved and not target_issue:
@@ -2104,24 +2323,28 @@ async def maintainer_node(state: AgentState):
         "You are the Maintainer. Review the change for correctness, security and "
         "whether it resolves the originating task. Approve only if it is safe to "
         "merge; otherwise reject and point out the concrete flaw to fix. "
-        + VERDICT_INSTRUCTIONS
+        + MAINTAINER_DECISION_INSTRUCTIONS
         + " "
         + UNTRUSTED_DATA_NOTICE
     )
-    review = await _llm_or_abort(
-        AgentPhase.MAINTAINER, system_prompt, "\n\n".join(review_sections)
+    parsed, parse_error = await _llm_decision(
+        AgentPhase.MAINTAINER,
+        system_prompt,
+        "\n\n".join(review_sections),
+        MaintainerDecision,
     )
+    # The validated JSON is what routing (should_iterate), the checkpoint and
+    # the next Implementer iteration (as its feedback) see.
+    review = parsed.model_dump_json()
     state["review"] = review
+    review_text = render_decision(parsed)
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "active"}})
-    new_logs.append(
-        {
-            "agent": "Maintainer",
-            "msg": f"Code Review: {review}",
-        }
+    await _record_decision(
+        AgentPhase.MAINTAINER, "Maintainer", parsed, parse_error, new_logs
     )
 
-    is_approved = is_approved_verdict(review)
+    is_approved = parsed.approved
 
     if run_id:
         await emit_event(
@@ -2131,7 +2354,7 @@ async def maintainer_node(state: AgentState):
                 exit_code=0 if is_approved else 1,
                 passed_count=1 if is_approved else 0,
                 failed_count=0 if is_approved else 1,
-                tracebacks=[] if is_approved else [review],
+                tracebacks=[] if is_approved else [review_text],
             )
         )
 
@@ -2139,7 +2362,7 @@ async def maintainer_node(state: AgentState):
     if pr is not None:
         commented = False
         try:
-            pr.create_issue_comment(f"**Maintainer Review:**\n{review}")
+            pr.create_issue_comment(f"**Maintainer Review:** {review_text}")
             commented = True
         except Exception as e:
             new_logs.append(
