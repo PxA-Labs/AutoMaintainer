@@ -1,0 +1,139 @@
+name: Agent Evals
+
+# Offline Implementer quality evaluation (epic #414, docs/EVALS.md).
+# - Pull requests touching the Implementer or the harness: harness unit tests,
+#   oracle/no-op baselines and cassette replay. No secrets; the harness makes
+#   no network calls in these modes (only pip install does).
+# - Manual dispatch: a live run against Groq using the GROQ_API_KEY secret.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/agents.py'
+      - 'backend/evals/**'
+      - '.github/workflows/evals.yml'
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: "Comma-separated task ids, or 'all'"
+        required: false
+        default: 'all'
+      model:
+        description: 'Groq model id'
+        required: false
+        default: 'llama-3.3-70b-versatile'
+
+permissions: read-all
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Harness, baselines & replay
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-asyncio
+        pip install -r requirements.txt
+
+    - name: Harness unit tests
+      run: python -m pytest -q -p no:cacheprovider evals
+
+    # The oracle must resolve everything and the no-op nothing; anything else
+    # means a broken task or a broken harness, not a model result.
+    - name: Oracle baseline (must be 100%)
+      run: python -m evals.run --mode oracle --jobs 4 --out eval-results/oracle.json --min-resolve-rate 1.0
+
+    - name: No-op baseline (must be 0%)
+      run: python -m evals.run --mode noop --jobs 4 --out eval-results/noop.json --max-resolve-rate 0.0
+
+    # The committed cassettes are synthetic: 6 of 10 are correct fixes. A drop
+    # means normalize_generated_code or the harness started rejecting or
+    # mis-applying output it used to handle.
+    - name: Cassette replay
+      run: python -m evals.run --mode replay --jobs 4 --out eval-results/replay.json --min-resolve-rate 0.6
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: eval-results-offline
+        path: backend/eval-results/
+        retention-days: 14
+
+  live:
+    name: Live eval (Groq)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest
+        pip install -r requirements.txt
+
+    - name: Oracle baseline (harness sanity check)
+      env:
+        EVAL_TASKS: ${{ inputs.tasks }}
+      run: python -m evals.run --mode oracle --tasks "$EVAL_TASKS" --jobs 4 --out eval-results/oracle.json --min-resolve-rate 1.0
+
+    # Inputs reach the shell through env vars, never via ${{ }} interpolation
+    # inside the script, so they cannot inject commands.
+    - name: Live run
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        EVAL_TASKS: ${{ inputs.tasks }}
+        EVAL_MODEL: ${{ inputs.model }}
+      run: |
+        python -m evals.run --mode live --tasks "$EVAL_TASKS" --model "$EVAL_MODEL" \
+          --record eval-results/cassettes --out eval-results/live.json
+
+    - name: Upload results and recorded cassettes
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: eval-results-live
+        path: backend/eval-results/
+        retention-days: 30
