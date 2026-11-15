@@ -640,6 +640,13 @@ _JS_REGEX_KEYWORDS = {
     "throw", "case", "do", "else", "yield", "await",
 }  # fmt: skip
 _JS_WORD_RE = re.compile(r"[A-Za-z0-9_$]+")
+# A regex literal: escapes, character classes (which may contain an unescaped
+# "/") and other characters up to the closing "/" on the same line. The C
+# regex engine does the scan, limited to _JS_REGEX_MAX_CHARS per candidate, so
+# a long line of "/" that never close a literal (crafted or not) costs
+# O(n * limit) in C instead of O(n^2) Python steps.
+_JS_REGEX_LITERAL_RE = re.compile(r"/(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\[\n])+/")
+_JS_REGEX_MAX_CHARS = 1024
 
 
 def _js_balance_error(code: str) -> str | None:
@@ -716,20 +723,9 @@ def _js_balance_error(code: str) -> str | None:
                 last == "" or last in _JS_REGEX_PRECEDERS or last in _JS_REGEX_KEYWORDS
             )
         ):
-            j, in_class = i + 1, False
-            while j < n and code[j] != "\n":
-                if code[j] == "\\":
-                    j += 2
-                    continue
-                if code[j] == "[":
-                    in_class = True
-                elif code[j] == "]":
-                    in_class = False
-                elif code[j] == "/" and not in_class:
-                    break
-                j += 1
-            if j < n and code[j] == "/":
-                i, last = j + 1, "a"
+            literal = _JS_REGEX_LITERAL_RE.match(code, i, i + _JS_REGEX_MAX_CHARS)
+            if literal:
+                i, last = literal.end(), "a"
                 continue
             i, last = i + 1, "/"  # not a regex after all: division / JSX "</"
             continue
@@ -776,22 +772,35 @@ _JSONC_NAME_RE = re.compile(
     r"(?:^|/)(?:[tj]sconfig[\w.-]*\.json|devcontainer\.json|\.vscode/[^/]+\.json)$",
     re.IGNORECASE,
 )
-# Wording that explicitly asks for code to be removed, which legitimately
-# shrinks a file. Deliberately broad: it only lifts the shrink guard, while
-# the syntax checks above still apply.
+# An explicit request to remove code, which legitimately shrinks a file: an
+# imperative removal verb at the start of a clause (start of a line, after a
+# list marker, or after ".", "!", "?", ";" or ":"), optionally after
+# "please", followed by its object. Matched against the task only, never the
+# Maintainer review, and deliberately narrow: the shrink guard is the only
+# check against a lazy rewrite that is still valid syntax ("# ... rest
+# unchanged"), so a mere mention ("the delete button", "drop-down",
+# ".trim()", "we removed X last week") must not lift it. A missed request
+# fails safe: the run aborts with INVALID_GENERATED_CODE instead of committing.
+# Known false positive: a line that starts with a noun phrase such as
+# "Delete button crashes".
 _DELETION_INTENT_RE = re.compile(
-    r"\b(?:delet(?:e|es|ed|ing|ion)|remov(?:e|es|ed|ing|al)|drop(?:s|ped|ping)?"
-    r"|prun(?:e|es|ed|ing)|strip(?:s|ped|ping)?\s+out|get\s+rid\s+of"
-    r"|shrink|shorten|trim)\b",
-    re.IGNORECASE,
+    r"(?:^|[.!?;:][ \t]+)[ \t]*(?:(?:[-*+>]|\d+[.)])[ \t]+)?(?:please[ \t]+)?"
+    r"(?:delete|remove|drop|prune|strip(?:[ \t]+out)?|get[ \t]+rid[ \t]+of"
+    r"|cut|shorten)[ \t]+(?=[\w`'\"])",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+
+def asks_for_removal(directive: str | None) -> bool:
+    """True if the task explicitly asks for code to be removed (see above)."""
+    return bool(_DELETION_INTENT_RE.search(directive or ""))
 
 
 def validate_generated_code(
     code: str,
     path: str | None,
     original: str | None = None,
-    instructions: str = "",
+    directive: str = "",
 ) -> None:
     """Raise ``GeneratedCodeError`` if ``code`` must not be committed to ``path``.
 
@@ -800,8 +809,9 @@ def validate_generated_code(
       for JavaScript/TypeScript. Other file types are not checked.
     * Truncated rewrites: when ``original`` (the current file) is larger than
       ``IMPLEMENTER_SHRINK_GUARD_MIN_BYTES``, the new file must keep at least
-      ``IMPLEMENTER_MIN_SIZE_RATIO`` of its size, unless ``instructions`` (the
-      task and Maintainer feedback) explicitly ask for removal.
+      ``IMPLEMENTER_MIN_SIZE_RATIO`` of its size, unless ``directive`` (the
+      task, not the Maintainer feedback) explicitly asks for removal
+      (``asks_for_removal``).
     """
     name = (path or "").replace("\\", "/")
     ext = name.rsplit(".", 1)[-1].lower() if "." in name.rsplit("/", 1)[-1] else ""
@@ -821,7 +831,7 @@ def validate_generated_code(
     if (
         old_size > IMPLEMENTER_SHRINK_GUARD_MIN_BYTES
         and new_size < old_size * IMPLEMENTER_MIN_SIZE_RATIO
-        and not _DELETION_INTENT_RE.search(instructions or "")
+        and not asks_for_removal(directive)
     ):
         raise GeneratedCodeError(
             f"Implementer output shrinks the file from {old_size} to {new_size} "
@@ -897,6 +907,15 @@ class AgentDecision(BaseModel):
     def _drop_blank(cls, value: list[str]) -> list[str]:
         return [item.strip() for item in value if item.strip()]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _one_verdict_key(cls, data):
+        # With both keys AliasChoices would silently pick "verdict"; a reply
+        # carrying two verdicts is ambiguous, so it fails closed.
+        if isinstance(data, dict) and "verdict" in data and "decision" in data:
+            raise ValueError('give either "verdict" or "decision", not both')
+        return data
+
     @model_validator(mode="after")
     def _approval_has_no_blockers(self):
         # Self-contradicting: fail closed instead of picking one half.
@@ -919,6 +938,14 @@ class MaintainerDecision(AgentDecision):
     def _drop_blank_changes(cls, value: list[str]) -> list[str]:
         return [item.strip() for item in value if item.strip()]
 
+    @model_validator(mode="after")
+    def _approval_requests_no_changes(self):
+        # Approving merges the PR, which would silently drop the changes the
+        # reviewer just asked for.
+        if self.verdict == "approve" and self.requested_changes:
+            raise ValueError("an approval must not list requested_changes")
+        return self
+
 
 def _legacy_decision(text: str, model: type[AgentDecision]) -> AgentDecision | None:
     """Parse the old ``VERDICT: APPROVE|REJECT`` first-line format, or None."""
@@ -935,6 +962,17 @@ def _legacy_decision(text: str, model: type[AgentDecision]) -> AgentDecision | N
     return model(verdict="reject", reasons=reasons, blocking_issues=reasons)
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    # json's default keeps the last duplicate, so '{"verdict": "reject",
+    # "verdict": "approve"}' would approve; a repeated key fails closed.
+    data: dict = {}
+    for key, value in pairs:
+        if key in data:
+            raise DecisionParseError("the JSON object repeats a key")
+        data[key] = value
+    return data
+
+
 def _validation_summary(error: ValidationError) -> str:
     # Field paths and messages only: never echo the (untrusted) input values.
     return "; ".join(
@@ -949,7 +987,8 @@ def parse_decision(text, model: type[AgentDecision] = AgentDecision):
     Strict: the reply must be exactly one JSON object, optionally wrapped in a
     single Markdown fence, and must validate against ``model``. Prose around
     the object is rejected rather than skipped, because prose can carry a
-    second, contradicting verdict. The legacy ``VERDICT:`` first line is
+    second, contradicting verdict; for the same reason a repeated key, or
+    both "verdict" and "decision" in one object, is rejected. The legacy ``VERDICT:`` first line is
     still understood (see ``_legacy_decision``).
     """
     if not isinstance(text, str):
@@ -969,7 +1008,9 @@ def parse_decision(text, model: type[AgentDecision] = AgentDecision):
     if not body.startswith("{"):
         raise DecisionParseError("the reply does not start with a JSON object")
     try:
-        data, end = json.JSONDecoder().raw_decode(body)
+        data, end = json.JSONDecoder(
+            object_pairs_hook=_reject_duplicate_keys
+        ).raw_decode(body)
     except json.JSONDecodeError as e:
         raise DecisionParseError(f"invalid JSON ({e.msg} at char {e.pos})") from e
     if body[end:].strip():
@@ -984,9 +1025,12 @@ def is_approved_verdict(text: str | None) -> bool:
     """Return True only for a stored decision that parses and approves.
 
     Fails closed: anything ``parse_decision`` rejects counts as rejection.
+    Parsed with the stricter ``MaintainerDecision`` schema (a superset of the
+    PM one) so a stored review that approves while requesting changes never
+    routes to merge.
     """
     try:
-        return parse_decision(text).approved
+        return parse_decision(text, MaintainerDecision).approved
     except DecisionParseError:
         return False
 
@@ -2285,11 +2329,14 @@ async def implementer_node(state: AgentState):
             path=path,
             finish_reason=getattr(raw_code, "finish_reason", None),
         )
-        validate_generated_code(
+        # Off the event loop: CPU-bound checks over up to
+        # IMPLEMENTER_MAX_FILE_CHARS of model output and untrusted repo code.
+        await asyncio.to_thread(
+            validate_generated_code,
             code,
             path,
             original=original_content if target_file_exists else None,
-            instructions=f"{idea}\n{review}",
+            directive=idea,
         )
     except (ValueError, RuntimeError) as e:
         raise PipelineAbortError(

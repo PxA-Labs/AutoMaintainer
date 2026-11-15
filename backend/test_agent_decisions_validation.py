@@ -1,6 +1,8 @@
 """Implementer output is validated before it is committed (#393): syntax
 checks for more languages and a guard against truncated rewrites."""
 
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -74,6 +76,42 @@ def test_js_heuristic_accepts_valid_code(code):
     validate_generated_code(code, "src/app.js")
 
 
+def test_js_regex_literals_with_slashes_in_classes():
+    code = "const parts = p.split(/[/\\\\]/);\nconst seg = /^[^/]+/.exec(p);\n"
+    validate_generated_code(code, "src/path.ts")
+
+
+def test_js_heuristic_is_not_quadratic_on_unclosed_regex_candidates():
+    # Each "/" after an operator starts a regex candidate that never closes.
+    # The old scan walked to the end of the line for every candidate: ~114 s
+    # on this 60,002-character line. Generous bound to avoid CI flakiness.
+    hostile = "x=" + "(/[" * 20000
+    started = time.perf_counter()
+    error = agents._js_balance_error(hostile)
+    assert time.perf_counter() - started < 5
+    assert error is not None  # the "(" are never closed
+
+
+@pytest.mark.asyncio
+async def test_implementer_validates_off_the_event_loop(monkeypatch):
+    monkeypatch.setattr(agents, "supabase", None)
+    repo = _repo_with_file(b"export const a = 1;\n")
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: repo))
+
+    async def llm(*a, **k):
+        return "export const a = 2;\n"
+
+    threads = []
+
+    def spy(*args, **kwargs):
+        threads.append(threading.current_thread())
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", llm)
+    monkeypatch.setattr(agents, "validate_generated_code", spy)
+    await agents.implementer_node(_state("Update src/app.js:1-1"))
+    assert threads and threads[0] is not threading.main_thread()
+
+
 def test_existing_syntax_problems_do_not_block_a_change():
     # The checker only refuses errors the Implementer introduces: a file that
     # already fails (another dialect, or pre-existing breakage) is not checked.
@@ -93,19 +131,46 @@ def test_large_shrink_is_rejected():
     truncated = BIG[: len(BIG) // 4]
     truncated = truncated[: truncated.rfind("\n\n\n")] + "\n"  # still valid Python
     with pytest.raises(GeneratedCodeError, match="shrinks the file"):
-        validate_generated_code(
-            truncated, "mod.py", original=BIG, instructions="Fix f3"
-        )
+        validate_generated_code(truncated, "mod.py", original=BIG, directive="Fix f3")
 
 
-def test_shrink_allowed_when_task_asks_for_removal():
-    small = "def f0(x):\n    return x\n"
-    validate_generated_code(
-        small, "mod.py", original=BIG, instructions="Remove the unused helpers f1-f149."
-    )
-    validate_generated_code(
-        small, "mod.py", original=BIG, instructions="Please delete dead code."
-    )
+SMALL = "def f0(x):\n    return x\n"
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "Remove the unused helpers f1-f149.",
+        "Please delete dead code.",
+        "Clean up mod.py: drop every helper except f0",
+        "Refactor mod.py\n\n- Remove f1-f149\n- Keep f0",
+        "1. Get rid of the legacy helpers",
+        "Prune `f1`..`f149` from mod.py",
+    ],
+)
+def test_shrink_allowed_when_task_asks_for_removal(directive):
+    assert agents.asks_for_removal(directive)
+    validate_generated_code(SMALL, "mod.py", original=BIG, directive=directive)
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        # Mentions of removal words that are not a request to remove code.
+        "Fix the drop-down menu closing",
+        "Use .trim() on input",
+        "The delete button crashes",
+        "Pressing remove on a cart item does nothing",
+        "We removed the cache last week and now f3 is slow",
+        "Trim whitespace from user input",
+        "Fix f3; the removal flow is broken",
+        "",
+    ],
+)
+def test_mentions_of_removal_do_not_lift_the_shrink_guard(directive):
+    assert not agents.asks_for_removal(directive)
+    with pytest.raises(GeneratedCodeError, match="shrinks the file"):
+        validate_generated_code(SMALL, "mod.py", original=BIG, directive=directive)
 
 
 def test_shrink_guard_boundaries(monkeypatch):
@@ -180,6 +245,25 @@ async def test_implementer_refuses_invalid_output_before_committing(
     repo.create_git_ref.assert_not_called()
     repo.update_file.assert_not_called()
     repo.create_file.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maintainer_feedback_does_not_lift_the_shrink_guard(monkeypatch):
+    # Only the task can ask for removal: a review mentioning "remove the debug
+    # print" must not let a truncated rewrite through on a later iteration.
+    monkeypatch.setattr(agents, "supabase", None)
+    repo = _repo_with_file(BIG.encode())
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: repo))
+
+    async def llm(*a, **k):
+        return SMALL
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", llm)
+    review = '{"verdict": "reject", "requested_changes": ["Remove the debug print."]}'
+    with pytest.raises(agents.PipelineAbortError) as exc:
+        await agents.implementer_node(_state("Fix f3 in src/app.py:1-600", review))
+    assert exc.value.error_code == "INVALID_GENERATED_CODE"
+    repo.update_file.assert_not_called()
 
 
 @pytest.mark.asyncio

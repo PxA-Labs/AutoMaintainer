@@ -89,6 +89,13 @@ def test_rejections_parse_as_reject(text):
             '{"verdict": "approve", "blocking_issues": ["SQL injection"]}',
             "must not list blocking_issues",
         ),
+        # Two verdicts in one object: json keeps the last duplicate and
+        # AliasChoices prefers "verdict", so either would approve.
+        ('{"verdict": "reject", "verdict": "approve"}', "repeats a key"),
+        ('{"verdict": "approve", "verdict": "approve"}', "repeats a key"),
+        ('{"verdict": "approve", "x": {"a": 1, "a": 2}}', "repeats a key"),
+        ('{"decision": "reject", "verdict": "approve"}', "not both"),
+        ('{"verdict": "approve", "decision": "approve"}', "not both"),
         ("VERDICT: APPROVE\nActually, VERDICT: REJECT", "more than one verdict"),
         ("**VERDICT: APPROVE**", "does not start with a JSON object"),
     ],
@@ -123,6 +130,18 @@ def test_maintainer_decision_carries_requested_changes():
     assert rendered.startswith("REJECT")
     assert "- Use ceil division" in rendered
     assert "- last page dropped" in rendered
+
+
+def test_maintainer_approval_with_requested_changes_is_contradictory():
+    text = '{"verdict": "approve", "requested_changes": ["fix x"]}'
+    with pytest.raises(DecisionParseError, match="must not list requested_changes"):
+        parse_decision(text, MaintainerDecision)
+    # Stored reviews are routed with the Maintainer schema too.
+    assert is_approved_verdict(text) is False
+    assert should_iterate({"review": text, "iteration": 0}) == "implementer"
+    # Blank entries are dropped first, so they do not make an approval invalid.
+    blank = '{"verdict": "approve", "requested_changes": ["  "]}'
+    assert parse_decision(blank, MaintainerDecision).approved
 
 
 def test_routing_reads_the_stored_json():
@@ -301,6 +320,35 @@ async def test_maintainer_never_merges_on_unparseable_reviews(monkeypatch, repo)
     )
 
     assert len(calls) == 2
+    assert result["merge_status"] == "changes_requested"
+    assert is_approved_verdict(result["review"]) is False
+    pr.merge.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        '{"verdict": "approve", "requested_changes": ["Handle the empty page."]}',
+        '{"verdict": "reject", "verdict": "approve"}',
+        '{"decision": "reject", "verdict": "approve"}',
+    ],
+)
+@pytest.mark.asyncio
+async def test_maintainer_never_merges_contradictory_approvals(
+    monkeypatch, repo, reply
+):
+    monkeypatch.setenv("MERGE_POLICY", "auto")
+    pr = repo.get_pull.return_value
+    pr.get_files.return_value = []
+    calls = []
+    monkeypatch.setattr(
+        agents, "run_llm_with_tools", _scripted_llm([reply, reply], calls)
+    )
+    result = await agents.maintainer_node(
+        {"code": "x", "repo_name": "o/r", "pr_number": 7, "iteration": 0}
+    )
+
+    assert len(calls) == 2  # one corrective retry, then fail closed
     assert result["merge_status"] == "changes_requested"
     assert is_approved_verdict(result["review"]) is False
     pr.merge.assert_not_called()
