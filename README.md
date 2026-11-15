@@ -104,17 +104,20 @@ NEXT_PUBLIC_BACKEND_URL="http://localhost:8000"
 ```
 
 ### 3. Run Backend (FastAPI)
+Backend dependencies are managed with [uv](https://docs.astral.sh/uv/) (`backend/pyproject.toml` + `backend/uv.lock`):
 ```bash
 cd backend
-pip install -r requirements.txt
-fastapi dev main.py
+uv sync                      # creates backend/.venv from uv.lock (incl. test deps)
+uv run uvicorn main:app --reload --port 8000
 ```
 
 Agent runs are executed by a Celery worker. Without one, runs stay `queued`:
 ```bash
 cd backend
-celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
+uv run celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
 ```
+
+`backend/requirements.txt` is generated from `uv.lock` for tools that need a pip requirements file; do not edit it by hand. See [CONTRIBUTING.md](./CONTRIBUTING.md#managing-backend-dependencies) for adding or upgrading dependencies.
 
 Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docker:
 ```bash
