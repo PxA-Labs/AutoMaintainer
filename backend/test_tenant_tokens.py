@@ -76,6 +76,12 @@ class Rows:
         self.op = ("single", None)
         return self
 
+    def maybe_single(self):
+        # Like postgrest-py: execute() returns None (not a response) when no
+        # row matches, so callers must handle a None result.
+        self.op = ("maybe_single", None)
+        return self
+
     def eq(self, col, val):
         self.filters.append(lambda r: r.get(col) == val)
         return self
@@ -117,6 +123,8 @@ class Rows:
                 rows.append(dict(row))
         elif kind == "single":
             return SimpleNamespace(data=matched[0] if matched else None)
+        elif kind == "maybe_single":
+            return SimpleNamespace(data=matched[0]) if matched else None
         return SimpleNamespace(data=matched)
 
 

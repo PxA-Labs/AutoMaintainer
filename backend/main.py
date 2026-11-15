@@ -27,13 +27,15 @@ import platform
 import subprocess
 import re
 import logging
+import threading
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 # Celery integration
-from celery_app import celery_app
+from celery_app import celery_app, redis_configured
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
 from github_app import (
     AUTH_MODE_APP,
@@ -44,6 +46,8 @@ from github_app import (
     handle_github_webhook,
     verify_installation_claim,
 )
+from quotas import assist_limiter
+from webhook_processor import process_pending_events, process_webhook_events_task
 
 # Observability
 from observability import (
@@ -163,6 +167,20 @@ def _fetch_membership(supabase_client, user_id: str):
     )
 
 
+def _row_or_none(result) -> Optional[dict]:
+    """The row from a ``.limit(1).maybe_single().execute()`` query, or None.
+
+    ``.single()`` makes PostgREST answer 406 when no row matches, which
+    postgrest-py raises as APIError, so a missing repo/run/membership surfaced
+    as a 500. ``.maybe_single()`` instead returns ``None`` (not a response
+    object) for zero rows; ``.limit(1)`` keeps it from raising if a filter
+    unexpectedly matches several rows.
+    """
+    if result is None:
+        return None
+    return getattr(result, "data", None) or None
+
+
 # Org roles allowed to change repository contents or start/stop runs.
 # 'viewer' is read-only. Unknown or missing roles fail closed.
 WRITE_ROLES = frozenset({"owner", "admin", "member"})
@@ -267,17 +285,19 @@ async def validate_repo_access(
         .select("id, github_installation_id")
         .eq("org_id", org_id)
         .eq("full_name", repo_name)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
+    repo = _row_or_none(result)
 
-    if not result.data:
+    if not repo:
         raise HTTPException(
             status_code=404,
             detail=f"Repository {repo_name} not found in organization. Please sync repositories first.",
         )
 
-    return result.data["id"], result.data["github_installation_id"]
+    return repo["id"], repo["github_installation_id"]
 
 
 async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
@@ -492,9 +512,45 @@ app.add_middleware(
 )
 
 
+def _process_webhook_inline(sb, delivery_id: str) -> None:
+    """Background-task body when no broker is configured (local development)."""
+    try:
+        process_pending_events(sb, delivery_id=delivery_id)
+    except Exception:
+        logger.exception("Inline processing of webhook %s failed", delivery_id)
+
+
+async def _schedule_webhook_processing(
+    delivery_id: str, background_tasks: BackgroundTasks, sb
+) -> None:
+    """Hand a stored delivery to webhook_processor.
+
+    The row is already persisted, so a failure to enqueue is logged rather
+    than reported to GitHub: the periodic sweep processes pending rows.
+    Without REDIS_URL there is no worker, so the event is processed in this
+    process after the response is sent, like tasks.start_agent_task does.
+    """
+    if not redis_configured():
+        background_tasks.add_task(_process_webhook_inline, sb, delivery_id)
+        return
+    try:
+        await asyncio.to_thread(
+            process_webhook_events_task.apply_async,
+            kwargs={"delivery_id": delivery_id},
+            queue="github_sync",
+        )
+    except Exception:
+        logger.warning(
+            "Could not enqueue webhook %s; the periodic sweep will process it",
+            delivery_id,
+            exc_info=True,
+        )
+
+
 @app.post("/webhooks/github")
-async def github_webhook(request: Request):
-    """Receive and persist signed GitHub App webhook deliveries."""
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Receive and persist signed GitHub App webhook deliveries, then
+    enqueue their processing."""
     from agents import supabase as agents_supabase
 
     if not os.getenv("GITHUB_WEBHOOK_SECRET"):
@@ -506,7 +562,7 @@ async def github_webhook(request: Request):
 
     raw_body = await request.body()
     try:
-        return await handle_github_webhook(
+        result = await handle_github_webhook(
             raw_body,
             dict(request.headers),
             agents_supabase,
@@ -516,6 +572,13 @@ async def github_webhook(request: Request):
     except Exception:
         logger.exception("GitHub webhook processing failed")
         raise HTTPException(status_code=500, detail="Failed to queue GitHub webhook")
+
+    # Only newly stored rows; duplicates were enqueued on first delivery.
+    if result.get("status") == "queued":
+        await _schedule_webhook_processing(
+            result["delivery_id"], background_tasks, agents_supabase
+        )
+    return result
 
 
 @app.get("/healthz")
@@ -569,6 +632,53 @@ class InlineAssistRequest(BaseModel):
 
 # --- New Celery-based endpoints ---
 
+AGENT_QUEUE = "agent_runs"
+WORKER_PING_TIMEOUT_SECONDS = float(os.getenv("WORKER_PING_TIMEOUT_SECONDS", "1.0"))
+WORKER_PING_CACHE_SECONDS = float(os.getenv("WORKER_PING_CACHE_SECONDS", "5.0"))
+_worker_probe = {"checked_at": float("-inf"), "available": False}
+_worker_probe_lock = threading.Lock()
+
+
+def _probe_agent_worker() -> bool:
+    """True if some live Celery worker consumes the agent_runs queue.
+
+    Uses active_queues rather than ping: on Render the maintenance worker
+    (maintenance,github_sync) answers a ping even when no agent worker runs,
+    and runs would then sit in the queue forever.
+    """
+    try:
+        replies = celery_app.control.inspect(
+            timeout=WORKER_PING_TIMEOUT_SECONDS
+        ).active_queues()
+    except Exception as exc:
+        logger.warning("Celery worker probe failed: %s", exc)
+        return False
+    return any(
+        queue.get("name") == AGENT_QUEUE
+        for queues in (replies or {}).values()
+        for queue in queues or ()
+    )
+
+
+def _agent_worker_available_cached() -> bool:
+    """The worker probe, cached so /start costs at most one broadcast per window.
+
+    Both answers are cached: a newly started worker is seen within
+    WORKER_PING_CACHE_SECONDS, and a burst of /start calls while no worker
+    runs does not become a burst of broadcasts. The lock makes concurrent
+    callers share one probe; it is a threading lock because this runs in the
+    thread pool and must not be tied to one event loop.
+    """
+    with _worker_probe_lock:
+        if time.monotonic() - _worker_probe["checked_at"] >= WORKER_PING_CACHE_SECONDS:
+            _worker_probe["available"] = _probe_agent_worker()
+            _worker_probe["checked_at"] = time.monotonic()
+        return _worker_probe["available"]
+
+
+async def agent_worker_available() -> bool:
+    return await asyncio.to_thread(_agent_worker_available_cached)
+
 
 @app.post("/start")
 async def start_agents(
@@ -596,6 +706,16 @@ async def start_agents(
         raise
     except Exception as e:
         raise internal_error(500, "Repository validation failed", e)
+
+    # Without a worker the task would wait in the broker indefinitely and the
+    # run would stay "queued". Checked before the run row is created.
+    if not await agent_worker_available():
+        raise HTTPException(
+            status_code=503,
+            detail="No agent worker is available to run this job. "
+            "Start a Celery worker on the 'agent_runs' queue and try again.",
+            headers={"Retry-After": str(int(WORKER_PING_CACHE_SECONDS) or 1)},
+        )
 
     # Create run record in database
     run_id = str(uuid.uuid4())
@@ -682,14 +802,14 @@ async def get_run_status(run_id: str, org_id: str = Depends(get_org_id)):
         .select("*")
         .eq("id", run_id)
         .eq("org_id", org_id)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
+    run = _row_or_none(result)
 
-    if not result.data:
+    if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-
-    run = result.data
 
     # If still queued/running, check Celery task status
     celery_task_id = run.get("celery_task_id")
@@ -763,18 +883,20 @@ async def stop_agents(
             .select("id, status, org_id")
             .eq("id", run_id)
             .eq("org_id", org_id)
-            .single()
+            .limit(1)
+            .maybe_single()
             .execute()
         )
+        run = _row_or_none(result)
 
-        if not result.data:
+        if not run:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        if result.data["status"] not in ("queued", "running"):
+        if run["status"] not in ("queued", "running"):
             return {
                 "status": "not_running",
                 "run_id": run_id,
-                "current_status": result.data["status"],
+                "current_status": run["status"],
             }
 
         # Delegate to cancel_run_task -- it revokes the Celery task,
@@ -831,6 +953,18 @@ async def inline_assist(
     user: dict = Depends(get_current_user),
 ):
     from agents import stream_inline_assist
+
+    # Per-user and per-org quotas: each call spends the server's LLM budget.
+    exceeded = await asyncio.to_thread(
+        assist_limiter.check_assist, user["user_id"], user["org_id"]
+    )
+    if exceeded:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Inline assist quota exceeded ({exceeded.scope}); "
+            f"retry in {exceeded.retry_after}s",
+            headers={"Retry-After": str(exceeded.retry_after)},
+        )
 
     try:
         generator = stream_inline_assist(
@@ -1380,7 +1514,7 @@ async def _authorize_terminal_cwd(
             repo_name, user.get("org_id"), user.get("user_id"), agents_supabase
         )
     except Exception:
-        # HTTPException(404), or PostgREST raising on .single() with no row.
+        # HTTPException(404) for an unknown repo, or a database error.
         return False, None
 
     try:
@@ -1721,10 +1855,12 @@ async def get_admin_metrics(
             .select("role")
             .eq("org_id", org_id)
             .eq("user_id", user_id)
-            .single()
+            .limit(1)
+            .maybe_single()
             .execute()
         )
-        if not result.data or result.data["role"] not in ("owner", "admin"):
+        member = _row_or_none(result)
+        if not member or member.get("role") not in ADMIN_ROLES:
             raise HTTPException(status_code=403, detail="Admin privileges required")
 
     # Fetch metrics from database views
@@ -1870,10 +2006,12 @@ async def get_admin_runs(
         .select("role")
         .eq("org_id", org_id)
         .eq("user_id", user_id)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
-    if not result.data or result.data["role"] not in ("owner", "admin"):
+    member = _row_or_none(result)
+    if not member or member.get("role") not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin privileges required")
 
     query = (
