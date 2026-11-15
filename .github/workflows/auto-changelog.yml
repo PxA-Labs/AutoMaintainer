@@ -44,6 +44,30 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Build on the open sync PR instead of resetting it from main: the old
+      # flow recreated chore/changelog-sync from main with only the newest PR
+      # and force-pushed, so every earlier entry in the open PR was lost.
+      - name: Start from the open changelog sync branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          BRANCH_NAME="chore/changelog-sync"
+          OPEN_PR=$(gh pr list --head "${BRANCH_NAME}" --state open --json number --jq '.[0].number')
+          if [ -n "$OPEN_PR" ] && git fetch origin "${BRANCH_NAME}"; then
+            git checkout -B "${BRANCH_NAME}" "origin/${BRANCH_NAME}"
+            if git merge --no-edit origin/main; then
+              echo "Continuing open sync PR #${OPEN_PR}; earlier entries are kept."
+            else
+              git merge --abort
+              echo "::warning::Could not merge main into ${BRANCH_NAME}; starting a fresh sync branch from main (entries from PR #${OPEN_PR} must be re-synced)."
+              git checkout -B "${BRANCH_NAME}" origin/main
+            fi
+          else
+            git checkout -B "${BRANCH_NAME}" origin/main
+          fi
+
       - name: Sync Changelog Entry
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -131,23 +155,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
           if git diff --quiet CHANGELOG.md; then
             echo "No changelog updates needed."
             exit 0
           fi
 
           BRANCH_NAME="chore/changelog-sync"
-          
-          # Fetch existing sync branch if present
-          git fetch origin "${BRANCH_NAME}:${BRANCH_NAME}" || true
-          git checkout -B "${BRANCH_NAME}"
-          
+
+          # Already on BRANCH_NAME (see "Start from the open changelog sync branch").
           git add CHANGELOG.md
           git commit -m "docs(changelog): update CHANGELOG.md [skip ci]"
-          git push -u origin "${BRANCH_NAME}" --force
+          git push -u origin "${BRANCH_NAME}" --force-with-lease
           
           EXISTING_PR=$(gh pr list --head "${BRANCH_NAME}" --json number --jq '.[0].number')
           
