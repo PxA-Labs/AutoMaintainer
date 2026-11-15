@@ -1179,3 +1179,52 @@ def test_schema_guard_against_repository_org_change_is_re_runnable():
     assert drop < create
     assert "NEW.org_id IS DISTINCT FROM OLD.org_id" in sql
     assert github_app.REPOSITORY_ORG_CONFLICT_MARKER + ":" in sql
+
+
+# --- token scope: each run and file-API call asks for one repository ---------
+
+
+@pytest.mark.asyncio
+async def test_run_token_is_scoped_to_the_runs_repository(monkeypatch, probe):
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
+    scopes = []
+
+    def mint(installation_id, **scope):
+        scopes.append((int(installation_id), scope))
+        return f"inst-{int(installation_id)}-token"
+
+    monkeypatch.setattr(github_app, "get_installation_token_sync", mint)
+    result = await agents.run_agent_loop(
+        "https://github.com/a/app",
+        run_id="r1",
+        emitter=NullEmitter(),
+        github_installation_id=11,
+    )
+    assert result["status"] == "completed"
+    assert scopes  # minted up front and again inside the graph
+    assert all(s == (11, {"repository": "a/app"}) for s in scopes)
+
+
+@pytest.mark.asyncio
+async def test_file_api_token_is_scoped_to_the_requested_repository(monkeypatch):
+    import main
+
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "app")
+    monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
+    monkeypatch.setattr(agents, "supabase", MagicMock())
+
+    async def access(repo_name, org_id, user_id, sb):
+        return 99, 11
+
+    monkeypatch.setattr(main, "validate_repo_access", access)
+    scopes = []
+
+    def mint(installation_id, **scope):
+        scopes.append((int(installation_id), scope))
+        return "inst-token"
+
+    monkeypatch.setattr(github_app, "get_installation_token_sync", mint)
+    await main._github_client_for_repo("acme/app", "org-1")
+    assert scopes == [(11, {"repository": "acme/app"})]

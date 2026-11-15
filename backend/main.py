@@ -1010,7 +1010,7 @@ async def _github_client_for_repo(repo_name: str, org_id: str) -> Github:
                 repo_name, org_id, "", agents_supabase
             )
         creds = credentials_for_installation(
-            installation_id, purpose=f"{repo_name} file API"
+            installation_id, purpose=f"{repo_name} file API", repository=repo_name
         )
         token = await asyncio.to_thread(creds.token)
     except GitHubAuthError as e:
