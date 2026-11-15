@@ -333,6 +333,11 @@ def test_start_queue_failure_detail_is_generic(monkeypatch):
     monkeypatch.setattr(
         main, "run_agent_loop_task", SimpleNamespace(apply_async=explode)
     )
+
+    async def worker_available():
+        return True
+
+    monkeypatch.setattr(main, "agent_worker_available", worker_available)
     as_role("member")
 
     response = client.post("/start", json={"repo_name": "o/r"})
