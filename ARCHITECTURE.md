@@ -2,8 +2,8 @@
 
 This document describes the system as it is implemented on `main`. Each
 section names the source file it is based on. When the code changes, update
-the section that names it. `backend/tests/test_architecture_doc.py` checks the
-agent-graph diagram against `backend/agents.py`.
+the section that names it. No test checks this document; the agent-graph
+diagram is checked by hand against `backend/agents.py` ("Build the Graph").
 
 For deployment topology, environment variables and the security checklist,
 see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md). For the eval harness, see
@@ -107,7 +107,7 @@ Source: `backend/agents.py`, section "Build the Graph". The node ids below are
 the ids registered with `StateGraph`. The names in parentheses are the
 display names used in logs and the dashboard.
 
-<!-- agent-graph: checked by backend/tests/test_architecture_doc.py -->
+<!-- agent-graph: checked by hand against backend/agents.py, "Build the Graph" -->
 ```mermaid
 flowchart TD
     __start__([START])
@@ -194,7 +194,7 @@ silent fallback on the tool path. Source: `backend/agents.py`,
   `llama-3.3-70b-versatile` only (`run_llm_with_rate_limit`). Inline assist in
   the Web IDE also uses the 70B model only.
 - **Key rotation and budgets.** All calls go through `rate_limiter.py`, which
-  rotates `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_9` and enforces
+  rotates `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_19` and enforces
   client-side request and token budgets per key (`GROQ_REQUESTS_PER_MINUTE`,
   default 30; `GROQ_TOKENS_PER_MINUTE`, default 6000). The manager is an
   in-memory singleton guarded by a `threading.Lock`. It does not use Redis, so
@@ -247,10 +247,15 @@ enabled.
 | `github_installations` | GitHub App installations linked to an organization, including `suspended_at`. |
 | `repositories` | Repositories per organization and installation, unique on `(org_id, full_name)`. |
 | `runs` | Run status, Celery task id, GitHub issue/PR/branch, error message and `checkpoint`. |
-| `logs` | Agent and system events of a run. Published to Supabase Realtime. |
+| `logs` | Agent and system events of a run. |
 | `usage_events` | Run started, completed and failed events. |
 | `webhook_events` | Stored GitHub deliveries with a processing state. A redelivery is detected by `github_delivery_id` (lookup before insert, plus a partial unique index). |
 | `ide_sessions` | Defined in the schema; no backend code reads or writes it yet. |
+
+The `supabase_realtime` publication includes `logs`, `runs`, `webhook_events`
+and `ide_sessions` (`supabase_schema.sql`, section 11). Rows of these tables
+reach any dashboard client subscribed with the anon key, filtered only by RLS.
+The dashboard currently subscribes to `logs` only.
 
 The backend uses the **service-role key**, which bypasses RLS. For that
 reason every API route filters by the caller's `org_id` itself. RLS protects
