@@ -44,12 +44,33 @@ def _lock_key(repository_id) -> str:
     return f"automaintainer:repo-lock:{repository_id}"
 
 
+# Re-entry for the current owner: refresh the TTL only if ARGV[1] (the
+# run_id) already holds the lock. The TTL is a module constant, so it's
+# baked into the script rather than passed as a second argument.
+_REENTER_SCRIPT = f"""
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("expire", KEYS[1], {LOCK_TTL_SECONDS})
+else
+    return 0
+end
+"""
+
+
 def acquire_repo_lock(repository_id, run_id: str) -> bool:
-    """Return True if this run_id now holds the lock, False if another run does."""
+    """
+    Return True if this run_id now holds the lock, False if another run does.
+
+    Re-entrant per run_id (the owner token): Celery delivers at least once,
+    so a redelivered task for the same run must be able to take back the
+    lock its earlier delivery still holds, instead of waiting on itself
+    until the TTL expires.
+    """
     client = get_redis_client()
-    return bool(
-        client.set(_lock_key(repository_id), run_id, nx=True, ex=LOCK_TTL_SECONDS)
-    )
+    key = _lock_key(repository_id)
+    if client.set(key, run_id, nx=True, ex=LOCK_TTL_SECONDS):
+        return True
+    # Held already: atomically check-and-extend in case we are the owner.
+    return bool(client.eval(_REENTER_SCRIPT, 1, key, run_id))
 
 
 _RELEASE_SCRIPT = """
