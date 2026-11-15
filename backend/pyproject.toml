@@ -1,0 +1,62 @@
+# Backend dependency manifest. uv.lock (next to this file) pins the full
+# cross-platform resolution. No requirements.txt is committed; export one on
+# demand with scripts/export-backend-requirements.sh if a tool needs it.
+# See CONTRIBUTING.md ("Managing backend dependencies").
+#
+#   uv sync                              # create/update .venv incl. dev group
+#   uv add <pkg>                         # add a runtime dependency
+#   uv add --group dev <pkg>             # add a dev/test dependency
+#   uv lock --upgrade-package <pkg>      # upgrade one dependency
+[project]
+name = "automaintainer-backend"
+version = "0.0.0"
+description = "AutoMaintainer FastAPI backend, Celery workers and agents."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "langchain",
+    # Floor prevents the resolver from backtracking to vulnerable litellm 1.83.0 (see #382-#386)
+    "litellm>=1.105.1",
+    "langgraph",
+    "pygithub",
+    "python-dotenv",
+    "websockets",
+    "pydantic",
+    "mcp",
+    "langchain-mcp-adapters",
+    "langchain-groq",
+    "tree-sitter",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "pywinpty; sys_platform == 'win32'",
+    "supabase",
+    "redis",
+    "celery",
+    "psycopg2-binary",
+    "pyjwt",
+    "cryptography",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-instrumentation-fastapi",
+    "opentelemetry-instrumentation-httpx",
+    "opentelemetry-instrumentation-requests",
+    "opentelemetry-instrumentation-sqlalchemy",
+    "opentelemetry-instrumentation-redis",
+    "opentelemetry-exporter-otlp",
+    "opentelemetry-exporter-prometheus",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-cov",
+]
+
+[tool.uv]
+# The backend is an application run from this directory, not an installable
+# package: uv only manages its dependencies.
+package = false

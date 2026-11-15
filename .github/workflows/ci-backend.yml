@@ -5,14 +5,22 @@ on:
     branches: [ "main" ]
     paths:
       - 'backend/**'
+      - 'scripts/export-backend-requirements.sh'
       - '.github/workflows/ci-backend.yml'
   pull_request:
     branches: [ "main" ]
     paths:
       - 'backend/**'
+      - 'scripts/export-backend-requirements.sh'
       - '.github/workflows/ci-backend.yml'
 
 permissions: read-all
+
+# Backend dependencies are managed with uv: backend/pyproject.toml declares
+# them and backend/uv.lock pins them (no requirements.txt is committed).
+# Keep UV_VERSION in step with the uv version in the Dockerfile.
+env:
+  UV_VERSION: "0.13.8"
 
 jobs:
   lint-and-check:
@@ -29,23 +37,34 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
-    
+
     - name: Set up Python 3.11
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: "3.11"
         cache: 'pip'
-        
-    - name: Install dependencies
+        cache-dependency-path: 'backend/uv.lock'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Check uv.lock matches pyproject.toml
+      run: |
+        uv lock --check
+
+    - name: Install lint tools
       run: |
         python -m pip install --upgrade pip
         pip install flake8 black
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        
+
     - name: Check code formatting with Black
       run: |
         black --check .
-        
+
     - name: Lint with flake8
       run: |
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -71,6 +90,14 @@ jobs:
       with:
         python-version: "3.11"
         cache: 'pip'
+        cache-dependency-path: 'backend/uv.lock'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
 
     - name: Install security scanning tools
       run: |
@@ -79,13 +106,15 @@ jobs:
 
     - name: Run Bandit AST Security Scan
       run: |
-        bandit -r . -x ./venv -s B108 -ll -ii
+        bandit -r . -x ./venv,./.venv -s B108 -ll -ii
 
     - name: Run Pip-Audit Dependency Vulnerability Scan
+      # Audits every locked package (runtime and dev group), exported from
+      # uv.lock, so the scan covers exactly what CI and the image install.
       run: |
-        if [ -f requirements.txt ]; then
-          pip-audit -r requirements.txt
-        fi
+        uv export --frozen --all-groups --no-emit-project --no-hashes \
+          --format requirements-txt -o "$RUNNER_TEMP/requirements-locked.txt"
+        pip-audit -r "$RUNNER_TEMP/requirements-locked.txt"
 
   test:
     name: Test (${{ matrix.os }} - Py${{ matrix.python-version }})
@@ -101,6 +130,11 @@ jobs:
       run:
         shell: bash
         working-directory: ./backend
+    env:
+      # uv uses the interpreter installed by setup-python for this matrix
+      # entry instead of downloading its own.
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_DOWNLOADS: never
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,17 +145,21 @@ jobs:
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'pip'
 
-    - name: Install test dependencies
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest pytest-asyncio pytest-cov pytest-mock httpx
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        uv sync --frozen --group dev
 
     - name: Run Tests with pytest and coverage
       run: |
-        pytest -v --cov=. --cov-report=xml:coverage.xml --cov-report=term
+        uv run --frozen pytest -v --cov=. --cov-report=xml:coverage.xml --cov-report=term
 
     - name: Upload coverage report artifact
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

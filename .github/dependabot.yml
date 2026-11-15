@@ -1,7 +1,9 @@
 version: 2
 updates:
-  # Python dependencies (backend)
-  - package-ecosystem: "pip"
+  # Python dependencies (backend). The "uv" ecosystem updates
+  # backend/pyproject.toml and backend/uv.lock with uv itself, keeping the
+  # universal (cross-platform) resolution, so its PRs are complete as-is.
+  - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
       interval: "weekly"

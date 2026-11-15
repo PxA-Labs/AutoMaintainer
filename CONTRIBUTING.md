@@ -28,13 +28,15 @@ By participating in this project, you agree to abide by our [Code of Conduct](./
    cd AutoMaintainer
    ```
 
-2. **Set up Python Backend:**
+2. **Set up Python Backend** with [uv](https://docs.astral.sh/uv/getting-started/installation/):
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: .\venv\Scripts\Activate.ps1
-   pip install -r backend/requirements.txt
-   pip install black flake8 pytest pytest-asyncio
+   cd backend
+   uv sync      # creates backend/.venv from uv.lock, including the dev (test) group
+   cd ..
    ```
+   Run backend commands through `uv run` (for example `uv run pytest`), or
+   activate `backend/.venv` yourself. See
+   [Managing backend dependencies](#managing-backend-dependencies).
 
 3. **Set up Next.js Dashboard:**
    ```bash
@@ -80,17 +82,40 @@ git checkout -b feat/183-pydantic-config-schema
 - Run tests locally before opening a PR:
   ```bash
   # Run backend unit tests
-  pytest backend/ -v
+  cd backend && uv run pytest -v && cd ..
 
   # Format code with Black
-  black backend/
+  uvx black backend/
 
   # Check code style with Flake8
-  flake8 backend/ --max-line-length=120
+  uvx flake8 backend/ --max-line-length=120 --exclude=backend/.venv,backend/venv
 
   # Verify Next.js build
   cd dashboard && npm run build && cd ..
   ```
+
+### Managing backend dependencies
+The backend's dependencies are declared in `backend/pyproject.toml` and pinned
+for every platform and Python version in `backend/uv.lock`. Commit both files
+together; CI runs `uv lock --check` and fails if the lock does not match
+`pyproject.toml`. No `requirements.txt` is committed.
+
+Run these from `backend/`:
+```bash
+uv add <package>                     # add a runtime dependency
+uv add --group dev <package>         # add a test/dev-only dependency
+uv remove <package>                  # remove a dependency
+uv lock --upgrade-package <package>  # upgrade one package within its constraints
+uv lock --upgrade                    # upgrade everything (review the diff carefully)
+uv sync                              # apply the lock to backend/.venv
+```
+If a tool needs a pip requirements file, export one on demand from the
+repository root (it is not committed):
+```bash
+bash scripts/export-backend-requirements.sh requirements.txt
+```
+Dependabot opens `uv` update PRs that change `pyproject.toml`/`uv.lock`
+directly; they need no extra steps.
 
 ---
 

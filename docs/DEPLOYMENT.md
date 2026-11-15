@@ -132,6 +132,14 @@ example as a second Space.
 
 - Multi-stage build: the Next.js export, Node tools, the Python venv and the
   runtime are separate stages. Compilers stay in the builder stages.
+- The Python venv is installed with `uv sync --frozen --no-dev` from
+  `backend/pyproject.toml` and `backend/uv.lock`, so the image gets exactly the
+  locked runtime versions and the build fails if the lock is stale. uv comes
+  from `ghcr.io/astral-sh/uv` (the `UV_IMAGE` build arg) and is only present in
+  the builder stage. To change backend dependencies, update the lock with uv
+  (see CONTRIBUTING.md, "Managing backend dependencies") and rebuild.
+  No `requirements.txt` is committed; `scripts/export-backend-requirements.sh`
+  exports one from the lock for platforms that need a pip requirements file.
 - Base images are pinned to `node:22.23.5-bookworm-slim` and
   `python:3.11.18-slim-bookworm`. gitnexus is pinned to `1.6.12` (it needs Node
   `^22.18 || >=24.11`). Bump these through the `ARG`s at the top of the

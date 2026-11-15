@@ -6,6 +6,9 @@
 # link against the same glibc as the runtime stage. Bump them together.
 ARG NODE_IMAGE=node:22.23.5-bookworm-slim
 ARG PYTHON_IMAGE=python:3.11.18-slim-bookworm
+# uv installs the backend venv from backend/uv.lock. Keep the version in step
+# with UV_VERSION in .github/workflows/ci-backend.yml.
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.8
 
 # ---------------------------------------------------------------------------
 # Stage 1: build the Next.js static export (dashboard/out)
@@ -46,15 +49,28 @@ RUN npm install -g --omit=dev \
 
 # ---------------------------------------------------------------------------
 # Stage 3: build the Python virtualenv (build-essential stays in this stage)
+# Installs exactly what backend/uv.lock pins (runtime deps only, no dev
+# group). --frozen installs the lock as-is and never re-resolves (Backend CI
+# runs `uv lock --check` so the lock always matches pyproject.toml). The venv
+# is created at /opt/venv with the base image's interpreter, which sits at the
+# same path in the runtime stage.
 # ---------------------------------------------------------------------------
+FROM ${UV_IMAGE} AS uv-bin
+
 FROM ${PYTHON_IMAGE} AS python-builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
-RUN python -m venv /opt/venv
-ENV PATH=/opt/venv/bin:$PATH
-COPY backend/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY --from=uv-bin /uv /usr/local/bin/uv
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON=/usr/local/bin/python3 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_NO_CACHE=1
+WORKDIR /build
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 # ---------------------------------------------------------------------------
 # Stage 4: runtime

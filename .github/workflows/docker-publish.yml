@@ -10,7 +10,8 @@ on:
     paths:
       - 'Dockerfile'
       - '.dockerignore'
-      - 'backend/requirements.txt'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
       - 'dashboard/package-lock.json'
       - '.github/workflows/docker-publish.yml'
   workflow_dispatch:

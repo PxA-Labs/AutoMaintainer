@@ -30,19 +30,29 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Keep in step with UV_VERSION in ci-backend.yml and the Dockerfile.
+          version: "0.13.8"
+          enable-cache: true
+          cache-dependency-glob: "backend/uv.lock"
+
       - name: Install audit tools
         run: |
           pip install bandit pip-audit
 
       - name: Run Bandit AST Security Scan
         run: |
-          bandit -r backend/ -x backend/venv -s B108 -ll -ii
+          bandit -r backend/ -x backend/venv,backend/.venv -s B108 -ll -ii
 
       - name: Run Pip-Audit Dependency Scan
+        # Audit every package pinned in backend/uv.lock (runtime + dev group).
+        working-directory: ./backend
         run: |
-          if [ -f backend/requirements.txt ]; then
-            pip-audit -r backend/requirements.txt
-          fi
+          uv export --frozen --all-groups --no-emit-project --no-hashes \
+            --format requirements-txt -o "$RUNNER_TEMP/requirements-locked.txt"
+          pip-audit -r "$RUNNER_TEMP/requirements-locked.txt"
 
   node-security:
     name: Node NPM Audit
