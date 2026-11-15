@@ -48,6 +48,7 @@ dependencies = [
     "opentelemetry-instrumentation-redis",
     "opentelemetry-exporter-otlp",
     "opentelemetry-exporter-prometheus",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

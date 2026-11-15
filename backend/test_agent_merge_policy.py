@@ -8,6 +8,9 @@ from github import GithubException
 
 import agents
 
+# MERGE_POLICY=ci also requires a passed change verification (verification.py).
+VERIFIED = ("automaintainer/verification", "success")
+
 APPROVE = "VERDICT: APPROVE\nLooks correct."
 
 
@@ -122,7 +125,7 @@ async def test_ci_policy_merges_when_all_checks_green(monkeypatch):
     monkeypatch.setenv("MERGE_POLICY", "ci")
     repo, pr, _ = _setup(
         monkeypatch,
-        statuses=[("ci/build", "success")],
+        statuses=[("ci/build", "success"), VERIFIED],
         check_runs=[
             ("tests", "completed", "success"),
             ("lint", "completed", "skipped"),
@@ -163,7 +166,7 @@ async def test_merge_is_pinned_to_reviewed_head_sha(monkeypatch, policy):
     monkeypatch.setenv("MERGE_POLICY", policy)
     repo, pr, _ = _setup(
         monkeypatch,
-        statuses=[("ci/build", "success")],
+        statuses=[("ci/build", "success"), VERIFIED],
         check_runs=[("tests", "completed", "success")],
     )
     await agents.maintainer_node(_state())
