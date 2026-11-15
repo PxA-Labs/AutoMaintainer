@@ -854,12 +854,14 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
     The commit has succeeded by the time this runs, so a local failure is
     logged rather than turned into an error response for a change that landed.
     """
-    if not repo_dir.exists():
+    # Defense in depth: callers pass paths from get_safe_repo_dir and
+    # get_safe_target_path, but re-check containment right here so the write
+    # is safe on its own (workspace root -> clone -> target).
+    base = os.path.realpath(str(get_base_workspace_dir()))
+    root = os.path.realpath(str(repo_dir))
+    if not root.startswith(base + os.sep) or not os.path.isdir(root):
         return
-    # Defense in depth: callers pass a path from get_safe_target_path, but
-    # re-check containment right at the write so it holds independently.
-    root = os.path.realpath(repo_dir)
-    resolved = os.path.realpath(target_path)
+    resolved = os.path.realpath(str(target_path))
     if not resolved.startswith(root + os.sep):
         logger.warning("Refusing local mirror write outside the repository clone")
         return
@@ -1144,9 +1146,11 @@ _TERMINAL_ENV_ALLOWLIST_WIN32 = frozenset(
 )
 
 # "owner/repo", or a github.com URL to it (what the dashboard sends).
-# Matched against an already-normalised "owner/repo" (see _parse_terminal_repo);
-# no optional/lazy parts, so matching is linear in the input length.
-_TERMINAL_REPO_RE = re.compile(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
+# Characters GitHub allows in owner and repository names. Validated with a set
+# check rather than a regex so parsing is trivially linear in the input length.
+_TERMINAL_REPO_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
 _TERMINAL_REPO_MAX_LEN = 256
 
 
@@ -1206,10 +1210,14 @@ def _parse_terminal_repo(repo_url: str) -> Optional[str]:
         slug = slug[:-1]
     if slug.endswith(".git"):
         slug = slug[: -len(".git")]
-    match = _TERMINAL_REPO_RE.fullmatch(slug)
-    if not match or {match.group(1), match.group(2)} & {".", ".."}:
+    parts = slug.split("/")
+    if len(parts) != 2:
         return None
-    return f"{match.group(1)}/{match.group(2)}"
+    owner, repo = parts
+    for part in (owner, repo):
+        if not part or part in (".", "..") or not set(part) <= _TERMINAL_REPO_CHARS:
+            return None
+    return f"{owner}/{repo}"
 
 
 def _use_winpty() -> bool:
