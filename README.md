@@ -1,7 +1,7 @@
 <div align="center">
   
 # AutoMaintainer
-**An Always-On Autonomous AI Software Engineering Team**
+**A multi-agent pipeline that turns repository issues into reviewed GitHub pull requests**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/PxA-Labs/AutoMaintainer/badge)](https://securityscorecards.dev/viewer/?uri=github.com/PxA-Labs/AutoMaintainer)
@@ -9,55 +9,89 @@
 [![CodeQL](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/PxA-Labs/AutoMaintainer/actions/workflows/codeql-analysis.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-backend-green.svg)](https://fastapi.tiangolo.com/)
 
 </div>
 
-AutoMaintainer is an autonomous, multi-agent AI software engineering platform operating natively inside your GitHub repositories.
+AutoMaintainer runs a pipeline of LLM agents against a GitHub repository. The
+agents pick or receive an issue, decide whether to build it, change one file,
+open a pull request and review it. By default the agents never merge their
+own pull requests; a human does.
 
-Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (via Groq)**, the system coordinates specialized AI agents to discover issues, design architecture, implement code changes, open Pull Requests, review diffs, self-correct bugs, and merge verified code.
+It is built with **LangGraph**, **FastAPI**, **Celery + Redis**, **Supabase**
+and **Next.js**. The model is **Llama 3.3 70B on Groq**; on the main
+(GitNexus tool) path a failed 70B call silently falls back to **Llama 3.1 8B**,
+so reviews and code may come from the smaller model. See
+[ARCHITECTURE.md](./ARCHITECTURE.md) for how the pieces fit together.
 
 ---
 
 > [!WARNING]
-> ### 🚧 Active Architecture Migration Notice (System Unstable)
-> **AutoMaintainer is currently undergoing a massive architectural transformation from a local prototype to an enterprise-grade Web-First SaaS Platform.**
+> ### Project status: beta (pre-1.0)
+> The multi-tenant migration has landed: Celery workers, Supabase Auth with
+> organization-scoped data and Row Level Security, and GitHub App installation
+> tokens. Every API route except the health probes, the OpenAPI docs and the
+> signed GitHub webhook requires a Supabase login, and a test enforces this.
+> When the API serves the static dashboard build at `/`, those files are public
+> too. They hold no user data, only the compiled UI and its public
+> `NEXT_PUBLIC_*` settings (backend URL, Supabase URL and anon key).
+> Limitations that remain:
+> * **No tests run before review.** Agents do not execute the target
+>   repository's tests. The Maintainer reviews the diff with an LLM only.
+>   Keep the default `MERGE_POLICY=human`.
+> * **One file per change.** The Implementer rewrites a single file per run.
+> * **Single-host deployment.** The API and the agent worker must share the
+>   clone directory, so the Render blueprint runs both in one instance.
+> * **The interactive terminal is not a sandbox.** It is off by default. Do
+>   not enable it on a deployment that other people can reach.
 >
-> During this major migration phase:
-> * **The platform is currently unstable and active workflows may be temporarily non-operational or experience breaking changes.**
-> * **Do not expose a deployment to the public internet yet.** Several API routes are still unauthenticated while the multi-tenant control plane lands, including an interactive terminal endpoint. Run AutoMaintainer locally or on a trusted network until the authentication migration is complete. The one-click deploy button was removed for this reason.
-> * Core systems being actively overhauled include:
->   - **Multi-Tenant SaaS Control Plane:** Migrating from single-user local state to organization-scoped data isolation and Row Level Security (RLS).
->   - **Durable Task Queue:** Replacing in-memory asyncio task execution with Celery + Redis distributed workers and retry mechanisms.
->   - **GitHub App Authentication:** Transitioning from personal access tokens (PAT) to GitHub App installation tokens with automated webhook dispatching.
->   - **Ephemeral Sandbox Architecture:** Decoupling execution runners for containerized code execution.
->   - **Pro Monaco WebIDE:** Integrating full diff inspection and inline AI assistance.
->
-> Please follow our [GitHub Discussions](https://github.com/PxA-Labs/AutoMaintainer/discussions) and [Pinned Epics](https://github.com/PxA-Labs/AutoMaintainer/issues) for real-time progress updates.
+> It is suitable for running against your own repositories. Hosting it for
+> untrusted tenants is not recommended yet. Open work is tracked in the
+> [epics](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3Aepic).
 
 ---
 
 > [!IMPORTANT]
-> ### 🗄️ Critical Supabase & Database Configuration Note
-> AutoMaintainer relies on **Supabase** (PostgreSQL + Realtime Pub/Sub + Auth) for telemetry, run orchestration, and live agent log streaming.
+> ### Supabase is required
+> AutoMaintainer stores organizations, runs and logs in **Supabase** (Postgres,
+> Auth and Realtime). Provision your own project:
+> * Create a project at [supabase.com](https://supabase.com).
+> * Run [`supabase_schema.sql`](./supabase_schema.sql) in the **Supabase SQL
+>   Editor**. It creates `organizations`, `organization_members`,
+>   `github_installations`, `repositories`, `runs`, `logs`, `usage_events`,
+>   `webhook_events` and `ide_sessions`, with RLS policies.
+> * Put your credentials in `backend/.env` and `dashboard/.env.local`.
 >
-> 1. **Public/Demo Database Status:** If the free-tier demo Supabase instance is paused or unreachable, historical run tracking and real-time streaming to the Web UI will be disabled. The UI will show a warning banner indicating that persistence is offline.
-> 2. **Self-Hosted / Developer Database Setup:** If you are running or contributing to AutoMaintainer, you **must provision your own Supabase project**:
->    * Create a project at [supabase.com](https://supabase.com).
->    * Run the complete schema migration script [`supabase_schema.sql`](./supabase_schema.sql) in your **Supabase SQL Editor** to create the required tables (`organizations`, `users`, `repositories`, `runs`, `logs`, `usage_events`, `ide_sessions`).
->    * Supply your own credentials in `.env` (backend) and `.env.local` (dashboard).
+> If Supabase is unreachable or paused, the dashboard shows a warning banner,
+> and run history and live logs are unavailable.
 
 ---
 
 ## Features
-- **5-Agent Hierarchy**: Tasks are distributed across specialized agents (Architect, Visionary, Reviewer, Implementer, Maintainer).
-- **Native GitHub Integration**: Agents communicate through real GitHub Issues, PR Comments, and Git Branches.
-- **Zero-Server Code Intelligence**: Powered by **GitNexus MCP**, allowing agents to semantically navigate your repository and build Code Graphs without sending your code to a third-party server.
-- **Web IDE & Interactive Terminal**: A fully integrated, VS Code-style Web IDE in the browser featuring an interactive PTY terminal connecting directly to the backend.
-- **Self-Correcting Iteration Loop**: If the Maintainer AI rejects a PR, the Implementer AI reads the feedback and pushes a new commit to fix the bug!
-- **Real-time Observability UI**: A sleek, dark-mode React dashboard connected via WebSockets/SSE allows you to monitor the AI Crew as they work in real-time.
-- **Blazing Fast**: Powered by Groq's LPU inference, the entire cycle from Architecture to Merged PR can happen in under 20 seconds.
-- **Cloud Ready**: Production-ready deployment configurations for Vercel, Render, and Docker.
+Each item names the code it is based on.
+
+- **Five-agent LangGraph pipeline** (`backend/agents.py`): Architect, Visionary, Reviewer/PM, Implementer and Maintainer. If the Maintainer rejects a change, the Implementer revises it, up to three Implementer attempts in total.
+- **Two modes**: autonomous (the Architect proposes the work) or targeted (`target_issue`: work on an existing issue). The issue must name the file to change.
+- **Works through GitHub**: issues, issue comments, branches, commits, pull requests and review comments, using the repository's GitHub App installation token (`backend/github_app.py`).
+- **Human-gated merging**: `MERGE_POLICY=human` (the default) never merges. `ci` merges only when the checks on the PR head pass (see the merge-policy table in [ARCHITECTURE.md](ARCHITECTURE.md#merge-policy); no checks at all counts as failing). `ci` also requires the change to pass the repository's own tests (the `automaintainer/verification` status; see [docs/VERIFICATION.md](./docs/VERIFICATION.md)). The PM and Maintainer return JSON decisions validated against a schema; anything that does not validate after one retry counts as rejection.
+- **Durable runs**: a Celery worker runs each job, with a per-repository Redis lock, heartbeats, stale-run cleanup and cancellation (`backend/tasks.py`). A run that a crashed worker delivers again resumes from `runs.checkpoint`, without duplicate issues, branches or PRs.
+- **Prompt-injection hardening**: repository and issue text reach the model inside delimited untrusted-data blocks.
+- **Code context**: an AST map of the clone (tree-sitter) and GitNexus tools over MCP. GitNexus runs locally. Prompts, including repository content, are sent to Groq.
+- **Dashboard** (`dashboard/`): start and stop runs, live logs through Supabase Realtime, run history and an org admin page.
+- **Web IDE**: a Monaco editor over the repository clone, inline AI assist (rate-limited per user and per organization) and a "propose changes" flow that opens a PR. Saving a single file commits directly to the default branch.
+- **Opt-in admin terminal**: a PTY over WebSocket, off unless `ENABLE_TERMINAL=true`, and limited to `TERMINAL_ADMIN_USER_IDS`.
+- **Offline eval harness** (`backend/evals/`, [docs/EVALS.md](./docs/EVALS.md)): scores the Implementer step on 10 synthetic tasks with hidden tests. No benchmark results are published yet.
+- **Deployment configs**: Docker image (non-root), Docker Compose, a Render blueprint, and a static dashboard export for Vercel. See [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
+
+No end-to-end latency or success-rate figures are claimed. None have been
+measured.
+
+---
+
+## Quickstart
+
+- **Run it**: follow [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md). `docker compose up --build` starts the API, a worker, beat and Redis. You still need Supabase, a Groq key and GitHub credentials.
+- **Develop it**: follow the setup below and [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ---
 
@@ -134,7 +168,7 @@ Open `http://localhost:3000` in your browser.
 
 ---
 
-## Deployment (Production SaaS)
+## Deployment
 
 Read [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) before deploying. It covers the topology, every environment variable, and the security checklist. The API and the agent worker **must share the repository workspace directory**.
 
@@ -150,8 +184,18 @@ Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unles
 
 ---
 
+## Security
+
+- **Merging:** keep `MERGE_POLICY` unset or set to `human`. The agents then open and review PRs but never merge them. `auto` merges on an LLM approval alone, without running any tests; do not use it on repositories you care about. Enable branch protection with required checks in any case.
+- **Terminal:** `/api/terminal/ws` gives a shell on the API host. It is off unless `ENABLE_TERMINAL=true`, and then only for the user ids in `TERMINAL_ADMIN_USER_IDS`. The shell runs as the server's OS user, so it can read every tenant's clone and the server's files. Leave it off on any shared or hosted deployment.
+- **Development bypass:** never set `AUTH_DEV_BYPASS` in a deployment. It is refused when `ENVIRONMENT=production`.
+
+See [SECURITY.md](./SECURITY.md) for how to report a vulnerability and for a summary of the security controls. See the [deployment security checklist](./docs/DEPLOYMENT.md#security-checklist) before deploying.
+
+---
+
 ## Architecture
-Curious how it works under the hood? Read our [Architecture Documentation](./ARCHITECTURE.md) to see how the 5-agent LangGraph topology operates.
+[ARCHITECTURE.md](./ARCHITECTURE.md) describes the components, the run lifecycle, the agent graph, the data model, authentication, and the security limits of each part.
 
 ---
 
