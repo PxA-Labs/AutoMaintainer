@@ -499,6 +499,67 @@
         "summary": "Inline Assist"
       }
     },
+    "/github/app/install-url": {
+      "post": {
+        "description": "Return the GitHub App install URL with a signed ``state`` for the\ncaller (org owner/admin). The state expires after\nSETUP_STATE_TTL_SECONDS seconds.",
+        "operationId": "github_app_install_url_github_app_install_url_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-github-user-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Github-User-Token"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Github App Install Url"
+      }
+    },
     "/github/installations/claim": {
       "post": {
         "description": "Link a GitHub App installation to the caller's org.\n\nRequires an org owner/admin, plus the caller's GitHub user token in\n``X-GitHub-User-Token`` (the dashboard sends the Supabase GitHub\nprovider_token). GitHub must confirm the installation is accessible to\nthat user and that its account is the user or an org they administer\n(github_app.verify_installation_claim). An installation already linked to\nanother org is never moved (409).",
