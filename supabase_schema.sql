@@ -154,6 +154,11 @@ CREATE INDEX runs_created_idx ON runs(created_at DESC);
 -- can run this statement on its own as a migration.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb;
 
+-- "owner/name" of the run's repository, denormalized for the dashboard and
+-- the stale-run reaper. POST /start, the agent loop and tasks.py write or
+-- read it; without it every /start insert fails. Idempotent migration.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS repo_name TEXT;
+
 -- ============================================================================
 -- 5. AGENT LOGS (Real-time streaming - now multi-tenant)
 -- ============================================================================
@@ -323,6 +328,26 @@ RETURNS UUID[] LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, au
     WHERE user_id = auth.uid() AND joined_at IS NOT NULL;
 $$;
 
+-- Helper: the repository (and, when given, the installation it is linked
+-- through) belongs to org_uuid. SECURITY DEFINER so policies can check rows
+-- the caller cannot see (another org's repository must make this false, not
+-- be invisible and pass).
+CREATE OR REPLACE FUNCTION repository_in_org(repo_id BIGINT, org_uuid UUID, installation_id BIGINT DEFAULT NULL)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM repositories r
+        WHERE r.id = repo_id
+          AND r.org_id = org_uuid
+          AND (installation_id IS NULL OR r.github_installation_id = installation_id)
+    );
+$$;
+
+-- Helper: the run belongs to org_uuid (for ide_sessions.run_id).
+CREATE OR REPLACE FUNCTION run_in_org(run_uuid UUID, org_uuid UUID)
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+    SELECT EXISTS (SELECT 1 FROM runs WHERE id = run_uuid AND org_id = org_uuid);
+$$;
+
 -- Helper function: user is org admin/owner
 CREATE OR REPLACE FUNCTION user_is_org_admin(org_uuid UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, auth AS $$
@@ -412,14 +437,26 @@ CREATE POLICY "runs_select" ON runs
     FOR SELECT TO authenticated
     USING (org_id = ANY(current_user_org_ids()));
 
+-- A run's repository and installation must belong to the run's org, so a
+-- member cannot attach another org's repository to a run in their own org.
+-- DROP + CREATE: re-runnable on existing deployments.
+DROP POLICY IF EXISTS "runs_insert_own" ON runs;
 CREATE POLICY "runs_insert_own" ON runs
     FOR INSERT TO authenticated
-    WITH CHECK (org_id = ANY(current_user_org_ids()) AND user_id = auth.uid());
+    WITH CHECK (
+        org_id = ANY(current_user_org_ids())
+        AND user_id = auth.uid()
+        AND repository_in_org(repository_id, org_id, github_installation_id)
+    );
 
+DROP POLICY IF EXISTS "runs_update_own" ON runs;
 CREATE POLICY "runs_update_own" ON runs
     FOR UPDATE TO authenticated
     USING (org_id = ANY(current_user_org_ids()) AND user_id = auth.uid())
-    WITH CHECK (org_id = ANY(current_user_org_ids()));
+    WITH CHECK (
+        org_id = ANY(current_user_org_ids())
+        AND repository_in_org(repository_id, org_id, github_installation_id)
+    );
 
 -- Service role bypasses all (for backend workers)
 CREATE POLICY "runs_service_all" ON runs
@@ -462,14 +499,28 @@ CREATE POLICY "ide_select_admin" ON ide_sessions
     FOR SELECT TO authenticated
     USING (org_id = ANY(current_user_org_ids()) AND user_is_org_admin(org_id));
 
+-- An IDE session stays in one of the caller's orgs, and its run and
+-- repository (when set) belong to that same org. DROP + CREATE: re-runnable.
+DROP POLICY IF EXISTS "ide_insert_own" ON ide_sessions;
 CREATE POLICY "ide_insert_own" ON ide_sessions
     FOR INSERT TO authenticated
-    WITH CHECK (user_id = auth.uid() AND org_id = ANY(current_user_org_ids()));
+    WITH CHECK (
+        user_id = auth.uid()
+        AND org_id = ANY(current_user_org_ids())
+        AND (repository_id IS NULL OR repository_in_org(repository_id, org_id))
+        AND (run_id IS NULL OR run_in_org(run_id, org_id))
+    );
 
+DROP POLICY IF EXISTS "ide_update_own" ON ide_sessions;
 CREATE POLICY "ide_update_own" ON ide_sessions
     FOR UPDATE TO authenticated
-    USING (user_id = auth.uid())
-    WITH CHECK (user_id = auth.uid());
+    USING (user_id = auth.uid() AND org_id = ANY(current_user_org_ids()))
+    WITH CHECK (
+        user_id = auth.uid()
+        AND org_id = ANY(current_user_org_ids())
+        AND (repository_id IS NULL OR repository_in_org(repository_id, org_id))
+        AND (run_id IS NULL OR run_in_org(run_id, org_id))
+    );
 
 -- ============================================================================
 -- 10. TRIGGERS & FUNCTIONS
