@@ -40,7 +40,7 @@ process never receives it.
 | --------- | ----------------------------------------------------------------------- | ------------- |
 | `passed`  | The test command exited 0.                                              | `success`     |
 | `failed`  | The test command exited non-zero.                                       | `failure`     |
-| `error`   | No trustworthy answer: timeout, refused in production, invalid config, clone failed, branch moved, sandbox failure. | `error` |
+| `error`   | No trustworthy answer: timeout, local execution refused (no sandbox and no opt-in), invalid config, clone failed, branch moved, sandbox failure. | `error` |
 | `skipped` | Nothing ran: no tests detected, or `VERIFY_CHANGES=false`.              | `error`       |
 
 ### Merge gating
@@ -73,8 +73,8 @@ permission.
 
 ### Effect on existing deployments
 
-- With `ENVIRONMENT=production` and no `SANDBOX_BACKEND` (the shipped image
-  today), every agent PR gets an `error` verification status (a red X on the
+- With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image
+  today, in any environment), every agent PR gets an `error` verification status (a red X on the
   PR), whatever the merge policy, and `MERGE_POLICY=ci` no longer merges.
   Configure a sandbox backend, or accept the risk with `VERIFY_ALLOW_LOCAL=true`.
 - A `MERGE_POLICY=ci` deployment whose GitHub App lacks **Commit statuses:
@@ -119,7 +119,7 @@ Without the file, the command is detected, first match wins:
 | --- | --- | --- |
 | `VERIFY_CHANGES` | on | `false` turns verification off. The result is then `skipped`, which still blocks `MERGE_POLICY=ci`. |
 | `SANDBOX_BACKEND` | unset | `package.module:factory`. The factory is called with the host path of the working copy and returns a `runners.sandbox.SandboxBackend`. A set but unloadable value is an `error`; it never falls back to local execution. |
-| `VERIFY_ALLOW_LOCAL` | unset | With `ENVIRONMENT=production`, `true` allows the local runner anyway. Leave it unset. |
+| `VERIFY_ALLOW_LOCAL` | unset | `true` allows running repository tests on the API/worker host without a sandbox, in any environment. Only for a developer machine running repositories you trust. |
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
 | `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail). The PR body shows the last 3000 characters. |
@@ -130,16 +130,13 @@ Without the file, the command is detected, first match wins:
 The test command executes code from the target repository, including code the
 agent just wrote from an untrusted issue. Treat it as hostile.
 
-- **Production requires a sandbox.** With `ENVIRONMENT=production` and no
-  `SANDBOX_BACKEND`, verification refuses to run (`error`, so `ci` does not
-  merge) unless `VERIFY_ALLOW_LOCAL=true`. The refusal happens before the
-  repository is cloned.
-- **`ENVIRONMENT` defaults to `development`.** A deployment run outside the
-  shipped image/compose files without `ENVIRONMENT=production` therefore runs
-  untrusted repository code on the host by default, because `VERIFY_CHANGES`
-  is on by default. Set `ENVIRONMENT=production` (or `VERIFY_CHANGES=false`)
-  on every server that is not a developer machine. The terminal guard in
-  `main.py` has the same pitfall.
+- **A sandbox is required unless you opt in.** Without `SANDBOX_BACKEND`,
+  verification refuses to run (`error`, so `ci` does not merge) unless
+  `VERIFY_ALLOW_LOCAL=true`, in **every** environment. The refusal happens
+  before the repository is cloned. This does not depend on `ENVIRONMENT`
+  (which defaults to `development`), so a deployment that forgets to set it
+  is not silently running untrusted code on the host; the web terminal
+  follows the same opt-in rule (`ENABLE_TERMINAL`).
 - **The local runner is defense in depth, not isolation.** It runs an
   argument list (no shell) in the temporary clone, with stdin closed, an
   environment reduced to `PATH` and a few OS variables (no API keys, database

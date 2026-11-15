@@ -32,6 +32,9 @@ def _verification_env(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ENVIRONMENT", "development")
+    # Local execution is opt-in everywhere; most tests here exercise it on
+    # purpose. The refusal tests below unset this again.
+    monkeypatch.setenv("VERIFY_ALLOW_LOCAL", "true")
     # Detected pytest commands run with this interpreter, which has pytest.
     monkeypatch.setenv("VERIFY_PYTHON", PY)
 
@@ -212,8 +215,13 @@ async def test_change_to_the_config_file_cannot_verify_itself(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_production_refuses_local_execution(tmp_path, monkeypatch):
-    monkeypatch.setenv("ENVIRONMENT", "production")
+@pytest.mark.parametrize("environment", ["production", "development", None])
+async def test_local_execution_requires_opt_in(tmp_path, monkeypatch, environment):
+    if environment is None:
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("ENVIRONMENT", environment)
+    monkeypatch.delenv("VERIFY_ALLOW_LOCAL", raising=False)
     marker = tmp_path / "ran"
     _config(tmp_path, [PY, "-c", f"open({str(marker)!r}, 'w').close()"])
     result = await verification.verify_working_copy(tmp_path)
@@ -352,6 +360,7 @@ async def test_verify_pr_branch_rejects_unresolved_inputs_without_cloning(
 @pytest.mark.asyncio
 async def test_verify_pr_branch_refuses_in_production_before_cloning(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("VERIFY_ALLOW_LOCAL", raising=False)
     git = AsyncMock()
     monkeypatch.setattr(verification, "_git", git)
     result = await verification.verify_pr_branch("u", "b", "a" * 40, "tok")

@@ -8,9 +8,10 @@ the pull request (body section and commit status), so ``MERGE_POLICY=ci``
 merges only a head whose verification passed.
 
 Security model (see docs/VERIFICATION.md): the test command runs code from the
-repository, which is untrusted. In production it must run in a sandbox
-(``SANDBOX_BACKEND``); local execution is refused there unless
-``VERIFY_ALLOW_LOCAL=true``. The local runner is defense in depth only: an
+repository, which is untrusted. It runs in a sandbox (``SANDBOX_BACKEND``);
+local execution on the API/worker host is refused in every environment unless
+``VERIFY_ALLOW_LOCAL=true`` (an explicit opt-in, so a deployment that forgets
+to set ``ENVIRONMENT`` is not silently unsafe). The local runner is defense in depth only: an
 argument list (no shell), a scrubbed environment without the server's secrets,
 a wall-clock timeout and an output cap. It does not stop the tests from
 reading files the server user can read or from using the network.
@@ -149,12 +150,18 @@ def _is_production() -> bool:
 
 
 def local_execution_refusal() -> Optional[str]:
-    """Why the local runner may not be used here, or None when it may."""
-    if _is_production() and _env_flag("VERIFY_ALLOW_LOCAL") is not True:
+    """Why the local runner may not be used here, or None when it may.
+
+    Opt-in in every environment, not only when ENVIRONMENT=production: the
+    test command is untrusted repository code, and a deployment that does
+    not set ENVIRONMENT must not quietly run it on the host.
+    """
+    if _env_flag("VERIFY_ALLOW_LOCAL") is not True:
+        where = "production" if _is_production() else "this environment"
         return (
-            "refused to run repository tests on the API/worker host with "
-            "ENVIRONMENT=production; configure SANDBOX_BACKEND "
-            "(or set VERIFY_ALLOW_LOCAL=true to accept the risk)"
+            f"refused to run repository tests on the API/worker host in {where}; "
+            "configure SANDBOX_BACKEND (or set VERIFY_ALLOW_LOCAL=true to "
+            "accept the risk)"
         )
     return None
 
