@@ -2,8 +2,18 @@
 SandboxRunner adapter for executing operations in an isolated sandbox or container.
 """
 
+import importlib
+import os
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple, Union, runtime_checkable
+from typing import (
+    Callable,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    Union,
+    runtime_checkable,
+)
 
 from .base import BaseRunner, RunnerError
 
@@ -87,3 +97,35 @@ class SandboxRunner(BaseRunner):
         return await backend.commit_and_push(
             branch=branch, message=message, dry_run=self.dry_run
         )
+
+
+# Operator setting naming the sandbox provider, as "package.module:factory".
+# The factory is called with the host path of a working copy and returns a
+# SandboxBackend that executes commands against that copy in isolation.
+SANDBOX_BACKEND_ENV = "SANDBOX_BACKEND"
+
+SandboxBackendFactory = Callable[[Path], SandboxBackend]
+
+
+def load_sandbox_backend_factory() -> Optional[SandboxBackendFactory]:
+    """Return the factory named by ``SANDBOX_BACKEND``, or None when unset.
+
+    A set but unusable value raises RunnerError instead of returning None:
+    callers that need isolation must not silently fall back to running
+    untrusted code on the host because of a typo in the setting.
+    """
+    spec = (os.getenv(SANDBOX_BACKEND_ENV) or "").strip()
+    if not spec:
+        return None
+    module_name, sep, attr = spec.partition(":")
+    if not sep or not module_name or not attr:
+        raise RunnerError(
+            f"{SANDBOX_BACKEND_ENV} must look like 'package.module:factory', got {spec!r}"
+        )
+    try:
+        factory = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        raise RunnerError(f"Cannot load {SANDBOX_BACKEND_ENV}={spec!r}: {e}") from e
+    if not callable(factory):
+        raise RunnerError(f"{SANDBOX_BACKEND_ENV}={spec!r} is not callable")
+    return factory
