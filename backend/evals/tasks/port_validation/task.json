@@ -1,0 +1,10 @@
+{
+  "id": "port_validation",
+  "title": "parse_port accepts invalid port numbers",
+  "body": "`parse_port` in `netcfg/ports.py` is used to read a TCP port from user configuration, but it is just `int(value)`, so it accepts `0`, `70000`, `-1` and even `True`. It should accept an `int` or a string of decimal digits, optionally surrounded by whitespace, and return the port as an `int`. Anything else must raise `ValueError`: values outside 1 to 65535, `bool` values, floats, strings with a sign, a decimal point or other characters, and empty strings. Values of other types (such as `None`) raise `ValueError` too.",
+  "target_file": "netcfg/ports.py",
+  "kind": "bugfix",
+  "category": "input-validation",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

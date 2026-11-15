@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix after a one-line lead-in, in a python fence",
+  "prompt_sha256": "7355f6a1ca1b84034c13819c5e030a0a57dd587061c457faedf1d8153cabb3d6",
+  "prompt_version": "a2ecc40e0103",
+  "response": "Here is the corrected file:\n\n```python\n\"\"\"Latency percentiles for the status page.\"\"\"\n\nimport math\n\n\ndef percentile(values: list[float], p: float) -> float:\n    \"\"\"Return the ``p``-th percentile of ``values`` (nearest-rank method).\n\n    The nearest rank is ``ceil(p / 100 * n)`` (at least 1) in the sorted\n    values, counting from 1.\n    \"\"\"\n    if not values:\n        raise ValueError(\"percentile of an empty list\")\n    if not 0 <= p <= 100:\n        raise ValueError(f\"p must be between 0 and 100, got {p}\")\n    ordered = sorted(values)\n    rank = max(1, math.ceil(p / 100 * len(ordered)))\n    return ordered[rank - 1]\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "percentile_nearest_rank",
+  "temperature": null,
+  "usage": null
+}

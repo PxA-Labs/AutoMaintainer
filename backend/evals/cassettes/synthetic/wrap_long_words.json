@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "6fe71f7c6385f2c0417be148eec463cab44a00cecc0bbe9aae1f2bf2ded7efa1",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Greedy word wrapping for plain-text emails.\"\"\"\n\n\ndef wrap(text: str, width: int) -> list[str]:\n    \"\"\"Split ``text`` into lines of at most ``width`` characters.\"\"\"\n    if width < 1:\n        raise ValueError(\"width must be at least 1\")\n    lines = []\n    current = \"\"\n    for word in text.split():\n        if not current:\n            current = word\n        elif len(current) + 1 + len(word) <= width:\n            current = f\"{current} {word}\"\n        else:\n            lines.append(current)\n            current = word\n    if current:\n        lines.append(current)\n    return lines\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "wrap_long_words",
+  "temperature": null,
+  "usage": null
+}

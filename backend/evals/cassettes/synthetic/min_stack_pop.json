@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "34e495dbd59ce6aaa8ca118cd17a170ee154cfb8975d3f01c072095d075f3f8c",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"A stack that also reports its minimum.\"\"\"\n\n\nclass MinStack:\n    def __init__(self):\n        self._items = []\n        self._mins = []  # _mins[i] is the minimum of _items[: i + 1]\n\n    def __len__(self) -> int:\n        return len(self._items)\n\n    def push(self, value) -> None:\n        self._items.append(value)\n        self._mins.append(value if not self._mins else min(value, self._mins[-1]))\n\n    def pop(self):\n        \"\"\"Remove and return the top value.\"\"\"\n        if not self._items:\n            raise IndexError(\"pop from an empty MinStack\")\n        self._mins.pop()\n        return self._items.pop()\n\n    def min(self):\n        \"\"\"Return the smallest value on the stack.\"\"\"\n        if not self._mins:\n            raise IndexError(\"min of an empty MinStack\")\n        return self._mins[-1]\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "min_stack_pop",
+  "temperature": null,
+  "usage": null
+}

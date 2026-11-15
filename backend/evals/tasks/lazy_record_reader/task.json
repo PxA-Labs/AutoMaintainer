@@ -1,0 +1,10 @@
+{
+  "id": "lazy_record_reader",
+  "title": "read_records loads the whole input into memory",
+  "body": "`read_records(lines)` in `etl/records.py` parses `name,amount` lines but builds a list of every record before returning, which runs out of memory on large exports. Please turn it into a generator that parses one line at a time and yields each record as soon as its line has been read, consuming no more of `lines` than needed. Parsing must stay exactly the same: blank lines are skipped, and a malformed line raises `ValueError` mentioning its 1-based line number, at the point the iteration reaches it (records from earlier lines have already been yielded by then).",
+  "target_file": "etl/records.py",
+  "kind": "refactor",
+  "category": "data-structure",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

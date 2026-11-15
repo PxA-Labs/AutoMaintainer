@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "d6f1d6d91b0b9c805a052d3a17c192c86fa4d807f1f9754673fa5935d7730cae",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Retrying flaky calls to downstream services.\"\"\"\n\nimport functools\n\n\ndef retry(times: int = 3, exceptions: tuple = (Exception,)):\n    \"\"\"Call the decorated function up to ``times`` times.\n\n    Only exceptions that are instances of ``exceptions`` trigger another\n    attempt.\n    \"\"\"\n\n    def decorator(func):\n        @functools.wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(1, times + 1):\n                try:\n                    return func(*args, **kwargs)\n                except exceptions:\n                    if attempt == times:\n                        raise\n\n        return wrapper\n\n    return decorator\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "retry_exception_filter",
+  "temperature": null,
+  "usage": null
+}

@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: renames calc_vat without keeping the deprecated alias, breaking existing callers (regression)",
+  "prompt_sha256": "b3beeb847fc3f135c976570011d761030e5bcf2ca06b3d9bee98dfa17b3b67a5",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Value-added tax helpers.\"\"\"\n\nVAT_RATE = 0.2\n\n\ndef vat_for(amount: float, rate: float = VAT_RATE) -> float:\n    \"\"\"Return the VAT owed on ``amount``, rounded to cents.\"\"\"\n    return round(amount * rate, 2)\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "deprecated_alias",
+  "temperature": null,
+  "usage": null
+}

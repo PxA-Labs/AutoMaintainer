@@ -1,0 +1,10 @@
+{
+  "id": "fahrenheit_precedence",
+  "title": "fahrenheit_to_celsius returns wrong values",
+  "body": "`fahrenheit_to_celsius` in `units/temperature.py` gives nonsense: 212 °F comes back as about 194 instead of 100 °C, and 32 °F is not 0 °C. Converting a Celsius value to Fahrenheit and back should give the original value. `celsius_to_fahrenheit` is correct and must not change.",
+  "target_file": "units/temperature.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "deprecated_alias",
+  "title": "Rename calc_vat to vat_for with a configurable rate",
+  "body": "In `pricing/tax.py`, rename `calc_vat(amount)` to `vat_for(amount, rate=0.2)`, which returns `amount * rate` rounded to 2 decimal places. Keep `calc_vat` as a deprecated alias for existing callers: it must return exactly what `vat_for(amount)` returns and emit a `DeprecationWarning` on every call. `vat_for` itself must not warn. Existing behaviour must not change.",
+  "target_file": "pricing/tax.py",
+  "kind": "refactor",
+  "category": "api-change",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

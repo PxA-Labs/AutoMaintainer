@@ -1,0 +1,10 @@
+{
+  "id": "api_error_mapping",
+  "title": "fetch_json treats every non-200 response the same way",
+  "body": "`fetch_json(transport, url, retries=0)` in `apiclient/fetch.py` calls `transport(url)`, which returns `(status, body_text)`. Today it accepts only status 200, raises a bare `ApiError` for everything else, and lets `json.JSONDecodeError` escape. The module already defines the exception classes; please use them:\n\n- any 2xx status: return the parsed JSON body;\n- 404: raise `NotFound`;\n- any other 4xx: raise `ClientError` with its `status` attribute set to the status code;\n- 5xx: call the transport again, up to `retries` more times; if the last attempt is still 5xx, raise `ServerError` with `status` set to the last status code. 4xx responses are never retried;\n- a 2xx body that is not valid JSON: raise `BadResponse`, chained from the original `json.JSONDecodeError` (`raise ... from err`);\n- any other status: raise `ApiError`.\n\nAll of these are subclasses of `ApiError`, so existing `except ApiError` handlers keep working.",
+  "target_file": "apiclient/fetch.py",
+  "kind": "feature",
+  "category": "error-handling",
+  "difficulty": "hard",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

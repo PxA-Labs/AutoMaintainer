@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: empty reply (normalize_generated_code rejects it)",
+  "prompt_sha256": "000174b1f50829cb2b8be1399856132b2224025402eb8cfe4d0f61434f4f3f38",
+  "prompt_version": "a2ecc40e0103",
+  "response": "",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "batched_tail",
+  "temperature": null,
+  "usage": null
+}

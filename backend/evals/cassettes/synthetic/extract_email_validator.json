@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "0181ed0a0e6add7182dc413ef6cbbfe5ff4ac005864722dc9d2d5ed980928e55",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"User account records.\"\"\"\n\n\ndef validate_email(email: str) -> str:\n    \"\"\"Return ``email`` stripped and lower-cased, or raise ``ValueError``.\"\"\"\n    email = email.strip().lower()\n    if email.count(\"@\") != 1:\n        raise ValueError(f\"invalid email address: {email!r}\")\n    local, domain = email.split(\"@\")\n    if not local or \".\" not in domain or domain.startswith(\".\"):\n        raise ValueError(f\"invalid email address: {email!r}\")\n    return email\n\n\ndef create_user(name: str, email: str) -> dict:\n    \"\"\"Return a new user record.\"\"\"\n    return {\"name\": name.strip(), \"email\": validate_email(email)}\n\n\ndef change_email(user: dict, email: str) -> dict:\n    \"\"\"Return a copy of ``user`` with a new email address.\"\"\"\n    return {**user, \"email\": validate_email(email)}\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "extract_email_validator",
+  "temperature": null,
+  "usage": null
+}

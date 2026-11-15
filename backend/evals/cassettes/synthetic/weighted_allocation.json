@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix in a fence followed by an explanation",
+  "prompt_sha256": "f6d394067e5e44f27afdabb065d4c564d6d89e40826747fbcbf56a2d31b3b693",
+  "prompt_version": "a2ecc40e0103",
+  "response": "```python\n\"\"\"Splitting invoice amounts between cost centres.\"\"\"\n\n\ndef split_evenly(total_cents: int, parts: int) -> list[int]:\n    \"\"\"Split ``total_cents`` into ``parts`` shares that differ by at most 1.\n\n    Earlier shares receive the extra cents.\n    \"\"\"\n    if parts <= 0:\n        raise ValueError(\"parts must be positive\")\n    base, extra = divmod(total_cents, parts)\n    return [base + 1 if i < extra else base for i in range(parts)]\n\n\ndef allocate(total_cents: int, weights: list[int]) -> list[int]:\n    \"\"\"Split ``total_cents`` in proportion to ``weights`` (largest remainder).\"\"\"\n    if total_cents < 0:\n        raise ValueError(\"total_cents must not be negative\")\n    if not weights:\n        raise ValueError(\"weights must not be empty\")\n    if any(w < 0 for w in weights):\n        raise ValueError(\"weights must not be negative\")\n    weight_sum = sum(weights)\n    if weight_sum == 0:\n        raise ValueError(\"at least one weight must be positive\")\n    shares, remainders = [], []\n    for w in weights:\n        share, rem = divmod(total_cents * w, weight_sum)\n        shares.append(share)\n        remainders.append(rem)\n    leftover = total_cents - sum(shares)\n    order = sorted(range(len(weights)), key=lambda i: (-remainders[i], i))\n    for i in order[:leftover]:\n        shares[i] += 1\n    return shares\n```\n\nThe new `allocate` function uses integer `divmod`, so the shares always add up to the total.",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "weighted_allocation",
+  "temperature": null,
+  "usage": null
+}

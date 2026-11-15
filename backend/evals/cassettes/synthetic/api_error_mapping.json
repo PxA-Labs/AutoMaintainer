@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "724c3ca4ee93a09c9868e825e05c5defdd454ef50864192e52c5002018e4f935",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"A small JSON-over-HTTP client with a pluggable transport.\"\"\"\n\nimport json\n\n\nclass ApiError(Exception):\n    \"\"\"Base class of every error raised by this module.\"\"\"\n\n    def __init__(self, message: str, status: int | None = None):\n        super().__init__(message)\n        self.status = status\n\n\nclass NotFound(ApiError):\n    \"\"\"The resource does not exist (HTTP 404).\"\"\"\n\n\nclass ClientError(ApiError):\n    \"\"\"The request was rejected (HTTP 4xx other than 404).\"\"\"\n\n\nclass ServerError(ApiError):\n    \"\"\"The server failed (HTTP 5xx), after any retries.\"\"\"\n\n\nclass BadResponse(ApiError):\n    \"\"\"A successful response whose body is not valid JSON.\"\"\"\n\n\ndef fetch_json(transport, url: str, retries: int = 0):\n    \"\"\"Return the decoded JSON body of ``transport(url)``.\n\n    5xx responses are retried up to ``retries`` more times.\n    \"\"\"\n    for attempt in range(retries + 1):\n        status, body = transport(url)\n        if not 500 <= status <= 599:\n            break\n        if attempt == retries:\n            raise ServerError(f\"{url}: HTTP {status}\", status)\n    if 200 <= status <= 299:\n        try:\n            return json.loads(body)\n        except json.JSONDecodeError as err:\n            raise BadResponse(f\"{url}: invalid JSON body\", status) from err\n    if status == 404:\n        raise NotFound(f\"{url}: not found\", status)\n    if 400 <= status <= 499:\n        raise ClientError(f\"{url}: HTTP {status}\", status)\n    raise ApiError(f\"{url}: HTTP {status}\", status)\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "api_error_mapping",
+  "temperature": null,
+  "usage": null
+}

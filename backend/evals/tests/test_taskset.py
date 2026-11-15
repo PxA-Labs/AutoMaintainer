@@ -21,10 +21,18 @@ TASKS = load_tasks()
 
 
 def test_task_set_size_and_mix():
-    assert 8 <= len(TASKS) <= 12
-    assert {t.kind for t in TASKS} <= set(KINDS)
-    assert {t.category for t in TASKS} <= set(CATEGORIES)
-    assert {t.difficulty for t in TASKS} == set(DIFFICULTIES)
+    # At least 30 tasks, so a resolve rate's 95% Wilson interval is at most
+    # about +-17 points instead of +-25 at n=10 (docs/EVALS.md).
+    assert len(TASKS) >= 30
+    # Every kind, category and difficulty is represented, none dominates.
+    for attr, allowed in (
+        ("kind", KINDS),
+        ("category", CATEGORIES),
+        ("difficulty", DIFFICULTIES),
+    ):
+        values = [getattr(t, attr) for t in TASKS]
+        assert set(values) == set(allowed), attr
+        assert max(values.count(v) for v in allowed) <= 0.7 * len(TASKS), attr
 
 
 # Ways a test could look at files instead of behaviour. A test that reads the
