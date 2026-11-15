@@ -4,22 +4,27 @@ Select it with ``SANDBOX_BACKEND=runners.docker_sandbox:create``. The factory
 receives the host path of a working copy; every ``exec_command`` then runs in
 a fresh, ephemeral container started through the ``docker`` CLI:
 
-- the working copy is copied to a throwaway directory that is bind-mounted at
-  ``/workspace`` and deleted afterwards, so nothing the command writes reaches
-  the host clone (or a later step that reads it);
+- the working copy is streamed into the container as a tar archive on stdin
+  and unpacked into a ``tmpfs`` at ``/workspace``. Nothing is bind-mounted,
+  so this works with any daemon the CLI can reach (the local socket, a
+  remote ``DOCKER_HOST``, or a daemon outside the worker's own container),
+  and nothing the command writes reaches the host clone (or a later step
+  that reads it);
 - ``--network none`` (``SANDBOX_NETWORK`` names another network, e.g. one
   that only reaches a package mirror), read-only root filesystem with a
   ``tmpfs`` ``/tmp``, ``--cap-drop ALL``, ``no-new-privileges``, a pids,
   memory and CPU limit, a non-root user and an explicit minimal environment
   (nothing from the host);
 - optional ``--runtime`` (``SANDBOX_RUNTIME=runsc`` for gVisor);
-- a unique container name per run, ``--rm``, and a forced removal on
-  timeout, error or cancellation; the wall-clock timeout is enforced here,
-  on the host, not trusted to the container;
+- a unique container name per run, ``--rm``, and on timeout, error or
+  cancellation the CLI is killed first and the container then
+  force-removed; the wall-clock timeout (which also covers packing the copy)
+  is enforced here, on the host, not trusted to the container;
 - output is capped to ``VERIFY_MAX_OUTPUT_BYTES`` (the tail) while reading.
 
-Only the docker CLI is used (argument lists, never a shell), so no Docker SDK
-dependency is needed and ``SANDBOX_DOCKER`` can point at a compatible CLI.
+Only the docker CLI is used (argument lists, never a shell on the host), so
+no Docker SDK dependency is needed and ``SANDBOX_DOCKER`` can point at a
+compatible CLI. The image must provide ``/bin/sh`` and ``tar``.
 
 Security note: whoever can talk to the Docker daemon is root-equivalent on
 the daemon's host. Run this on a dedicated sandbox host, with rootless Docker
@@ -33,12 +38,12 @@ import logging
 import os
 import re
 import shutil
-import stat
+import tarfile
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import IO, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .base import CommandTimeoutError, RunnerError
 from .local import LocalRunner, _to_argv
@@ -51,17 +56,30 @@ DEFAULT_MEMORY = "1g"
 DEFAULT_CPUS = "1"
 DEFAULT_PIDS_LIMIT = 256
 DEFAULT_TMPFS_SIZE = "256m"
-# "nobody"; numeric so the image needs no passwd entry. Used when the worker
-# runs as root or on Windows; see default_user().
+DEFAULT_WORKSPACE_SIZE = "1g"
+# "nobody"; numeric so the image needs no passwd entry.
 NOBODY = "65534:65534"
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
 WORKDIR = "/workspace"
 CONTAINER_PREFIX = "automaintainer-sandbox-"
 # docker run exits 125 when the daemon or CLI failed (bad flag, missing
 # image, unknown runtime): the command never ran, so it is not a test result.
+# SETUP_SCRIPT uses it too when unpacking the copy fails.
 DOCKER_ERROR_EXIT = 125
-# Seconds allowed for `docker rm --force` during cleanup.
+# Seconds allowed for each cleanup step (CLI exit, `docker rm --force`).
 CLEANUP_TIMEOUT = 30
+# Pause before the single retry of `docker rm --force`.
+REMOVE_RETRY_DELAY = 1.0
+# The archive of the working copy stays in memory up to this size, then
+# spills to an anonymous temporary file (gone once closed or collected).
+ARCHIVE_SPOOL_BYTES = 8 * 1024 * 1024
+# Runs as the container's entrypoint (/bin/sh -c): unpack the archive from
+# stdin into the tmpfs workspace, then replace itself with the test command,
+# which arrives as positional arguments (never interpolated into the script).
+SETUP_SCRIPT = (
+    f'tar -xf - -C {WORKDIR} || exit {DOCKER_ERROR_EXIT}; exec "$@" </dev/null'
+)
+SETUP_ARG0 = "automaintainer-sandbox"
 
 # The whole environment of the sandboxed command. Nothing is taken from the
 # host; PATH comes from the image.
@@ -73,8 +91,8 @@ SANDBOX_ENV: Dict[str, str] = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONUNBUFFERED": "1",
     "GIT_TERMINAL_PROMPT": "0",
-    # The copy is owned by the worker's uid, not the sandbox user; without
-    # this git refuses to work in it ("dubious ownership").
+    # /workspace (the tmpfs root) is owned by root, not the sandbox user;
+    # without this git refuses to work in it ("dubious ownership").
     "GIT_CONFIG_COUNT": "1",
     "GIT_CONFIG_KEY_0": "safe.directory",
     "GIT_CONFIG_VALUE_0": WORKDIR,
@@ -82,16 +100,25 @@ SANDBOX_ENV: Dict[str, str] = {
 
 # Variables the docker CLI process itself may inherit (to find the daemon).
 # The CLI does not forward its environment into the container, but keeping
-# secrets out of it costs nothing.
+# secrets out of it costs nothing. SSH_AUTH_SOCK (and USER, HOME for ~/.ssh)
+# serve DOCKER_HOST=ssh://...; the proxy variables a daemon behind a proxy.
 _CLI_ENV_ALLOWLIST = (
     "PATH",
     "HOME",
+    "USER",
     "DOCKER_HOST",
     "DOCKER_CONTEXT",
     "DOCKER_CONFIG",
     "DOCKER_CERT_PATH",
     "DOCKER_TLS_VERIFY",
     "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
     "SYSTEMROOT",
     "SYSTEMDRIVE",
     "WINDIR",
@@ -109,18 +136,6 @@ _CPUS_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 _USER_RE = re.compile(r"[0-9]+(:[0-9]+)?")
 
 
-def default_user() -> str:
-    """The worker's own uid:gid when it is not root, else ``nobody``.
-
-    Files the command creates in the bind-mounted copy belong to this uid; a
-    non-root worker must own them to delete the copy afterwards. A root
-    worker can delete anything, so the sandbox runs as nobody instead.
-    """
-    if os.name == "posix" and os.getuid() != 0:
-        return f"{os.getuid()}:{os.getgid()}"
-    return NOBODY
-
-
 def _setting(env: Mapping[str, str], name: str, default: str) -> str:
     return (env.get(name) or "").strip() or default
 
@@ -128,6 +143,15 @@ def _setting(env: Mapping[str, str], name: str, default: str) -> str:
 def _checked(name: str, value: str, pattern: re.Pattern, hint: str) -> str:
     if not pattern.fullmatch(value):
         raise RunnerError(f"{name}={value!r} is invalid: expected {hint}")
+    return value
+
+
+def _positive(name: str, value: str, pattern: re.Pattern, hint: str) -> str:
+    """``_checked``, and zero is refused too: docker reads ``--memory=0`` or
+    ``--cpus=0`` as "no limit"."""
+    _checked(name, value, pattern, hint)
+    if float(value.rstrip("bkmgBKMG")) <= 0:
+        raise RunnerError(f"{name}={value!r} must be greater than zero")
     return value
 
 
@@ -145,6 +169,7 @@ class DockerSandboxConfig:
     cpus: str = DEFAULT_CPUS
     pids_limit: int = DEFAULT_PIDS_LIMIT
     tmpfs_size: str = DEFAULT_TMPFS_SIZE
+    workspace_size: str = DEFAULT_WORKSPACE_SIZE
     user: str = NOBODY
     runtime: Optional[str] = None
     docker: str = "docker"
@@ -183,28 +208,34 @@ class DockerSandboxConfig:
         return cls(
             image=image,
             network=network,
-            memory=_checked(
+            memory=_positive(
                 "SANDBOX_MEMORY",
                 _setting(env, "SANDBOX_MEMORY", DEFAULT_MEMORY),
                 _SIZE_RE,
                 "a size such as 1g or 512m",
             ),
-            cpus=_checked(
+            cpus=_positive(
                 "SANDBOX_CPUS",
                 _setting(env, "SANDBOX_CPUS", DEFAULT_CPUS),
                 _CPUS_RE,
                 "a number such as 1 or 1.5",
             ),
             pids_limit=int(pids),
-            tmpfs_size=_checked(
+            tmpfs_size=_positive(
                 "SANDBOX_TMPFS_SIZE",
                 _setting(env, "SANDBOX_TMPFS_SIZE", DEFAULT_TMPFS_SIZE),
                 _SIZE_RE,
                 "a size such as 256m",
             ),
+            workspace_size=_positive(
+                "SANDBOX_WORKSPACE_SIZE",
+                _setting(env, "SANDBOX_WORKSPACE_SIZE", DEFAULT_WORKSPACE_SIZE),
+                _SIZE_RE,
+                "a size such as 1g",
+            ),
             user=_checked(
                 "SANDBOX_USER",
-                _setting(env, "SANDBOX_USER", default_user()),
+                _setting(env, "SANDBOX_USER", NOBODY),
                 _USER_RE,
                 "a numeric uid[:gid] (never 0)",
             ),
@@ -222,14 +253,20 @@ class DockerSandboxConfig:
 def docker_run_argv(
     config: DockerSandboxConfig,
     name: str,
-    workspace: Union[str, Path],
     command: Sequence[str],
 ) -> List[str]:
-    """The exact ``docker run`` argument list for one sandboxed command."""
+    """The exact ``docker run`` argument list for one sandboxed command.
+
+    The working copy arrives as a tar archive on stdin (``--interactive``);
+    ``SETUP_SCRIPT`` unpacks it into the ``/workspace`` tmpfs and execs
+    ``command``. No host path appears in the argv, so the daemon does not
+    need to see the worker's filesystem.
+    """
     argv = [
         config.docker,
         "run",
         "--rm",
+        "--interactive",
         f"--name={name}",
         f"--network={config.network}",
         "--read-only",
@@ -243,13 +280,18 @@ def docker_run_argv(
         f"--cpus={config.cpus}",
         f"--user={config.user}",
         f"--workdir={WORKDIR}",
-        f"--mount=type=bind,source={workspace},target={WORKDIR}",
+        # tmpfs pages count against --memory.
+        f"--tmpfs={WORKDIR}:rw,exec,nosuid,nodev,mode=1777,"
+        f"size={config.workspace_size}",
+        # A fixed entrypoint, whatever the image declares.
+        "--entrypoint=/bin/sh",
     ]
     if config.runtime:
         argv.append(f"--runtime={config.runtime}")
     argv += [f"--env={k}={v}" for k, v in SANDBOX_ENV.items()]
-    # Options end at the image; everything after it is the command, verbatim.
-    argv.append(config.image)
+    # Options end at the image; what follows goes to /bin/sh, and the command
+    # reaches the script as "$@", verbatim.
+    argv += [config.image, "-c", SETUP_SCRIPT, SETUP_ARG0]
     argv += list(command)
     return argv
 
@@ -259,29 +301,37 @@ def _cli_env(source: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     return {k: source[k] for k in _CLI_ENV_ALLOWLIST if k in source}
 
 
-def _copy_workspace(src: Path, dest: Path) -> None:
-    """Copy ``src`` to ``dest`` and make the copy writable by the sandbox user.
+def _anonymous(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    # Host account names and ids mean nothing in the container.
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    return info
 
-    Symlinks are copied as links, never followed: following one could copy a
+
+def _archive_workspace(src: Path) -> IO[bytes]:
+    """Pack ``src`` into a tar archive, rewound and ready to stream.
+
+    Symlinks are stored as links, never followed: following one could pull a
     host file (``link -> /etc/shadow``) into the sandbox. Inside the
-    container such a link points into the container's own filesystem.
+    container such a link points into the container's own filesystem. Only
+    the children of ``src`` are archived, not ``src`` itself, so unpacking
+    never tries to change the mode of the root-owned ``/workspace``.
     """
-    shutil.copytree(src, dest, symlinks=True)
-    # SANDBOX_USER may differ from the worker's uid; the copy is throwaway and
-    # lives in a private (0700) temp dir, so making it writable is harmless.
-    for root, _dirs, files in os.walk(dest):
-        os.chmod(root, os.stat(root).st_mode | 0o777)
-        for f in files:
-            path = os.path.join(root, f)
-            if os.path.islink(path):
-                continue
-            mode = os.stat(path).st_mode
-            os.chmod(path, mode | 0o666 | (0o111 if mode & stat.S_IXUSR else 0))
+    archive = tempfile.SpooledTemporaryFile(max_size=ARCHIVE_SPOOL_BYTES)
+    try:
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            for entry in sorted(os.listdir(src)):
+                tar.add(src / entry, arcname=entry, filter=_anonymous)
+        archive.seek(0)
+        return archive
+    except BaseException:
+        archive.close()
+        raise
 
 
 class DockerSandbox:
     """``runners.sandbox.SandboxBackend`` running commands in ephemeral
-    Docker containers against a throwaway copy of ``repo_path``.
+    Docker containers, each with its own copy of ``repo_path``.
 
     File operations act on the host working copy and refuse paths that
     escape it (delegated to ``LocalRunner``'s checks).
@@ -351,35 +401,54 @@ class DockerSandbox:
 
         stdout and stderr are interleaved in ``output`` and cut to the last
         ``max_output_bytes``; ``note`` is empty, or a truncation notice. Raises
-        CommandTimeoutError after ``timeout`` seconds (the container is
-        force-removed) and RunnerError when docker itself fails.
+        CommandTimeoutError after ``timeout`` seconds, counted from the start
+        of packing the copy (the container is force-removed), and RunnerError
+        when docker itself, or unpacking the copy, fails (exit 125).
         """
         argv = _to_argv(cmd)
         if not timeout or timeout <= 0:
             timeout = 60
-        docker = shutil.which(self.config.docker) or self.config.docker
-        name = CONTAINER_PREFIX + uuid.uuid4().hex
-        tmp = tempfile.mkdtemp(prefix="automaintainer-sandbox-")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         try:
-            workspace = Path(tmp) / "workspace"
-            try:
-                await asyncio.to_thread(_copy_workspace, self.repo_path, workspace)
-            except OSError as e:
-                raise RunnerError(f"could not copy the working copy: {e}") from e
-            full = docker_run_argv(self.config, name, workspace, argv)
+            # On timeout or cancellation the packing thread runs on, but it
+            # only writes to an anonymous spool file that goes away with it.
+            archive = await asyncio.wait_for(
+                asyncio.to_thread(_archive_workspace, self.repo_path), timeout
+            )
+        except asyncio.TimeoutError:
+            raise CommandTimeoutError(
+                f"could not pack the working copy within {timeout:g} seconds"
+            ) from None
+        except (OSError, tarfile.TarError) as e:
+            raise RunnerError(f"could not pack the working copy: {e}") from e
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise CommandTimeoutError(
+                    f"could not pack the working copy within {timeout:g} seconds"
+                )
+            docker = shutil.which(self.config.docker) or self.config.docker
+            name = CONTAINER_PREFIX + uuid.uuid4().hex
+            full = docker_run_argv(self.config, name, argv)
             full[0] = docker
-            return await self._run_container(full, name, timeout)
+            return await self._run_container(full, name, archive, remaining, timeout)
         finally:
-            await asyncio.to_thread(shutil.rmtree, tmp, True)
+            archive.close()
 
     async def _run_container(
-        self, argv: List[str], name: str, timeout: float
+        self,
+        argv: List[str],
+        name: str,
+        archive: IO[bytes],
+        remaining: float,
+        timeout: float,
     ) -> Tuple[int, str, str]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 env=_cli_env(),
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -389,6 +458,19 @@ class DockerSandbox:
         limit = self.config.max_output_bytes
         tail = bytearray()
         total = 0
+
+        async def feed() -> None:
+            try:
+                while chunk := archive.read(65536):
+                    proc.stdin.write(chunk)
+                    await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            except OSError:
+                # BrokenPipeError/ConnectionResetError: the container exited
+                # before reading everything (docker or tar failed); its exit
+                # code says what happened.
+                pass
 
         async def pump() -> None:
             nonlocal total
@@ -401,9 +483,10 @@ class DockerSandbox:
                     del tail[: len(tail) - limit]
             await proc.wait()
 
+        feeder = asyncio.ensure_future(feed())
         finished = False
         try:
-            await asyncio.wait_for(pump(), timeout)
+            await asyncio.wait_for(pump(), remaining)
             finished = True
         except asyncio.TimeoutError:
             raise CommandTimeoutError(
@@ -411,9 +494,11 @@ class DockerSandbox:
             ) from None
         finally:
             if not finished:
-                # Timeout, error or cancellation: --rm only fires once the
-                # container stops, so kill and remove it explicitly.
-                await self._remove_container(name)
+                # Timeout, error or cancellation. --rm only fires once the
+                # container stops, so remove it explicitly. Kill the CLI
+                # first: while it lives it may still pull the image or
+                # create and start the container, which a removal issued
+                # before would miss.
                 if proc.returncode is None:
                     try:
                         proc.kill()
@@ -423,6 +508,15 @@ class DockerSandbox:
                         await asyncio.wait_for(proc.wait(), CLEANUP_TIMEOUT)
                     except asyncio.TimeoutError:
                         logger.warning("docker CLI %s did not exit", proc.pid)
+                await self._remove_container(name)
+            if finished:
+                # The CLI exited, so the pipe is closed and the feeder ends
+                # promptly (done, or a broken pipe); the wait is a backstop.
+                await asyncio.wait({feeder}, timeout=CLEANUP_TIMEOUT)
+            # Never leave it running against the archive, which the caller
+            # closes next.
+            feeder.cancel()
+            await asyncio.gather(feeder, return_exceptions=True)
 
         output = bytes(tail).decode("utf-8", errors="replace")
         if proc.returncode == DOCKER_ERROR_EXIT:
@@ -436,22 +530,32 @@ class DockerSandbox:
         return proc.returncode, output, note
 
     async def _remove_container(self, name: str) -> None:
-        """``docker rm --force``: kills the container if running, removes it."""
+        """``docker rm --force``: kills the container if running, removes it.
+
+        Retried once on failure: "no such container" usually means the CLI
+        died before creating it, but a create request it already sent may
+        still complete in the daemon just after the first attempt.
+        """
         docker = shutil.which(self.config.docker) or self.config.docker
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                docker,
-                "rm",
-                "--force",
-                name,
-                env=_cli_env(),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), CLEANUP_TIMEOUT)
-        except (OSError, asyncio.TimeoutError) as e:
-            logger.warning("could not remove sandbox container %s: %s", name, e)
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(REMOVE_RETRY_DELAY)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    docker,
+                    "rm",
+                    "--force",
+                    name,
+                    env=_cli_env(),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                if await asyncio.wait_for(proc.wait(), CLEANUP_TIMEOUT) == 0:
+                    return
+            except (OSError, asyncio.TimeoutError) as e:
+                logger.warning("could not remove sandbox container %s: %s", name, e)
+        logger.info("sandbox container %s was not found or not removed", name)
 
 
 def create(repo_path: Union[str, Path]) -> DockerSandbox:

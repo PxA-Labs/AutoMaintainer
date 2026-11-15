@@ -3,10 +3,11 @@ run without Docker. Real containers are exercised by
 test_docker_sandbox_integration.py (CI workflow sandbox.yml)."""
 
 import asyncio
+import io
 import os
 import shutil
 import subprocess
-from pathlib import Path
+import tarfile
 
 import pytest
 
@@ -15,6 +16,7 @@ from runners import docker_sandbox
 from runners.base import CommandTimeoutError, PathTraversalError, RunnerError
 from runners.docker_sandbox import (
     SANDBOX_ENV,
+    SETUP_SCRIPT,
     DockerSandbox,
     DockerSandboxConfig,
     docker_run_argv,
@@ -28,6 +30,7 @@ SETTINGS = (
     "SANDBOX_CPUS",
     "SANDBOX_PIDS_LIMIT",
     "SANDBOX_TMPFS_SIZE",
+    "SANDBOX_WORKSPACE_SIZE",
     "SANDBOX_USER",
     "SANDBOX_RUNTIME",
     "SANDBOX_DOCKER",
@@ -59,7 +62,30 @@ def repo(tmp_path):
     return root
 
 
-CONFIG = DockerSandboxConfig(user="65534:65534")
+CONFIG = DockerSandboxConfig()
+
+
+class FakeStdin:
+    def __init__(self, events, broken=False):
+        self.data = bytearray()
+        self.closed = False
+        self._events = events
+        self._broken = broken
+
+    def write(self, chunk):
+        if self._broken:
+            raise BrokenPipeError("container exited")
+        self.data.extend(chunk)
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+        self._events.append("stdin-closed")
+
+    async def wait_closed(self):
+        pass
 
 
 class FakeStream:
@@ -79,7 +105,17 @@ class FakeStream:
 
 
 class FakeProc:
-    def __init__(self, chunks=(), returncode=0, hang=False, error=None):
+    def __init__(
+        self,
+        chunks=(),
+        returncode=0,
+        hang=False,
+        error=None,
+        broken_stdin=False,
+        events=None,
+    ):
+        self.events = [] if events is None else events
+        self.stdin = FakeStdin(self.events, broken=broken_stdin)
         self.stdout = FakeStream(chunks, hang=hang, error=error)
         self._final = returncode
         self.returncode = None
@@ -93,26 +129,30 @@ class FakeProc:
 
     def kill(self):
         self.killed = True
+        self.events.append("kill")
 
 
 class FakeDocker:
     """Records docker CLI invocations; ``run`` answers `docker run`."""
 
-    def __init__(self, run_proc=None, on_run=None, start_error=None):
+    def __init__(self, run_proc=None, start_error=None, rm_codes=(0,)):
         self.calls = []
+        self.events = []
         self.run_proc = run_proc or FakeProc([b"ok\n"])
-        self.on_run = on_run
+        self.run_proc.events = self.events
+        self.run_proc.stdin._events = self.events
         self.start_error = start_error
+        self.rm_codes = list(rm_codes)
 
     async def __call__(self, *argv, **kwargs):
         self.calls.append((list(argv), kwargs))
         if argv[1] == "run":
             if self.start_error:
                 raise self.start_error
-            if self.on_run:
-                self.on_run(list(argv))
             return self.run_proc
-        return FakeProc(returncode=0)
+        self.events.append(argv[1])
+        code = self.rm_codes.pop(0) if len(self.rm_codes) > 1 else self.rm_codes[0]
+        return FakeProc(returncode=code)
 
     @property
     def run_argv(self):
@@ -126,10 +166,9 @@ class FakeDocker:
     def rm_calls(self):
         return [a for a, _ in self.calls if a[1] == "rm"]
 
-
-def _mount_source(argv):
-    flag = next(a for a in argv if a.startswith("--mount="))
-    return Path(flag.split("source=", 1)[1].split(",target=")[0])
+    def archive(self):
+        """The tar archive the container received on stdin."""
+        return tarfile.open(fileobj=io.BytesIO(bytes(self.run_proc.stdin.data)))
 
 
 @pytest.fixture
@@ -140,6 +179,7 @@ def fake_docker(monkeypatch):
             docker_sandbox.asyncio, "create_subprocess_exec", fake, raising=True
         )
         monkeypatch.setattr(docker_sandbox.shutil, "which", lambda name: None)
+        monkeypatch.setattr(docker_sandbox, "REMOVE_RETRY_DELAY", 0)
         return fake
 
     return install
@@ -149,13 +189,12 @@ def fake_docker(monkeypatch):
 
 
 def test_docker_run_argv_is_exact_and_hardened():
-    argv = docker_run_argv(
-        CONFIG, "automaintainer-sandbox-abc", "/tmp/x/workspace", ["python", "-V"]
-    )
+    argv = docker_run_argv(CONFIG, "automaintainer-sandbox-abc", ["python", "-V"])
     assert argv == [
         "docker",
         "run",
         "--rm",
+        "--interactive",
         "--name=automaintainer-sandbox-abc",
         "--network=none",
         "--read-only",
@@ -168,7 +207,8 @@ def test_docker_run_argv_is_exact_and_hardened():
         "--cpus=1",
         "--user=65534:65534",
         "--workdir=/workspace",
-        "--mount=type=bind,source=/tmp/x/workspace,target=/workspace",
+        "--tmpfs=/workspace:rw,exec,nosuid,nodev,mode=1777,size=1g",
+        "--entrypoint=/bin/sh",
         "--env=HOME=/tmp",
         "--env=TMPDIR=/tmp",
         "--env=CI=true",
@@ -180,9 +220,21 @@ def test_docker_run_argv_is_exact_and_hardened():
         "--env=GIT_CONFIG_KEY_0=safe.directory",
         "--env=GIT_CONFIG_VALUE_0=/workspace",
         "python:3.12-slim",
+        "-c",
+        'tar -xf - -C /workspace || exit 125; exec "$@" </dev/null',
+        "automaintainer-sandbox",
         "python",
         "-V",
     ]
+
+
+def test_argv_has_no_bind_mount_or_volume():
+    """The daemon may be remote or outside the worker's container: it cannot
+    resolve a worker path, so the copy must not be passed as a mount."""
+    argv = docker_run_argv(CONFIG, "n", ["true"])
+    for a in argv:
+        assert not a.startswith(("--mount", "--volume", "-v")), a
+        assert "bind" not in a
 
 
 def test_config_from_env_applies_overrides_and_runtime(monkeypatch):
@@ -191,26 +243,35 @@ def test_config_from_env_applies_overrides_and_runtime(monkeypatch):
     monkeypatch.setenv("SANDBOX_MEMORY", "2g")
     monkeypatch.setenv("SANDBOX_CPUS", "1.5")
     monkeypatch.setenv("SANDBOX_PIDS_LIMIT", "64")
+    monkeypatch.setenv("SANDBOX_WORKSPACE_SIZE", "512m")
     monkeypatch.setenv("SANDBOX_USER", "1000:1000")
     monkeypatch.setenv("SANDBOX_RUNTIME", "runsc")
     config = DockerSandboxConfig.from_env()
-    argv = docker_run_argv(config, "n", "/w", ["true"])
+    argv = docker_run_argv(config, "n", ["true"])
     for flag in (
         "--network=pypi-mirror",
         "--memory=2g",
         "--memory-swap=2g",
         "--cpus=1.5",
         "--pids-limit=64",
+        "--tmpfs=/workspace:rw,exec,nosuid,nodev,mode=1777,size=512m",
         "--user=1000:1000",
         "--runtime=runsc",
     ):
         assert flag in argv
-    assert argv[-2:] == ["ghcr.io/acme/tests@sha256:" + "a" * 64, "true"]
+    image = "ghcr.io/acme/tests@sha256:" + "a" * 64
+    assert argv[argv.index(image) :] == [
+        image,
+        "-c",
+        SETUP_SCRIPT,
+        "automaintainer-sandbox",
+        "true",
+    ]
 
 
 def test_no_runtime_flag_by_default():
     assert not any(
-        a.startswith("--runtime") for a in docker_run_argv(CONFIG, "n", "/w", ["x"])
+        a.startswith("--runtime") for a in docker_run_argv(CONFIG, "n", ["x"])
     )
 
 
@@ -221,15 +282,22 @@ def test_no_runtime_flag_by_default():
         ("SANDBOX_NETWORK", "HOST"),
         ("SANDBOX_NETWORK", "container:abc"),
         ("SANDBOX_MEMORY", "1g --privileged"),
+        ("SANDBOX_MEMORY", "0"),
+        ("SANDBOX_MEMORY", "0g"),
         ("SANDBOX_CPUS", "all"),
+        ("SANDBOX_CPUS", "0"),
+        ("SANDBOX_CPUS", "0.0"),
         ("SANDBOX_PIDS_LIMIT", "0"),
         ("SANDBOX_PIDS_LIMIT", "-1"),
+        ("SANDBOX_TMPFS_SIZE", "1g,exec"),
+        ("SANDBOX_TMPFS_SIZE", "0m"),
+        ("SANDBOX_WORKSPACE_SIZE", "0"),
+        ("SANDBOX_WORKSPACE_SIZE", "1g,uid=0"),
         ("SANDBOX_USER", "0"),
         ("SANDBOX_USER", "0:0"),
         ("SANDBOX_USER", "root"),
         ("SANDBOX_IMAGE", "--privileged"),
         ("SANDBOX_RUNTIME", "runsc --privileged"),
-        ("SANDBOX_TMPFS_SIZE", "1g,exec"),
     ],
 )
 def test_invalid_settings_are_refused(monkeypatch, name, value):
@@ -238,12 +306,28 @@ def test_invalid_settings_are_refused(monkeypatch, name, value):
         DockerSandboxConfig.from_env()
 
 
-def test_default_user_is_never_root(monkeypatch):
-    user = DockerSandboxConfig.from_env().user
-    assert user.split(":")[0] != "0"
-    if os.name == "posix":
-        monkeypatch.setattr(docker_sandbox.os, "getuid", lambda: 0)
-        assert docker_sandbox.default_user() == docker_sandbox.NOBODY
+def test_default_user_is_nobody():
+    assert DockerSandboxConfig.from_env().user == "65534:65534"
+
+
+def test_cli_env_keeps_daemon_access_variables_only():
+    env = docker_sandbox._cli_env(
+        {
+            "PATH": "/usr/bin",
+            "DOCKER_HOST": "ssh://sandbox@host",
+            "SSH_AUTH_SOCK": "/run/agent.sock",
+            "HTTPS_PROXY": "http://proxy:3128",
+            "no_proxy": "localhost",
+            "GITHUB_TOKEN": "ghs_secret",
+        }
+    )
+    assert env == {
+        "PATH": "/usr/bin",
+        "DOCKER_HOST": "ssh://sandbox@host",
+        "SSH_AUTH_SOCK": "/run/agent.sock",
+        "HTTPS_PROXY": "http://proxy:3128",
+        "no_proxy": "localhost",
+    }
 
 
 def test_factory_is_loadable_through_sandbox_backend(monkeypatch, repo):
@@ -274,12 +358,7 @@ async def test_exec_runs_hardened_container_without_host_env(fake_docker, repo):
         "--user=65534:65534",
     ):
         assert flag in argv
-    assert argv[argv.index("python:3.12-slim") :] == [
-        "python:3.12-slim",
-        "python",
-        "-m",
-        "pytest",
-    ]
+    assert argv[-3:] == ["python", "-m", "pytest"]
     # Container env is exactly the explicit minimal set ...
     envs = [a[len("--env=") :] for a in argv if a.startswith("--env=")]
     assert envs == [f"{k}={v}" for k, v in SANDBOX_ENV.items()]
@@ -289,7 +368,11 @@ async def test_exec_runs_hardened_container_without_host_env(fake_docker, repo):
         assert secret not in joined
     cli_env = fake.run_kwargs["env"]
     assert not {"GITHUB_TOKEN", "SUPABASE_SERVICE_KEY", "GROQ_API_KEY"} & set(cli_env)
-    assert fake.run_kwargs["stdin"] == asyncio.subprocess.DEVNULL
+    # The copy goes in on stdin, which is closed afterwards.
+    assert fake.run_kwargs["stdin"] == asyncio.subprocess.PIPE
+    assert fake.run_proc.stdin.closed
+    # No host path is handed to the daemon.
+    assert str(repo) not in joined
     # Normal exit: --rm cleans up, no forced removal needed.
     assert fake.rm_calls == []
 
@@ -304,26 +387,19 @@ async def test_container_names_are_unique_per_run(fake_docker, repo):
     assert all(n.startswith("--name=automaintainer-sandbox-") for n in names)
 
 
-async def test_command_sees_a_throwaway_copy_not_the_host_clone(fake_docker, repo):
-    seen = {}
-
-    def container_writes(argv):
-        src = _mount_source(argv)
-        seen["src"] = src
-        seen["content"] = (src / "pkg" / "mod.py").read_text(encoding="utf-8")
-        # What a hostile test would do to the workspace.
-        (src / "pkg" / "mod.py").write_text("X = 666\n", encoding="utf-8")
-        (src / "planted.txt").write_text("x", encoding="utf-8")
-
-    fake_docker(on_run=container_writes)
+async def test_container_receives_a_copy_of_the_working_copy(fake_docker, repo):
+    fake = fake_docker()
     await DockerSandbox(repo, CONFIG).exec_command(["true"])
-    assert seen["content"] == "X = 1\n"
-    assert seen["src"].resolve() != repo.resolve()
-    assert repo not in seen["src"].parents
-    # The host clone is untouched and the copy is gone.
-    assert (repo / "pkg" / "mod.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert not (repo / "planted.txt").exists()
-    assert not seen["src"].exists()
+    with fake.archive() as tar:
+        names = sorted(tar.getnames())
+        content = tar.extractfile("pkg/mod.py").read()
+        members = tar.getmembers()
+    # Children of the root only (never "." itself), so unpacking does not
+    # try to chmod the root-owned /workspace.
+    assert names == [".automaintainer.yml", "pkg", "pkg/mod.py"]
+    assert content == (repo / "pkg" / "mod.py").read_bytes()
+    # Host account details are not carried into the container.
+    assert all((m.uid, m.gid, m.uname, m.gname) == (0, 0, "", "") for m in members)
 
 
 def _can_symlink(tmp_path):
@@ -340,26 +416,39 @@ async def test_symlinks_are_copied_as_links_not_followed(fake_docker, repo, tmp_
     secret = tmp_path / "host-secret.txt"
     secret.write_text("TOP SECRET", encoding="utf-8")
     (repo / "leak").symlink_to(secret)
-    seen = {}
-
-    def inspect(argv):
-        link = _mount_source(argv) / "leak"
-        seen["is_link"] = link.is_symlink()
-
-    fake_docker(on_run=inspect)
+    fake = fake_docker()
     await DockerSandbox(repo, CONFIG).exec_command(["true"])
-    assert seen["is_link"] is True
+    with fake.archive() as tar:
+        member = tar.getmember("leak")
+        assert member.issym()
+        assert b"TOP SECRET" not in bytes(fake.run_proc.stdin.data)
 
 
-async def test_timeout_kills_and_removes_container(fake_docker, repo):
+async def test_timeout_kills_cli_before_removing_container(fake_docker, repo):
     proc = FakeProc([b"started\n"], hang=True)
     fake = fake_docker(run_proc=proc)
     with pytest.raises(CommandTimeoutError):
         await DockerSandbox(repo, CONFIG).exec_command(["sleep", "999"], timeout=0.2)
     name = next(a for a in fake.run_argv if a.startswith("--name="))[len("--name=") :]
     assert fake.rm_calls == [["docker", "rm", "--force", name]]
-    assert proc.killed
-    assert not _mount_source(fake.run_argv).exists()
+    # The CLI is killed (and reaped) first, so it cannot create or start the
+    # container after the removal.
+    assert fake.events.index("kill") < fake.events.index("rm")
+
+
+async def test_removal_is_retried_once_when_it_fails(fake_docker, repo):
+    fake = fake_docker(run_proc=FakeProc(hang=True), rm_codes=(1, 0))
+    with pytest.raises(CommandTimeoutError):
+        await DockerSandbox(repo, CONFIG).exec_command(["sleep", "9"], timeout=0.2)
+    assert len(fake.rm_calls) == 2
+    assert fake.events == ["stdin-closed", "kill", "rm", "rm"]
+
+
+async def test_removal_gives_up_after_one_retry(fake_docker, repo):
+    fake = fake_docker(run_proc=FakeProc(hang=True), rm_codes=(1,))
+    with pytest.raises(CommandTimeoutError):
+        await DockerSandbox(repo, CONFIG).exec_command(["sleep", "9"], timeout=0.2)
+    assert len(fake.rm_calls) == 2
 
 
 async def test_cancellation_removes_container(fake_docker, repo):
@@ -367,27 +456,59 @@ async def test_cancellation_removes_container(fake_docker, repo):
     task = asyncio.ensure_future(
         DockerSandbox(repo, CONFIG).exec_command(["sleep", "999"], timeout=60)
     )
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(fake.rm_calls) == 1
-    assert not _mount_source(fake.run_argv).exists()
+    assert fake.events.index("kill") < fake.events.index("rm")
 
 
-async def test_stream_error_removes_container_and_copy(fake_docker, repo):
+async def test_stream_error_removes_container(fake_docker, repo):
     fake = fake_docker(run_proc=FakeProc([b"x"], error=OSError("pipe broke")))
     with pytest.raises(OSError):
         await DockerSandbox(repo, CONFIG).exec_command(["true"])
     assert len(fake.rm_calls) == 1
-    assert not _mount_source(fake.run_argv).exists()
 
 
-async def test_missing_docker_cli_is_a_runner_error(fake_docker, repo, tmp_path):
-    fake = fake_docker(start_error=FileNotFoundError("docker"))
+async def test_packing_time_counts_against_the_timeout(fake_docker, monkeypatch, repo):
+    def slow_archive(src):
+        import time
+
+        time.sleep(0.5)
+        return io.BytesIO(b"")
+
+    monkeypatch.setattr(docker_sandbox, "_archive_workspace", slow_archive)
+    fake = fake_docker()
+    with pytest.raises(CommandTimeoutError, match="pack"):
+        await DockerSandbox(repo, CONFIG).exec_command(["true"], timeout=0.1)
+    # No container was started for a copy that never finished.
+    assert fake.calls == []
+
+
+async def test_packing_failure_is_a_runner_error(fake_docker, monkeypatch, repo):
+    def broken(src):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(docker_sandbox, "_archive_workspace", broken)
+    fake = fake_docker()
+    with pytest.raises(RunnerError, match="pack the working copy"):
+        await DockerSandbox(repo, CONFIG).exec_command(["true"])
+    assert fake.calls == []
+
+
+async def test_container_exiting_before_reading_stdin_is_not_a_crash(fake_docker, repo):
+    fake_docker(
+        run_proc=FakeProc([b"Unable to find image"], returncode=125, broken_stdin=True)
+    )
+    with pytest.raises(RunnerError, match="Unable to find image"):
+        await DockerSandbox(repo, CONFIG).exec_command(["true"])
+
+
+async def test_missing_docker_cli_is_a_runner_error(fake_docker, repo):
+    fake_docker(start_error=FileNotFoundError("docker"))
     with pytest.raises(RunnerError, match="docker CLI"):
         await DockerSandbox(repo, CONFIG).exec_command(["true"])
-    assert not _mount_source(fake.run_argv).exists()
 
 
 async def test_docker_exit_125_is_a_runner_error_not_a_test_failure(fake_docker, repo):
@@ -403,7 +524,7 @@ async def test_test_failure_exit_code_is_returned(fake_docker, repo):
 
 
 async def test_output_is_capped_to_the_tail(fake_docker, repo):
-    config = DockerSandboxConfig(user="65534:65534", max_output_bytes=1024)
+    config = DockerSandboxConfig(max_output_bytes=1024)
     chunks = [b"a" * 1000, b"b" * 1000, b"c" * 1000 + b"END"]
     fake_docker(run_proc=FakeProc(chunks, returncode=1))
     code, out, note = await DockerSandbox(repo, config).exec_command(["x"])
@@ -424,7 +545,6 @@ async def test_verify_working_copy_through_docker_backend(
     fake_docker, monkeypatch, repo
 ):
     monkeypatch.setenv("SANDBOX_BACKEND", "runners.docker_sandbox:create")
-    monkeypatch.setenv("SANDBOX_USER", "65534:65534")
     monkeypatch.setenv("VERIFY_MAX_OUTPUT_BYTES", "1024")
     fake = fake_docker(run_proc=FakeProc([b"z" * 5000 + b"\n1 passed\n"]))
     result = await verification.verify_working_copy(repo)
