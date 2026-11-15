@@ -12,7 +12,8 @@ request. This is the MVP of the "sandboxed test run" item of epic #411.
 Implementer pushes the change to automaintainer/<run> and opens/updates the PR
         |
         v
-agents._verify_and_report  (one call per iteration)
+agents._verify_and_report  (once per iteration, and again when a
+        |                           redelivered run resumes a pushed iteration)
         |  head SHA = tip of the PR branch
         v
 verification.verify_pr_branch
@@ -44,24 +45,43 @@ process never receives it.
 
 ### Merge gating
 
-`MERGE_POLICY=ci` merges only when every commit status and check run on the PR
-head is green (`agents._ci_checks_passed`). Verification posts its result as a
-commit status on that head, and only `passed` maps to `success`, so `ci` merges
-only a head whose verification passed. `error` and `skipped` fail closed.
-Because the status is bound to a SHA, a later push to the branch is never
-merged on an older result.
+`MERGE_POLICY=ci` merges only when the `automaintainer/verification` status
+on the PR head is present and `success`, and every other commit status and
+check run on that head is green (`agents._ci_checks_passed`). Only `passed`
+maps to `success`; `failed`, `error`, `skipped` **and a missing status** all
+block the merge, so a crash, a skipped step or a status that never got posted
+cannot let the repository's other CI merge an unverified head. Because the
+status is bound to a SHA, a later push to the branch is never merged on an
+older result.
 
-If the status cannot be posted while `MERGE_POLICY=ci`, the run stops with
+If the status cannot be posted while `MERGE_POLICY=ci` (GitHub refuses the
+write, or the PR head could not be resolved at all), the run stops with
 `VERIFICATION_STATUS_FAILED`; the PR stays open. Under `human` (the default)
 and `auto`, a failure to post is logged and the run continues.
 
-For a backstop that does not depend on the agent at all, mark
+A redelivered run (Celery `acks_late`) that resumes an iteration whose commit
+was already pushed verifies that commit again before the Maintainer runs, so a
+crash between the push and the status post does not leave the PR unverified.
+
+For a backstop that does not depend on the agent at all, also mark
 `automaintainer/verification` as a **required status check** in the branch
 protection of maintained repositories. GitHub then refuses any merge without a
-green verification, including in the edge case below (a resumed run).
+green verification, including merges by people.
 
 The GitHub App needs the **Commit statuses: read & write** repository
 permission.
+
+### Effect on existing deployments
+
+- With `ENVIRONMENT=production` and no `SANDBOX_BACKEND` (the shipped image
+  today), every agent PR gets an `error` verification status (a red X on the
+  PR), whatever the merge policy, and `MERGE_POLICY=ci` no longer merges.
+  Configure a sandbox backend, or accept the risk with `VERIFY_ALLOW_LOCAL=true`.
+- A `MERGE_POLICY=ci` deployment whose GitHub App lacks **Commit statuses:
+  write** now stops every run with `VERIFICATION_STATUS_FAILED`.
+- `MERGE_POLICY=ci` with `VERIFY_CHANGES=false` never merges (the result is
+  `skipped`).
+- docs/DEPLOYMENT.md does not cover these yet; that is a follow-up.
 
 ## Configuration
 
@@ -80,7 +100,9 @@ timeout_seconds: 600                              # optional
   `VERIFY_MAX_TIMEOUT_SECONDS`.
 - An invalid file is an `error`, not a silent fallback to detection.
 - A change that modifies `.automaintainer.yml` itself is reported as `error`,
-  so a change cannot choose the command that judges it.
+  so a change cannot rewrite the configured command. This guards that file
+  only; see Limitations for the test files and runner configuration a change
+  can still alter.
 
 Without the file, the command is detected, first match wins:
 
@@ -99,7 +121,7 @@ Without the file, the command is detected, first match wins:
 | `SANDBOX_BACKEND` | unset | `package.module:factory`. The factory is called with the host path of the working copy and returns a `runners.sandbox.SandboxBackend`. A set but unloadable value is an `error`; it never falls back to local execution. |
 | `VERIFY_ALLOW_LOCAL` | unset | With `ENVIRONMENT=production`, `true` allows the local runner anyway. Leave it unset. |
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
-| `VERIFY_MAX_TIMEOUT_SECONDS` | `1800` | Upper bound for a repository's `timeout_seconds`. |
+| `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail). The PR body shows the last 3000 characters. |
 | `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. |
 
@@ -112,6 +134,12 @@ agent just wrote from an untrusted issue. Treat it as hostile.
   `SANDBOX_BACKEND`, verification refuses to run (`error`, so `ci` does not
   merge) unless `VERIFY_ALLOW_LOCAL=true`. The refusal happens before the
   repository is cloned.
+- **`ENVIRONMENT` defaults to `development`.** A deployment run outside the
+  shipped image/compose files without `ENVIRONMENT=production` therefore runs
+  untrusted repository code on the host by default, because `VERIFY_CHANGES`
+  is on by default. Set `ENVIRONMENT=production` (or `VERIFY_CHANGES=false`)
+  on every server that is not a developer machine. The terminal guard in
+  `main.py` has the same pitfall.
 - **The local runner is defense in depth, not isolation.** It runs an
   argument list (no shell) in the temporary clone, with stdin closed, an
   environment reduced to `PATH` and a few OS variables (no API keys, database
@@ -120,11 +148,24 @@ agent just wrote from an untrusted issue. Treat it as hostile.
   does **not** stop the tests from reading files the server user can read,
   using the network, or consuming CPU and memory up to the timeout. Use it for
   development only.
+- **Scrubbing the environment does not hide the server's secrets.** The test
+  process runs as the same OS user as the worker, so it can read them another
+  way: on Linux from `/proc/<worker pid>/environ`, and from the server's
+  `.env`, key files or any other file that user can read. With
+  `VERIFY_ALLOW_LOCAL=true`, assume that a malicious repository obtains every
+  secret of the worker (GitHub App key, Supabase service key, LLM keys).
+- **The process-tree kill can be escaped.** On POSIX the runner kills the
+  test's process group; a test that calls `setsid` or double-forks leaves that
+  group and survives the timeout. Only a sandbox backend bounds this.
 - **A sandbox backend** should run the command in an ephemeral container or
   micro-VM with no secrets, network egress denied (or limited to package
   mirrors) and CPU, memory and time limits. Those properties are the backend's
   responsibility; this repository only defines the interface
-  (`runners/sandbox.py`) and does not ship a backend yet.
+  (`runners/sandbox.py`) and does not ship a backend yet. The host waits at
+  most `timeout_seconds` + 30 s for the backend, then reports `error`. The
+  host does not bound memory for the backend's reply: `exec_command` returns
+  stdout and stderr as whole strings, which are only then cut to
+  `VERIFY_MAX_OUTPUT_BYTES`, so a backend should cap its own output.
 - **Output is untrusted.** In the PR body it is placed in a code fence longer
   than any backtick run it contains, so it cannot inject Markdown or
   `@mentions`.
@@ -145,10 +186,18 @@ agent just wrote from an untrusted issue. Treat it as hostile.
 - **The PR is opened before the result is attached.** Verification runs right
   after the push; the PR body section and status appear moments later. The
   merge gate is unaffected because it reads the status on the head SHA.
-- **Resumed runs.** If a run crashes after pushing but before the status is
-  posted, the resumed run reuses the pushed commit without re-verifying. With
-  `MERGE_POLICY=ci` the gate then sees no verification status and relies on
-  the other checks; the required-status-check setting above closes this gap.
+- **The change can still influence its own tests.** Only `.automaintainer.yml`
+  is protected. When the agent's target file is a test, `conftest.py`,
+  `pytest.ini`, `pyproject.toml` (e.g. `addopts`), `setup.cfg` or
+  `package.json` (the `test` script), the change can skip, rewrite or
+  short-circuit the tests and make verification pass. Human review of such
+  PRs, or required CI that the change cannot modify, remains necessary.
+- **Event counts are synthetic.** The `TestResultEvent` reports
+  `passed_count`/`failed_count` as 1/0 for the whole command; individual test
+  counts are not parsed from the output.
+- **Re-verification on resume repeats the run.** A redelivered run verifies
+  the pushed commit again even if the crashed attempt had already posted a
+  result; this costs one more test run and keeps the result fresh.
 - **Verification can make `ci` merge in a repository with no other CI.**
   `_ci_checks_passed` requires at least one successful check; a passed
   verification is one. Repositories that want an independent CI signal as
