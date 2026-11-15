@@ -263,7 +263,7 @@ export function useAgentRun(
 
       options?.onStart?.();
       updatePhase("starting");
-      log(`Triggering AI Agent Loop for ${repoUrl}...`, "text-zinc-500");
+      log(`Triggering AI Agent Loop for ${repoUrl}...`, "text-muted");
 
       try {
         const res = await fetch(`${getBackendUrl()}/start`, {

@@ -16,7 +16,7 @@ export function AuthGate({ onSignIn, onSkip, loading }: AuthGateProps) {
         <h1 className="text-2xl font-semibold text-zinc-100 tracking-tight mb-2">
           AutoMaintainer
         </h1>
-        <p className="text-sm text-zinc-500 mb-8 leading-relaxed max-w-sm mx-auto">
+        <p className="text-sm text-muted mb-8 leading-relaxed max-w-sm mx-auto">
           An always-on autonomous AI engineering team.
           Sign in with GitHub to start managing your repositories.
         </p>
@@ -31,7 +31,7 @@ export function AuthGate({ onSignIn, onSkip, loading }: AuthGateProps) {
           </button>
           <button
             onClick={onSkip}
-            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors py-1"
+            className="text-xs text-muted hover:text-zinc-300 transition-colors py-1"
           >
             Skip for now
           </button>

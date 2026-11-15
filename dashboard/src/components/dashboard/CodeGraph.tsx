@@ -15,7 +15,7 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
             Preview
           </span>
         </h2>
-        <p className="text-xs text-zinc-500 mt-0.5">
+        <p className="text-xs text-muted mt-0.5">
           Planned knowledge graph view for{" "}
           <span className="font-mono text-zinc-400">{repoUrl || "the configured repository"}</span>.
           This screen is illustrative: no graph data is loaded yet.
@@ -29,7 +29,7 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
         <h3 className="text-base font-medium text-zinc-200 mb-2">
           GitNexus Code Graph Engine
         </h3>
-        <p className="text-xs text-zinc-500 max-w-md mb-6 leading-relaxed">
+        <p className="text-xs text-muted max-w-md mb-6 leading-relaxed">
           The autonomous agents build an in-memory knowledge graph of symbols, imports, and AST paths to navigate large codebases with zero token bloat.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-xl w-full text-left">
@@ -38,7 +38,7 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
               <Layers className="w-3.5 h-3.5 text-indigo-400" />
               AST Indexing
             </div>
-            <p className="text-[11px] text-zinc-500">
+            <p className="text-[11px] text-muted">
               Symbols and references mapped on repository ingestion.
             </p>
           </div>
@@ -47,7 +47,7 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
               <Network className="w-3.5 h-3.5 text-emerald-400" />
               Call Hierarchy
             </div>
-            <p className="text-[11px] text-zinc-500">
+            <p className="text-[11px] text-muted">
               Deep function caller-callee dependency mapping.
             </p>
           </div>
@@ -56,7 +56,7 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
               Impact Analysis
             </div>
-            <p className="text-[11px] text-zinc-500">
+            <p className="text-[11px] text-muted">
               Downstream breakage prediction before writing code.
             </p>
           </div>

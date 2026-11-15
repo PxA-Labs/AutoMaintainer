@@ -45,7 +45,7 @@ export function RunHistory({
           <h2 className="text-lg font-semibold text-zinc-100">
             Execution Run History
           </h2>
-          <p className="text-xs text-zinc-500 mt-0.5">
+          <p className="text-xs text-muted mt-0.5">
             Audit log of autonomous orchestration pipelines executed on your repositories.
           </p>
         </div>
@@ -70,10 +70,10 @@ export function RunHistory({
             <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
           </div>
         ) : runs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-64 text-zinc-500 border border-dashed border-zinc-800 rounded-xl p-8">
+          <div className="flex flex-col items-center justify-center h-64 text-muted border border-dashed border-zinc-800 rounded-xl p-8">
             <Activity className="w-8 h-8 mb-3 text-zinc-600" />
             <p className="text-sm font-medium text-zinc-400">No runs recorded yet</p>
-            <p className="text-xs text-zinc-600 mt-1">
+            <p className="text-xs text-muted mt-1">
               Start an orchestration loop from the dashboard to populate historical runs.
             </p>
           </div>
@@ -114,7 +114,7 @@ export function RunHistory({
                       {run.repo_name}
                     </span>
                   </div>
-                  <span className="text-xs text-zinc-500 font-mono tabular-nums">
+                  <span className="text-xs text-muted font-mono tabular-nums">
                     {new Date(run.created_at).toLocaleString()}
                   </span>
                 </div>
