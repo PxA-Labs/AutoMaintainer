@@ -189,6 +189,44 @@ example as a second Space.
 | `AUTH_DEV_BYPASS` | unset | **Never set this in a deployment.** When `true`, every request is trusted as `AUTH_DEV_USER_ID` / `AUTH_DEV_ORG_ID`, with no authentication. It is only for local development. |
 | `AUTH_DEV_USER_ID`, `AUTH_DEV_ORG_ID` | fixed UUIDs | Identity used by `AUTH_DEV_BYPASS`. Local only. |
 
+### GitHub App permissions
+
+Register the GitHub App with these permissions. Every installation must accept
+them; an installation that has not granted a required permission is refused
+with an error naming the missing ones, rather than failing half-way through a
+run.
+
+| Permission | Level | Why |
+|---|---|---|
+| Repository: *Contents* | write | Clone, read files, commit agent changes and IDE saves. |
+| Repository: *Pull requests* | write | Open, review and (under `MERGE_POLICY`) merge pull requests. |
+| Repository: *Issues* | write | Open issues and post the Reviewer's decision. |
+| Repository: *Commit statuses* | write | Post the verification status on the agent's commit. |
+| Repository: *Metadata* | read | Mandatory for every App; repository listing for sync. |
+| Repository: *Checks* | read | Optional. Needed only for `MERGE_POLICY=ci`, which reads check runs; without it that merge fails closed. |
+| Organization: *Members* | read | Lets `POST /github/installations/claim` confirm that the claiming user is an owner of the installing organization. |
+
+Tokens are narrower than the App registration. In `GITHUB_AUTH_MODE=app` the
+backend never uses an installation's full grant:
+
+- A run or repository route mints an installation token with exactly
+  `contents`, `pull_requests`, `issues`, `statuses`: write and `metadata`:
+  read, plus `checks`: read when the installation has granted it. When the
+  caller names the repository (`credentials_for_installation(...,
+  repository="owner/name")`), the token is limited to that one repository.
+- Repository sync mints a `metadata: read` token.
+- Before minting, the backend refuses an installation whose row is marked
+  suspended (the `installation` suspend/deleted webhooks set
+  `github_installations.suspended_at`) or that GitHub reports as suspended or
+  no longer installed. No token is issued or cached for it.
+
+Set the App's **Setup URL** to `<backend origin>/github/app/setup` and enable
+*Redirect on update*. GitHub sends the browser there after an install with
+`installation_id` and `setup_action`. That id is not trusted: the route
+writes nothing and only redirects to the dashboard (`DASHBOARD_URL`, an exact
+origin, or the API's own `/` when unset), which links the installation through
+the verified `POST /github/installations/claim`.
+
 ### Tuning and observability (optional)
 
 | Variable | Default | Purpose |
