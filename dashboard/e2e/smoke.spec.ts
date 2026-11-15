@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectNoA11yViolations } from "./axe";
 import { E2E_ORIGIN, E2E_SUPABASE_URL } from "./env";
 import { API, isolateNetwork, json, mockSupabaseLogs, recordRequests, signIn } from "./mocks";
 
@@ -14,6 +15,7 @@ test.describe("signed out", () => {
     await expect(page.getByRole("heading", { level: 1, name: "AutoMaintainer" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign in with GitHub" })).toBeEnabled();
     await expect(page.getByRole("button", { name: "Skip for now" })).toBeVisible();
+    await expectNoA11yViolations(page, "auth gate");
   });
 
   test("guest view shows the dashboard and asks to sign in before a run", async ({ page }) => {
@@ -24,6 +26,7 @@ test.describe("signed out", () => {
     await expect(page.getByRole("navigation", { name: "Main Navigation" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Dashboard" })).toHaveAttribute("aria-current", "page");
     await expect(page.getByText("System halted")).toBeVisible();
+    await expectNoA11yViolations(page, "guest dashboard");
 
     // A guest cannot start a run: the auth gate comes back, nothing is sent.
     await page.getByRole("button", { name: "Start agent loop" }).click();
@@ -99,6 +102,7 @@ test.describe("signed in", () => {
     // Live logs for the new run are loaded from Supabase.
     await expect(page.getByText("Planning the fix for acme/widgets")).toBeVisible();
     expect(queriedLogs).toContain(RUN_ID);
+    await expectNoA11yViolations(page, "dashboard with a running run");
 
     // Status is polled immediately; once the run finishes server-side, the
     // next interval poll (every 5 s) notices and resets the UI.
@@ -137,6 +141,8 @@ test.describe("signed in", () => {
     await historyTab.focus();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: "Execution Run History" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /View logs for run bbbbbbbb/ })).toBeVisible();
+    await expectNoA11yViolations(page, "run history");
 
     // Tab order: Refresh -> run 1 -> its PR link -> run 2.
     await page.getByRole("button", { name: "Refresh run history" }).focus();
@@ -197,9 +203,11 @@ test.describe("signed in", () => {
     await expect(page.getByText("2 active")).toBeVisible();
     await expect(page.getByText("$12.34")).toBeVisible();
     await expect(page.getByText("1.5M tokens")).toBeVisible();
+    await expectNoA11yViolations(page, "admin overview");
 
     await page.getByRole("button", { name: "Organizations" }).click();
     await expect(page.getByRole("cell", { name: /Acme Corp/ })).toBeVisible();
     await expect(page.getByText("Organizations (3)")).toBeVisible();
+    await expectNoA11yViolations(page, "admin organizations");
   });
 });
