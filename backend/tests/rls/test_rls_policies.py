@@ -309,8 +309,11 @@ def attempt(cur, statement, params=()):
     except psycopg2.errors.InsufficientPrivilege:
         cur.execute("ROLLBACK TO SAVEPOINT attempt")
         return "denied"
+    # Read the count before RELEASE: rowcount reflects the last command run
+    # on the cursor, and RELEASE SAVEPOINT reports -1.
+    rowcount = cur.rowcount
     cur.execute("RELEASE SAVEPOINT attempt")
-    return cur.rowcount
+    return rowcount
 
 
 def visible_orgs(cur, table):
