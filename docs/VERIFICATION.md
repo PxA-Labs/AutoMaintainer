@@ -193,46 +193,86 @@ SANDBOX_IMAGE=ghcr.io/your-org/test-runner@sha256:<digest>   # recommended
 | `SANDBOX_CPUS` | `1` | `--cpus`. |
 | `SANDBOX_PIDS_LIMIT` | `256` | `--pids-limit`, against fork bombs. |
 | `SANDBOX_TMPFS_SIZE` | `256m` | Size of the writable `/tmp` (also `HOME`). |
-| `SANDBOX_USER` | the worker's `uid:gid`, or `65534:65534` when the worker is root or on Windows | Numeric, never `0`. A non-root worker must own files the tests create in the copy to delete it afterwards. |
+| `SANDBOX_WORKSPACE_SIZE` | `1g` | Size of the `/workspace` tmpfs the copy is unpacked into. It must hold the whole working copy, `.git` included, plus what the tests write there. tmpfs pages count against `SANDBOX_MEMORY`, so raise both for large repositories. |
+| `SANDBOX_USER` | `65534:65534` (nobody) | Numeric, never `0`. |
 | `SANDBOX_DOCKER` | `docker` | Path to the CLI (any CLI accepting the same `run` flags). |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Also caps the output the backend keeps while reading. |
 
 Every value is validated and passed as `--flag=value`, so a setting cannot
-inject another docker flag. The worker needs the `docker` CLI (the shipped
-image does not include it) and access to a daemon, via the socket or
-`DOCKER_HOST`.
+inject another docker flag. Memory, CPU and tmpfs sizes must be greater than
+zero (docker reads `0` as "unlimited"). The image must provide `/bin/sh` and
+`tar` (the `python` and most distribution images do; distroless images do
+not).
+
+### Deployment
+
+The worker needs the `docker` CLI (the shipped image does not include it)
+and access to a daemon. The daemon does **not** need to see the worker's
+filesystem: the working copy is streamed to the container over the CLI
+connection, never bind-mounted. Any of these works:
+
+- the worker and the daemon on one dedicated sandbox host (recommended:
+  run the `agent_runs` worker there, next to its daemon);
+- the worker elsewhere, with `DOCKER_HOST=tcp://...` (TLS:
+  `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`) or `DOCKER_HOST=ssh://user@host`
+  pointing at a dedicated sandbox host;
+- the worker in a container (as in `docker-compose.yml`) talking to a daemon
+  outside it.
+
+The docker CLI process inherits only `PATH`, `HOME`, `USER`, the `DOCKER_*`
+variables, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK` (for `ssh://`), the
+`HTTP(S)_PROXY`/`NO_PROXY` variables (either case) and, on Windows, the
+system variables it needs. Use a docker context or `DOCKER_CONFIG` for
+anything else.
+
+**Rootless Docker** works with the defaults: nothing the container writes
+reaches the worker's disk, so subordinate uids do not matter. `SANDBOX_USER`
+is never `0`, even though uid 0 in a rootless daemon is unprivileged on the
+host, because the same setting would be real root under a rootful daemon.
 
 ### What one run does
 
 ```
-copy the working copy -> private temp dir (symlinks kept as links, never followed)
-docker run --rm --name=automaintainer-sandbox-<uuid>
+pack the working copy into a tar archive (symlinks kept as links, never followed;
+  in memory up to 8 MiB, then an anonymous temp file on the worker)
+docker run --rm --interactive --name=automaintainer-sandbox-<uuid>
   --network=none --read-only --tmpfs=/tmp:rw,nosuid,nodev,size=256m
   --cap-drop=ALL --security-opt=no-new-privileges
   --pids-limit=256 --memory=1g --memory-swap=1g --cpus=1
-  --user=<uid:gid> --workdir=/workspace
-  --mount=type=bind,source=<copy>,target=/workspace
-  [--runtime=runsc] --env=HOME=/tmp ... <image> <test command>
-on timeout, error or cancellation: docker rm --force <name>
-delete the copy
+  --user=65534:65534 --workdir=/workspace
+  --tmpfs=/workspace:rw,exec,nosuid,nodev,mode=1777,size=1g
+  --entrypoint=/bin/sh [--runtime=runsc] --env=HOME=/tmp ...
+  <image> -c 'tar -xf - -C /workspace || exit 125; exec "$@" </dev/null'
+  automaintainer-sandbox <test command>
+stream the archive on stdin, then close it
+on timeout, error or cancellation: kill the CLI, then docker rm --force <name>
+  (retried once)
 ```
 
-- **The host clone is never mounted.** The container gets a fresh copy per
-  command, deleted afterwards, so a test cannot change files (or plant git
-  configuration) that a later step reads. `get_git_diff` runs `git diff
-  --no-ext-diff --no-textconv HEAD` on the host clone.
+- **The host clone is never mounted.** Each container unpacks its own copy
+  into a tmpfs that disappears with it, so a test cannot change files (or
+  plant git configuration) that a later step reads. `get_git_diff` runs `git
+  diff --no-ext-diff --no-textconv HEAD` on the host clone. The test command
+  is passed to `sh` as arguments (`"$@"`), never interpolated into the
+  script.
 - **Environment:** only `HOME`/`TMPDIR=/tmp`, `CI=true`, `NO_COLOR`,
   `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`, `GIT_TERMINAL_PROMPT=0` and a
   `safe.directory` git setting; `PATH` comes from the image. Nothing from
   the worker's environment is passed, and the docker CLI process itself only
-  gets the variables it needs to find the daemon.
-- **Timeout:** enforced by the worker. When it expires the container is
-  force-removed and the result is `error` (timed out). `--rm` removes it on a
-  normal exit.
+  gets the variables it needs to reach the daemon (see Deployment).
+- **Timeout:** enforced by the worker and counted from the start of packing
+  the copy, so `exec_command` returns within `timeout_seconds` plus cleanup.
+  When it expires the docker CLI is killed first (so it cannot still create
+  or start the container), then the container is force-removed, and the
+  result is `error` (timed out). `--rm` removes it on a normal exit.
 - **Output:** stdout and stderr interleaved, cut to the last
   `VERIFY_MAX_OUTPUT_BYTES` while reading, with a truncation note.
 - **Exit code 125** (docker could not start the container: missing image,
-  unknown runtime, daemon down) is reported as `error`, not as a failing test.
+  unknown runtime, daemon down; or the copy could not be unpacked, e.g. it
+  exceeds `SANDBOX_WORKSPACE_SIZE`) is reported as `error`, not as a failing
+  test. A test command that itself exits 125 is therefore reported as
+  `error` too; both block `MERGE_POLICY=ci`, so a repository gains nothing
+  by it.
 - File operations act on the host working copy and refuse paths that escape
   it. `commit_and_push` raises `NotImplementedError`: verification never
   pushes.
@@ -241,13 +281,14 @@ delete the copy
 
 Isolated from the tests:
 
-- the worker's secrets and environment variables, and its files outside the
-  copy (no host mount other than the copy);
+- the worker's secrets and environment variables, and all of its files (no
+  host mount at all; the copy arrives on stdin);
 - the network, unless `SANDBOX_NETWORK` opts into one;
 - the host clone and later pipeline steps (copy-in);
 - privilege escalation inside the container (no capabilities,
   `no-new-privileges`, non-root user, read-only root filesystem);
-- resource exhaustion beyond the memory, CPU, pids, `/tmp` and time limits.
+- resource exhaustion beyond the memory, CPU, pids, `/tmp`, `/workspace`
+  and time limits.
 
 Not isolated:
 
@@ -255,8 +296,10 @@ Not isolated:
   The worker that holds the socket (or `DOCKER_HOST` credentials) can start a
   privileged container at will, so a compromised worker is a compromised
   daemon host. Do not mount the production host's socket into the worker.
-  Prefer a **dedicated sandbox host** (a VM with nothing else on it) reached
-  through `DOCKER_HOST`, **rootless Docker**, or both.
+  Prefer a **dedicated sandbox host** (a VM with nothing else on it): run the
+  verification worker on it, or reach its daemon from the worker through
+  `DOCKER_HOST` (see Deployment). Use **rootless Docker** and/or gVisor
+  there as well.
 - **Kernel escapes.** With the default `runc` runtime the tests share the
   host kernel; a kernel vulnerability escapes the container. `SANDBOX_RUNTIME=runsc`
   (gVisor) puts a user-space kernel in between; a micro-VM backend
@@ -264,22 +307,28 @@ Not isolated:
 - **What the tests print.** Output is untrusted and handled as described
   above; with a non-`none` network a test can also exfiltrate the repository
   contents (which it could read anyway) to whatever that network reaches.
-- **Disk use** of the copy on the worker is not limited, and a test can fill
-  the copy up to the free space of the worker's temp directory.
+- **The worker's own disk and memory while packing.** The archive is built
+  on the worker (in memory up to 8 MiB, then in an anonymous temp file) and
+  is as large as the working copy. It is not bounded by the sandbox limits,
+  but tests cannot grow it: they never write to the worker.
 - **The change influencing its own tests** (see Limitations): the sandbox
   bounds what the tests can do to the host, not whether they are honest.
 
 ### Testing
 
 `backend/test_docker_sandbox.py` mocks the docker CLI and checks the exact
-argument list, the absence of host variables, the timeout kill, the output
-cap and cleanup on errors. `backend/test_docker_sandbox_integration.py` runs
-real containers and is skipped unless Docker can run Linux containers and
-`DOCKER_SANDBOX_TESTS=1`; the `Sandbox Integration` workflow
+argument list (no bind mount), the archive streamed on stdin, the absence of
+host variables, the timeout cleanup order (CLI kill before `docker rm`), the
+output cap and cleanup on errors. `backend/test_docker_sandbox_integration.py`
+runs real containers and is skipped unless Docker can run Linux containers
+and `DOCKER_SANDBOX_TESTS=1`; the `Sandbox Integration` workflow
 (`.github/workflows/sandbox.yml`) runs it on `ubuntu-latest` whenever
 `backend/runners/**` or `backend/verification.py` change: a passing, a
 failing and a hanging repository, and one whose tests try the network and a
-host environment variable.
+host environment variable. It runs them twice: against the runner's daemon,
+and against a separate Docker-in-Docker daemon reached through
+`DOCKER_HOST=tcp://...`, which shares no filesystem with the worker (the
+remote sandbox host setup).
 
 ## Limitations
 
