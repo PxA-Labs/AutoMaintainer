@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: adds max_delay but renames the public `base` parameter, breaking an existing caller (regression)",
+  "prompt_sha256": "f4cec61d9eda526831d41f6a1949a42a72e355e1aebcb317b0504a4a5f1107aa",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Retry timing helpers.\"\"\"\n\n\ndef backoff_delays(\n    attempts: int, initial: float = 1.0, max_delay: float | None = None\n) -> list[float]:\n    \"\"\"Seconds to wait before each retry: ``base``, ``2*base``, ``4*base``...\n\n    With ``max_delay`` set, no delay is longer than ``max_delay``.\n    \"\"\"\n    if max_delay is not None and max_delay <= 0:\n        raise ValueError(\"max_delay must be positive\")\n    delays = [initial * 2**i for i in range(attempts)]\n    if max_delay is None:\n        return delays\n    return [min(delay, max_delay) for delay in delays]\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "backoff_cap",
+  "temperature": null,
+  "usage": null
+}

@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix inside a bare fence with no prose",
+  "prompt_sha256": "d7e6d7e24de1efbed3ccb2430c2cad8d55980bd4fc953a5256d326959084d90d",
+  "prompt_version": "a2ecc40e0103",
+  "response": "```python\n\"\"\"Tiny CSV ledger utilities.\"\"\"\n\nimport csv\nimport io\n\n\ndef parse_rows(text: str) -> list[dict[str, str]]:\n    \"\"\"Parse CSV text with a ``category,amount`` header into row dicts.\"\"\"\n    return list(csv.DictReader(io.StringIO(text)))\n\n\ndef total_by_category(rows: list[dict[str, str]]) -> dict[str, float]:\n    \"\"\"Sum the ``amount`` of every row per ``category``.\"\"\"\n    totals: dict[str, float] = {}\n    for row in rows:\n        category = row[\"category\"]\n        totals[category] = totals.get(category, 0.0) + float(row[\"amount\"])\n    return totals\n```",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "ledger_first_row",
+  "temperature": null,
+  "usage": null
+}

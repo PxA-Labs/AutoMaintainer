@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "d12b36504f4a2ecae12920ab757d310ac171c8ab86fe486487c4a6f5fb005586",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Pagination helpers for list views.\"\"\"\n\n\ndef page_count(total_items: int, per_page: int) -> int:\n    \"\"\"Number of pages needed to show ``total_items`` with ``per_page`` each.\"\"\"\n    if per_page < 1:\n        raise ValueError(\"per_page must be at least 1\")\n    return -(-total_items // per_page)\n\n\ndef page_bounds(page: int, per_page: int) -> tuple[int, int]:\n    \"\"\"Start (inclusive) and end (exclusive) item index of a 1-based page.\"\"\"\n    start = (page - 1) * per_page\n    return start, start + per_page\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "page_count",
+  "temperature": null,
+  "usage": null
+}

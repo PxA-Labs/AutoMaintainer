@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file, as the prompt asks",
+  "prompt_sha256": "00f0888885acfe7a959f01df2d79223fddc9d9b47f4d4d65fccbe5cdf7152368",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Stock level helpers for a small shop inventory.\"\"\"\n\n\ndef needs_restock(quantity: int, threshold: int) -> bool:\n    \"\"\"Return True when an item should be reordered.\n\n    An item is reordered once its quantity falls to the threshold or below.\n    \"\"\"\n    return quantity <= threshold\n\n\ndef restock_list(items: dict[str, int], threshold: int) -> list[str]:\n    \"\"\"Names of the items that need restocking, sorted alphabetically.\"\"\"\n    return sorted(\n        name for name, quantity in items.items() if needs_restock(quantity, threshold)\n    )\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "restock_threshold",
+  "temperature": null,
+  "usage": null
+}

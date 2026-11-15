@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "a5f1d9651d0fece90f6360884e8bff2bdee114ba524769d775d85ea4ae8bb2d2",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Version string helpers.\"\"\"\n\n\ndef compare_versions(a: str, b: str) -> int:\n    \"\"\"Compare two dotted version strings such as ``\"1.4.2\"``.\n\n    Returns -1 if ``a`` is older than ``b``, 0 if they are equal and 1 if\n    ``a`` is newer. Parts compare numerically; a missing part counts as 0.\n    \"\"\"\n    parts_a = [int(part) for part in a.split(\".\")]\n    parts_b = [int(part) for part in b.split(\".\")]\n    width = max(len(parts_a), len(parts_b))\n    parts_a += [0] * (width - len(parts_a))\n    parts_b += [0] * (width - len(parts_b))\n    if parts_a < parts_b:\n        return -1\n    if parts_a > parts_b:\n        return 1\n    return 0\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "version_compare",
+  "temperature": null,
+  "usage": null
+}

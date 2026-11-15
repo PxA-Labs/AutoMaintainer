@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: partial fix: adds the s unit but no input validation (hidden tests fail)",
+  "prompt_sha256": "6cce1f510ec9698f3faa919a8ca22238ee3bedeb054e52fff18a59a98d3d427c",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Parse compact human-written durations.\"\"\"\n\nimport re\n\n_PART = re.compile(r\"(\\d+)([hms])\")\n_UNIT_SECONDS = {\"h\": 3600, \"m\": 60, \"s\": 1}\n\n\ndef parse_duration(text: str) -> int:\n    \"\"\"Parse a compact duration such as \"1h30m\" into a number of seconds.\"\"\"\n    total = 0\n    for amount, unit in _PART.findall(text):\n        total += int(amount) * _UNIT_SECONDS[unit]\n    return total\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "duration_seconds",
+  "temperature": null,
+  "usage": null
+}
