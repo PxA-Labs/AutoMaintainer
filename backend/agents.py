@@ -1689,6 +1689,77 @@ def should_implement(state: AgentState):
     return "implementer" if is_approved_verdict(state.get("pm_decision")) else END
 
 
+async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: str):
+    """Run the repository's tests on the pushed head of ``branch_name`` and
+    publish the outcome: a commit status, a section in the PR body and a
+    TestResultEvent. Returns a log message for the run.
+
+    The commit status (context ``automaintainer/verification``) is what gates
+    MERGE_POLICY=ci: ``_ci_checks_passed`` requires every status on the head
+    to be green, and only a passed verification posts ``success``. If that
+    status cannot be posted under MERGE_POLICY=ci the run stops, since the
+    gate would otherwise not see the verification at all.
+    """
+    import verification
+
+    run_id = current_run_id.get(None)
+    try:
+        head_sha = gh_repo.get_branch(branch_name).commit.sha
+        clone_url = gh_repo.clone_url
+    except Exception as e:
+        logger.warning("Cannot resolve the head of %s: %s", branch_name, e)
+        head_sha = clone_url = None
+    token = await asyncio.to_thread(_run_github_token)
+    result = await verification.verify_pr_branch(
+        clone_url, branch_name, head_sha, token, changed_paths=[path]
+    )
+
+    if run_id:
+        await emit_event(
+            TestResultEvent(
+                run_id=run_id,
+                phase=AgentPhase.IMPLEMENTER,
+                exit_code=0 if result.passed else (result.exit_code or -1),
+                passed_count=1 if result.passed else 0,
+                failed_count=1 if result.status == verification.FAILED else 0,
+                tracebacks=(
+                    []
+                    if result.passed
+                    else [f"{result.status}: {result.summary}\n{result.output_tail}"]
+                ),
+            )
+        )
+    try:
+        pr = gh_repo.get_pull(pr_number)
+        pr.edit(
+            body=verification.upsert_pr_section(
+                getattr(pr, "body", ""), verification.render_pr_section(result)
+            )
+        )
+    except Exception as e:
+        logger.warning("Could not add verification results to PR #%s: %s", pr_number, e)
+    if result.head_sha:
+        state, description = verification.commit_status(result)
+        try:
+            gh_repo.get_commit(result.head_sha).create_status(
+                state=state,
+                description=description,
+                context=verification.STATUS_CONTEXT,
+            )
+        except Exception as e:
+            if get_merge_policy() == "ci":
+                raise PipelineAbortError(
+                    "VERIFICATION_STATUS_FAILED",
+                    f"Could not record the verification status on PR #{pr_number}: {e}",
+                    AgentPhase.IMPLEMENTER,
+                ) from e
+            logger.warning("Could not post verification status: %s", e)
+    return {
+        "agent": "System",
+        "msg": f"Verification {result.status} on PR #{pr_number}: {result.summary}",
+    }
+
+
 async def implementer_node(state: AgentState):
     new_logs = []
     idea = state["idea"]
@@ -1897,6 +1968,8 @@ async def implementer_node(state: AgentState):
                 ),
             }
         )
+
+    new_logs.append(await _verify_and_report(gh_repo, pr_number, branch_name, path))
 
     # Deliberately no write into the local clone. That clone is the shared
     # mirror of the DEFAULT branch, while this code lives only on the PR branch
