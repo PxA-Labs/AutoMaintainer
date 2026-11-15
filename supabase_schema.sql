@@ -496,6 +496,31 @@ CREATE TRIGGER update_repos_updated_at BEFORE UPDATE ON repositories
 CREATE TRIGGER update_runs_updated_at BEFORE UPDATE ON runs
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+-- A repository never changes organization (epic #412). Repository sync
+-- upserts on the GitHub repository id; it checks ownership first, but two
+-- syncs of different orgs covering the same repository can both pass that
+-- check before either writes. This trigger makes the losing write fail,
+-- for the service role too, so a row can never be moved to another tenant
+-- by a race (or by any other code path). github_app.sync_installation_
+-- repositories recognises the 'repository_org_immutable' message and skips
+-- the repository. Moving a repository between orgs deliberately means
+-- deleting its row first. Re-runnable: CREATE OR REPLACE plus
+-- DROP TRIGGER IF EXISTS.
+CREATE OR REPLACE FUNCTION prevent_repository_org_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+        RAISE EXCEPTION 'repository_org_immutable: repository % belongs to another organization', OLD.id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS repositories_org_immutable ON repositories;
+CREATE TRIGGER repositories_org_immutable BEFORE UPDATE OF org_id ON repositories
+    FOR EACH ROW EXECUTE FUNCTION prevent_repository_org_change();
+
 -- Auto-create organization_members entry when user creates org
 CREATE OR REPLACE FUNCTION handle_new_organization()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
