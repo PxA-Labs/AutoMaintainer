@@ -19,6 +19,7 @@ import itertools
 import json
 import re
 import time
+import tomllib
 from ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from pydantic import (
@@ -109,6 +110,13 @@ def _run_github_token() -> Optional[str]:
 
 # Largest file (in characters) the Implementer will rewrite in full.
 IMPLEMENTER_MAX_FILE_CHARS = int(os.getenv("IMPLEMENTER_MAX_FILE_CHARS", "60000"))
+# Truncated-rewrite guard (validate_generated_code): a rewrite of a file larger
+# than IMPLEMENTER_SHRINK_GUARD_MIN_BYTES must keep at least this fraction of
+# its size unless the task asks for removal.
+IMPLEMENTER_MIN_SIZE_RATIO = float(os.getenv("IMPLEMENTER_MIN_SIZE_RATIO", "0.4"))
+IMPLEMENTER_SHRINK_GUARD_MIN_BYTES = int(
+    os.getenv("IMPLEMENTER_SHRINK_GUARD_MIN_BYTES", "2048")
+)
 
 
 def _clean_env(val: str | None) -> str | None:
@@ -571,6 +579,256 @@ def normalize_generated_code(
         # The model echoed the prompt's data wrapper instead of the file.
         raise GeneratedCodeError("Implementer output contains prompt data markers.")
     return code
+
+
+# --- Implementer output validation --------------------------------------------
+# normalize_generated_code decides *what* the reply's file is; the checks below
+# decide whether that file may be committed. Each syntax check is skipped when
+# the current file already fails it, so a dialect the checker does not know
+# (JSON with comments, a newer Python grammar than the worker's) or breakage
+# that predates the run never blocks a change; the check only refuses errors
+# the Implementer would introduce.
+def _python_error(code: str) -> str | None:
+    try:
+        ast.parse(code)
+    except (SyntaxError, ValueError) as e:
+        return f"line {getattr(e, 'lineno', '?')}: {getattr(e, 'msg', e)}"
+    return None
+
+
+def _json_error(code: str) -> str | None:
+    try:
+        json.loads(code.lstrip("﻿"))
+    except json.JSONDecodeError as e:
+        return f"line {e.lineno}: {e.msg}"
+    return None
+
+
+def _toml_error(code: str) -> str | None:
+    try:
+        tomllib.loads(code)
+    except tomllib.TOMLDecodeError as e:
+        return str(e)
+    return None
+
+
+def _yaml_error(code: str) -> str | None:
+    # PyYAML is not a direct dependency (langchain-core, litellm and
+    # huggingface-hub require it), so the check degrades to "skipped" rather
+    # than breaking the Implementer if it ever disappears.
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - present via langchain-core
+        return None
+    try:
+        # compose_all parses every document without constructing Python
+        # objects, so application tags (CloudFormation "!Ref", Ansible
+        # "!vault") are accepted; safe_load would reject them.
+        for _ in yaml.compose_all(code, Loader=yaml.SafeLoader):
+            pass
+    except yaml.YAMLError as e:
+        return str(e).replace("\n", " ")
+    return None
+
+
+_JS_OPENERS = {")": "(", "]": "[", "}": "{"}
+# After one of these (or at the start), "/" begins a regex literal, not a
+# division.
+_JS_REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_KEYWORDS = {
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await",
+}  # fmt: skip
+_JS_WORD_RE = re.compile(r"[A-Za-z0-9_$]+")
+
+
+def _js_balance_error(code: str) -> str | None:
+    """HEURISTIC sanity check for JavaScript/TypeScript (incl. JSX/TSX).
+
+    Not a parser: it only checks that (), [] and {} are balanced outside
+    strings, comments, template literals and regex literals, and that block
+    comments and template literals are terminated. That is enough to catch the
+    common failure, a truncated or half-rewritten file, without a JS toolchain.
+    Known blind spots, chosen to avoid false rejections: a quote with no
+    closing quote on the same line is treated as an apostrophe (JSX text such
+    as ``Don't``), "/" is a regex only after an operator or keyword (and
+    never in JSX ``</`` or ``/>``), and
+    generic ``<T>`` brackets and JSX tags are not checked.
+    """
+    stack: list[tuple[str, int]] = []  # (opener, line); "`" = inside a template
+    i, n, line, last = 0, len(code), 1, ""
+    while i < n:
+        c = code[i]
+        if stack and stack[-1][0] == "`":
+            # Inside a template literal: only "`", "${" and escapes matter.
+            if c == "\\":
+                i += 2
+                continue
+            if c == "\n":
+                line += 1
+            elif c == "`":
+                stack.pop()
+                last = "a"
+            elif code.startswith("${", i):
+                stack.append(("${", line))
+                i += 2
+                last = "{"
+                continue
+            i += 1
+            continue
+        if c == "\n":
+            line += 1
+            i += 1
+            continue
+        if c in " \t\r\f\v":
+            i += 1
+            continue
+        if code.startswith("//", i):
+            end = code.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        if code.startswith("/*", i):
+            end = code.find("*/", i + 2)
+            if end < 0:
+                return f"line {line}: unterminated block comment"
+            line += code.count("\n", i, end)
+            i = end + 2
+            continue
+        if c in "'\"":
+            j = i + 1
+            while j < n and code[j] not in (c, "\n"):
+                j += 2 if code[j] == "\\" else 1
+            if j < n and code[j] == c:
+                i, last = j + 1, "a"
+            else:  # no closing quote on this line: an apostrophe, not a string
+                i, last = i + 1, c
+            continue
+        if c == "`":
+            stack.append(("`", line))
+            i += 1
+            continue
+        if (
+            c == "/"
+            # "</" closes a JSX tag and "/>" ends a self-closing one.
+            and code[i - 1 : i] != "<"
+            and code[i + 1 : i + 2] != ">"
+            and (
+                last == "" or last in _JS_REGEX_PRECEDERS or last in _JS_REGEX_KEYWORDS
+            )
+        ):
+            j, in_class = i + 1, False
+            while j < n and code[j] != "\n":
+                if code[j] == "\\":
+                    j += 2
+                    continue
+                if code[j] == "[":
+                    in_class = True
+                elif code[j] == "]":
+                    in_class = False
+                elif code[j] == "/" and not in_class:
+                    break
+                j += 1
+            if j < n and code[j] == "/":
+                i, last = j + 1, "a"
+                continue
+            i, last = i + 1, "/"  # not a regex after all: division / JSX "</"
+            continue
+        word = _JS_WORD_RE.match(code, i)
+        if word:
+            last = word.group() if word.group() in _JS_REGEX_KEYWORDS else "a"
+            i = word.end()
+            continue
+        if c in "([{":
+            stack.append((c, line))
+        elif c in ")]}":
+            if not stack:
+                return f"line {line}: unmatched '{c}'"
+            opener, opened_at = stack.pop()
+            expected = "{" if opener == "${" else opener
+            if expected != _JS_OPENERS[c]:
+                return (
+                    f"line {line}: '{c}' does not close '{opener}' "
+                    f"opened on line {opened_at}"
+                )
+        last = c
+        i += 1
+    if stack:
+        opener, opened_at = stack[-1]
+        what = "template literal" if opener == "`" else f"'{opener}'"
+        return f"unclosed {what} opened on line {opened_at}"
+    return None
+
+
+_SYNTAX_CHECKERS = {
+    "py": ("Python", _python_error),
+    "pyi": ("Python", _python_error),
+    "json": ("JSON", _json_error),
+    "toml": ("TOML", _toml_error),
+    "yml": ("YAML", _yaml_error),
+    "yaml": ("YAML", _yaml_error),
+    **{
+        ext: ("JavaScript/TypeScript (heuristic bracket check)", _js_balance_error)
+        for ext in ("js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx")
+    },
+}
+# JSON-with-comments files that use a .json extension.
+_JSONC_NAME_RE = re.compile(
+    r"(?:^|/)(?:[tj]sconfig[\w.-]*\.json|devcontainer\.json|\.vscode/[^/]+\.json)$",
+    re.IGNORECASE,
+)
+# Wording that explicitly asks for code to be removed, which legitimately
+# shrinks a file. Deliberately broad: it only lifts the shrink guard, while
+# the syntax checks above still apply.
+_DELETION_INTENT_RE = re.compile(
+    r"\b(?:delet(?:e|es|ed|ing|ion)|remov(?:e|es|ed|ing|al)|drop(?:s|ped|ping)?"
+    r"|prun(?:e|es|ed|ing)|strip(?:s|ped|ping)?\s+out|get\s+rid\s+of"
+    r"|shrink|shorten|trim)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_generated_code(
+    code: str,
+    path: str | None,
+    original: str | None = None,
+    instructions: str = "",
+) -> None:
+    """Raise ``GeneratedCodeError`` if ``code`` must not be committed to ``path``.
+
+    * Syntax: Python (``ast.parse``), JSON (``json.loads``), TOML
+      (``tomllib``), YAML (PyYAML, parse only) and a heuristic bracket check
+      for JavaScript/TypeScript. Other file types are not checked.
+    * Truncated rewrites: when ``original`` (the current file) is larger than
+      ``IMPLEMENTER_SHRINK_GUARD_MIN_BYTES``, the new file must keep at least
+      ``IMPLEMENTER_MIN_SIZE_RATIO`` of its size, unless ``instructions`` (the
+      task and Maintainer feedback) explicitly ask for removal.
+    """
+    name = (path or "").replace("\\", "/")
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name.rsplit("/", 1)[-1] else ""
+    checker = _SYNTAX_CHECKERS.get(ext)
+    if checker and not (ext == "json" and _JSONC_NAME_RE.search(name)):
+        language, find_error = checker
+        error = find_error(code)
+        if error and (original is None or find_error(original) is None):
+            raise GeneratedCodeError(
+                f"Implementer output is not valid {language}: {error}"
+            )
+
+    if original is None:
+        return
+    old_size = len(original.encode("utf-8"))
+    new_size = len(code.encode("utf-8"))
+    if (
+        old_size > IMPLEMENTER_SHRINK_GUARD_MIN_BYTES
+        and new_size < old_size * IMPLEMENTER_MIN_SIZE_RATIO
+        and not _DELETION_INTENT_RE.search(instructions or "")
+    ):
+        raise GeneratedCodeError(
+            f"Implementer output shrinks the file from {old_size} to {new_size} "
+            f"bytes (below {IMPLEMENTER_MIN_SIZE_RATIO:.0%} of the original) "
+            "although the task does not ask for removal; refusing a likely "
+            "truncated rewrite."
+        )
 
 
 # --- Structured decisions ----------------------------------------------------
@@ -2026,6 +2284,12 @@ async def implementer_node(state: AgentState):
             raw_code,
             path=path,
             finish_reason=getattr(raw_code, "finish_reason", None),
+        )
+        validate_generated_code(
+            code,
+            path,
+            original=original_content if target_file_exists else None,
+            instructions=f"{idea}\n{review}",
         )
     except (ValueError, RuntimeError) as e:
         raise PipelineAbortError(
