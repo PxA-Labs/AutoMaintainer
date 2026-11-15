@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **github-app**: Verified installation linking, minimum-permission tokens and tenant isolation hardening ([#466](https://github.com/PxA-Labs/AutoMaintainer/pull/466)) - @purvanshjoshi
 - **backend**: Run PyGithub calls off the event loop, fix trace-field logging, harden LocalRunner ([#458](https://github.com/PxA-Labs/AutoMaintainer/pull/458)) - @purvanshjoshi
 - **changelog**: Keep earlier entries and stop stacking separators ([#457](https://github.com/PxA-Labs/AutoMaintainer/pull/457)) - @purvanshjoshi
 - Add signed GitHub webhook ingestion ([#216](https://github.com/PxA-Labs/AutoMaintainer/pull/216)) (closes [#215](https://github.com/PxA-Labs/AutoMaintainer/issues/215)) - @SriRamkunamsetty
