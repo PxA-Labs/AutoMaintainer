@@ -44,6 +44,7 @@ from github_app import (
     handle_github_webhook,
     verify_installation_claim,
 )
+from quotas import assist_limiter
 
 # Observability
 from observability import (
@@ -849,6 +850,18 @@ async def inline_assist(
     user: dict = Depends(get_current_user),
 ):
     from agents import stream_inline_assist
+
+    # Per-user and per-org quotas: each call spends the server's LLM budget.
+    exceeded = await asyncio.to_thread(
+        assist_limiter.check_assist, user["user_id"], user["org_id"]
+    )
+    if exceeded:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Inline assist quota exceeded ({exceeded.scope}); "
+            f"retry in {exceeded.retry_after}s",
+            headers={"Retry-After": str(exceeded.retry_after)},
+        )
 
     try:
         generator = stream_inline_assist(
