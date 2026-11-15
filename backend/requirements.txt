@@ -25,8 +25,6 @@ anyio==4.15.1
     #   starlette
 asgiref==3.12.1
     # via opentelemetry-instrumentation-asgi
-async-timeout==5.0.1 ; python_full_version < '3.11.3'
-    # via redis
 attrs==26.1.0
     # via
     #   aiohttp
@@ -41,14 +39,14 @@ botocore==1.43.123
     #   boto3
     #   s3transfer
 celery==5.6.3
-    # via -r backend/requirements.in
+    # via -r requirements.in
 certifi==2026.10.23
     # via
     #   httpcore
     #   httpx
     #   litellm
     #   requests
-cffi==2.1.1 ; platform_python_implementation != 'PyPy'
+cffi==2.1.1
     # via
     #   cryptography
     #   pynacl
@@ -69,15 +67,11 @@ click-plugins==1.1.1.2
     # via celery
 click-repl==0.4.0
     # via celery
-colorama==0.4.6 ; sys_platform == 'win32'
-    # via
-    #   pytest
-    #   tqdm
-coverage==7.16.1
+coverage[toml]==7.16.1
     # via pytest-cov
 cryptography==50.0.2
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   pyjwt
 deprecation==2.1.0
     # via
@@ -89,9 +83,7 @@ distro==1.9.0
     #   langsmith
     #   openai
 fastapi==0.162.0
-    # via -r backend/requirements.in
-fastuuid==0.14.0 ; python_full_version < '3.15'
-    # via litellm
+    # via -r requirements.in
 filelock==4.2.10
     # via
     #   huggingface-hub
@@ -117,15 +109,15 @@ h11==0.16.0
     #   uvicorn
 h2==4.4.1
     # via httpx
-hf-xet==1.6.0 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+hf-xet==1.6.0
     # via huggingface-hub
 hpack==4.2.0
     # via h2
 httpcore==1.0.9
     # via httpx
-httpcore2==2.13.0 ; sys_platform != 'emscripten'
+httpcore2==2.13.0
     # via httpx2
-httpx==0.28.1
+httpx[http2]==0.28.1
     # via
     #   groq
     #   huggingface-hub
@@ -135,6 +127,7 @@ httpx==0.28.1
     #   mcp
     #   openai
     #   postgrest
+    #   realtime
     #   storage3
     #   supabase
     #   supabase-auth
@@ -143,8 +136,6 @@ httpx-sse==0.4.3
     # via mcp
 httpx2==2.13.0
     # via langsmith
-httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
-    # via httpx2
 huggingface-hub==1.33.0
     # via
     #   litellm
@@ -183,7 +174,7 @@ jsonschema-specifications==2025.9.1
 kombu==5.6.2
     # via celery
 langchain==1.4.6
-    # via -r backend/requirements.in
+    # via -r requirements.in
 langchain-core==1.6.10
     # via
     #   langchain
@@ -194,16 +185,16 @@ langchain-core==1.6.10
     #   langgraph-prebuilt
     #   langgraph-sdk
 langchain-groq==1.1.3
-    # via -r backend/requirements.in
+    # via -r requirements.in
 langchain-mcp-adapters==0.3.2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 langchain-protocol==0.0.19
     # via
     #   langchain-core
     #   langgraph-sdk
 langgraph==1.2.15
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   langchain
 langgraph-checkpoint==4.3.0
     # via
@@ -216,23 +207,22 @@ langgraph-sdk==0.4.8
 langsmith==0.13.0
     # via langchain-core
 litellm==1.109.1
-    # via -r backend/requirements.in
+    # via -r requirements.in
 markupsafe==3.0.3
     # via jinja2
 mcp==1.30.0
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   langchain-mcp-adapters
 multidict==6.9.1
     # via
-    #   
     #   aiohttp
     #   yarl
 openai==2.54.0
     # via litellm
 opentelemetry-api==1.45.2
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   fastapi
     #   opentelemetry-exporter-http-transport
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -247,10 +237,10 @@ opentelemetry-api==1.45.2
     #   opentelemetry-instrumentation-sqlalchemy
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-http-transport==0.66b2
+opentelemetry-exporter-http-transport[requests]==0.66b2
     # via opentelemetry-exporter-otlp-proto-http
 opentelemetry-exporter-otlp==1.45.2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-exporter-otlp-common==0.66b2
     # via
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -264,7 +254,7 @@ opentelemetry-exporter-otlp-proto-grpc==1.45.2
 opentelemetry-exporter-otlp-proto-http==1.45.2
     # via opentelemetry-exporter-otlp
 opentelemetry-exporter-prometheus==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-instrumentation==0.66b2
     # via
     #   opentelemetry-instrumentation-asgi
@@ -276,15 +266,15 @@ opentelemetry-instrumentation==0.66b2
 opentelemetry-instrumentation-asgi==0.66b2
     # via opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-fastapi==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-instrumentation-httpx==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-instrumentation-redis==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-instrumentation-requests==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-instrumentation-sqlalchemy==0.66b2
-    # via -r backend/requirements.in
+    # via -r requirements.in
 opentelemetry-proto==1.45.2
     # via
     #   opentelemetry-exporter-otlp-proto-common
@@ -292,7 +282,7 @@ opentelemetry-proto==1.45.2
     #   opentelemetry-exporter-otlp-proto-http
 opentelemetry-sdk==1.45.2
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   opentelemetry-exporter-otlp-common
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
@@ -334,7 +324,7 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-postgrest==2.32.0
+postgrest==2.34.1
     # via supabase
 prometheus-client==0.26.0
     # via opentelemetry-exporter-prometheus
@@ -349,12 +339,12 @@ protobuf==7.36.2
     #   googleapis-common-protos
     #   opentelemetry-proto
 psycopg2-binary==2.9.13
-    # via -r backend/requirements.in
-pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+    # via -r requirements.in
+pycparser==3.0
     # via cffi
 pydantic==2.14.1
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   fastapi
     #   groq
     #   langchain
@@ -376,12 +366,12 @@ pydantic-settings==2.15.0
     #   litellm
     #   mcp
 pygithub==2.10.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 pygments==2.21.0
     # via pytest
-pyjwt==2.15.1
+pyjwt[crypto]==2.15.1
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   mcp
     #   pygithub
     #   supabase-auth
@@ -389,40 +379,36 @@ pynacl==1.6.2
     # via pygithub
 pytest==9.2.0
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   pytest-asyncio
     #   pytest-cov
     #   pytest-mock
 pytest-asyncio==1.4.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 pytest-cov==7.1.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 pytest-mock==3.17.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 python-dateutil==2.9.0.post0
     # via
     #   botocore
     #   celery
 python-dotenv==1.2.4
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   litellm
     #   pydantic-settings
 python-multipart==0.0.32
     # via mcp
-pywin32==312 ; sys_platform == 'win32'
-    # via mcp
-pywinpty==3.1.2 ; sys_platform == 'win32'
-    # via -r backend/requirements.in
 pyyaml==6.0.3
     # via
     #   huggingface-hub
     #   langchain-core
     #   litellm
-realtime==2.32.0
+realtime==2.34.1
     # via supabase
 redis==8.1.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 referencing==0.37.0
     # via
     #   jsonschema
@@ -459,15 +445,13 @@ starlette==1.6.0
     #   fastapi
     #   mcp
     #   sse-starlette
-storage3==2.32.0
+storage3==2.34.1
     # via supabase
-strenum==0.4.15
-    # via supabase-functions
-supabase==2.32.0
-    # via -r backend/requirements.in
-supabase-auth==2.32.0
+supabase==2.34.1
+    # via -r requirements.in
+supabase-auth==2.34.1
     # via supabase
-supabase-functions==2.32.0
+supabase-functions==2.34.1
     # via supabase
 tenacity==9.1.4
     # via langchain-core
@@ -475,34 +459,28 @@ tiktoken==0.14.0
     # via litellm
 tokenizers==0.23.2
     # via litellm
-tomli==2.5.0 ; python_full_version <= '3.11'
-    # via coverage
 tqdm==4.70.1
     # via
     #   huggingface-hub
     #   openai
 tree-sitter==0.26.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 tree-sitter-javascript==0.25.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 tree-sitter-python==0.25.0
-    # via -r backend/requirements.in
+    # via -r requirements.in
 tree-sitter-typescript==0.23.2
-    # via -r backend/requirements.in
-truststore==0.10.4 ; sys_platform != 'emscripten'
+    # via -r requirements.in
+truststore==0.10.4
     # via
     #   httpcore2
     #   httpx2
 typing-extensions==4.16.0
     # via
-    #   aiohttp
-    #   aiosignal
-    #   anyio
     #   click-repl
     #   fastapi
     #   groq
     #   grpcio
-    #   httpx2
     #   huggingface-hub
     #   langchain-core
     #   langchain-mcp-adapters
@@ -519,10 +497,7 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   pygithub
-    #   pytest-asyncio
     #   realtime
-    #   referencing
-    #   starlette
     #   typing-inspection
 typing-inspection==0.4.4
     # via
@@ -531,9 +506,7 @@ typing-inspection==0.4.4
     #   pydantic
     #   pydantic-settings
 tzdata==2026.4
-    # via
-    #   kombu
-    #   tzlocal
+    # via kombu
 tzlocal==5.4.4
     # via celery
 urllib3==2.8.0
@@ -547,7 +520,7 @@ uuid-utils==0.17.1
     #   langsmith
 uvicorn==0.54.0
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   mcp
 vine==5.1.0
     # via
@@ -558,7 +531,7 @@ wcwidth==0.8.4
     # via prompt-toolkit
 websockets==15.0.1
     # via
-    #   -r backend/requirements.in
+    #   -r requirements.in
     #   langgraph-sdk
     #   langsmith
     #   realtime
