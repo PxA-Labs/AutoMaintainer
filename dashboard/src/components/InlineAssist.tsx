@@ -220,11 +220,13 @@ export default function InlineAssist({
   return (
     // A non-modal popover over the editor: it already handles Escape (cancel)
     // and Cmd/Ctrl+Enter (accept) in handleKeyDown, and focus stays free to
-    // move back into the editor, so there is no focus trap here.
-    <div
-      role="dialog"
+    // move back into the editor, so there is no focus trap here. A native
+    // <dialog open> (not showModal) gives the dialog role without a backdrop
+    // or top layer; keydown events from its controls bubble up to it.
+    <dialog
+      open
       aria-label="Inline Assist"
-      className="absolute z-50 w-[520px] bg-[#1e1e2e] border border-indigo-500/40 rounded-xl shadow-2xl overflow-hidden font-sans text-zinc-100 backdrop-blur-md transition-all"
+      className="absolute z-50 m-0 p-0 w-[520px] bg-[#1e1e2e] border border-indigo-500/40 rounded-xl shadow-2xl overflow-hidden font-sans text-zinc-100 backdrop-blur-md transition-all"
       style={{
         top: Math.max(10, Math.min(position.top, window.innerHeight - 380)),
         left: Math.max(20, Math.min(position.left, window.innerWidth - 560)),
@@ -369,6 +371,6 @@ export default function InlineAssist({
           </div>
         )}
       </div>
-    </div>
+    </dialog>
   );
 }

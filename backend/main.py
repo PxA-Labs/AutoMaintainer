@@ -1071,22 +1071,27 @@ async def update_repo_file(
     target_path = get_safe_target_path(repo_dir, payload.file_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
-    repo = _get_github_repo(gh, repo_name)
-    try:
-        file = repo.get_contents(payload.file_path)
-    except Exception as e:
-        logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
-        raise HTTPException(status_code=404, detail="File not found in repo")
     message = (
         payload.commit_message or f"Update {payload.file_path} via AutoMaintainer IDE"
     )
-    try:
-        repo.update_file(file.path, message, payload.content, file.sha)
-    except Exception as e:
-        raise internal_error(500, "Failed to update file", e)
 
-    # Mirror to the local clone so the IDE doesn't show stale reads.
-    _write_local_mirror(repo_dir, target_path, payload.content)
+    def _commit() -> None:
+        # PyGithub and the mirror write are blocking I/O; run off the event loop.
+        repo = _get_github_repo(gh, repo_name)
+        try:
+            file = repo.get_contents(payload.file_path)
+        except Exception as e:
+            logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
+            raise HTTPException(status_code=404, detail="File not found in repo")
+        try:
+            repo.update_file(file.path, message, payload.content, file.sha)
+        except Exception as e:
+            raise internal_error(500, "Failed to update file", e)
+
+        # Mirror to the local clone so the IDE doesn't show stale reads.
+        _write_local_mirror(repo_dir, target_path, payload.content)
+
+    await asyncio.to_thread(_commit)
     return {"status": "updated", "message": message}
 
 
@@ -1115,18 +1120,22 @@ async def create_repo_file(
     target_path = get_safe_target_path(repo_dir, actual_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
-    repo = _get_github_repo(gh, repo_name)
 
     message = (
         payload.commit_message or f"Create {payload.file_path} via AutoMaintainer IDE"
     )
 
-    try:
-        repo.create_file(actual_path, message, actual_content)
-    except Exception as e:
-        raise internal_error(500, "Failed to create file", e)
+    def _commit() -> None:
+        # PyGithub and the mirror write are blocking I/O; run off the event loop.
+        repo = _get_github_repo(gh, repo_name)
+        try:
+            repo.create_file(actual_path, message, actual_content)
+        except Exception as e:
+            raise internal_error(500, "Failed to create file", e)
 
-    _write_local_mirror(repo_dir, target_path, actual_content)
+        _write_local_mirror(repo_dir, target_path, actual_content)
+
+    await asyncio.to_thread(_commit)
     return {"status": "created", "message": message}
 
 
@@ -1143,25 +1152,29 @@ async def delete_repo_file(
         raise HTTPException(status_code=400, detail="Invalid file path")
 
     gh = await _github_client_for_repo(repo_name, org_id)
-    repo = _get_github_repo(gh, repo_name)
-
-    try:
-        file = repo.get_contents(file_path)
-    except Exception as e:
-        logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
-        raise HTTPException(status_code=404, detail="File not found in repo")
-
-    if isinstance(file, list):
-        raise HTTPException(
-            status_code=400,
-            detail="Directories cannot be deleted directly via this endpoint.",
-        )
-
     message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
-    try:
-        repo.delete_file(file.path, message, file.sha)
-    except Exception as e:
-        raise internal_error(500, "Failed to delete file", e)
+
+    def _delete() -> None:
+        # PyGithub calls are blocking HTTP round trips; run off the event loop.
+        repo = _get_github_repo(gh, repo_name)
+        try:
+            file = repo.get_contents(file_path)
+        except Exception as e:
+            logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
+            raise HTTPException(status_code=404, detail="File not found in repo")
+
+        if isinstance(file, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Directories cannot be deleted directly via this endpoint.",
+            )
+
+        try:
+            repo.delete_file(file.path, message, file.sha)
+        except Exception as e:
+            raise internal_error(500, "Failed to delete file", e)
+
+    await asyncio.to_thread(_delete)
     return {"status": "deleted", "message": message}
 
 
@@ -1205,82 +1218,95 @@ async def propose_changes(
     await validate_repo_access(repo_name, org_id, user_id, agents_supabase)
 
     gh = await _github_client_for_repo(repo_name, org_id)
-    repo = _get_github_repo(gh, repo_name)
 
-    # Get default branch
-    default_branch = repo.default_branch
+    def _open_pull_request() -> dict:
+        # Every PyGithub call below is a blocking HTTP round trip (one per
+        # changed file plus branch/PR calls), so the whole sequence runs in a
+        # worker thread instead of stalling the event loop.
+        repo = _get_github_repo(gh, repo_name)
 
-    # Create new branch name
-    safe_title = "".join(
-        c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower()
-    )
-    safe_title = safe_title[:50].strip("-")
-    branch_name = f"automaintainer/{safe_title}-{uuid.uuid4().hex[:8]}"
+        # Get default branch
+        default_branch = repo.default_branch
 
-    try:
-        # Get base commit SHA
-        base_ref = repo.get_git_ref(f"heads/{default_branch}")
-        base_sha = base_ref.object.sha
-
-        # Create new branch
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
-
-        # Commit each change
-        for change in payload.changes:
-            file_path = change.path
-            content = change.content
-            status = change.status
-
-            if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
-                continue
-
-            if status == "deleted":
-                # Delete file
-                try:
-                    file = repo.get_contents(file_path, ref=branch_name)
-                    repo.delete_file(
-                        file.path,
-                        f"Delete {file_path} via AutoMaintainer IDE",
-                        file.sha,
-                        branch=branch_name,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to delete {file_path}: {e}")
-            else:
-                # Create or update file
-                message = f"{'Create' if status == 'created' else 'Update'} {file_path} via AutoMaintainer IDE"
-                try:
-                    file = repo.get_contents(file_path, ref=branch_name)
-                    repo.update_file(
-                        file.path, message, content, file.sha, branch=branch_name
-                    )
-                except Exception:
-                    # File doesn't exist, create it
-                    repo.create_file(file_path, message, content, branch=branch_name)
-
-        # Create Pull Request
-        pr = repo.create_pull(
-            title=payload.title,
-            body=payload.description or "Changes proposed via AutoMaintainer WebIDE",
-            head=branch_name,
-            base=default_branch,
+        # Create new branch name
+        safe_title = "".join(
+            c if c.isalnum() or c in "-_" else "-" for c in payload.title.lower()
         )
+        safe_title = safe_title[:50].strip("-")
+        branch_name = f"automaintainer/{safe_title}-{uuid.uuid4().hex[:8]}"
 
-        return {
-            "branch_name": branch_name,
-            "pr_number": pr.number,
-            "pr_url": pr.html_url,
-            "base_branch": default_branch,
-        }
-
-    except Exception as e:
-        # Try to clean up branch on failure
         try:
-            ref = repo.get_git_ref(f"heads/{branch_name}")
-            ref.delete()
-        except Exception:
-            pass
-        raise internal_error(500, "Failed to propose changes", e)
+            # Get base commit SHA
+            base_ref = repo.get_git_ref(f"heads/{default_branch}")
+            base_sha = base_ref.object.sha
+
+            # Create new branch
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
+
+            # Commit each change
+            for change in payload.changes:
+                file_path = change.path
+                content = change.content
+                status = change.status
+
+                if (
+                    not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path)
+                    or ".." in file_path
+                ):
+                    continue
+
+                if status == "deleted":
+                    # Delete file
+                    try:
+                        file = repo.get_contents(file_path, ref=branch_name)
+                        repo.delete_file(
+                            file.path,
+                            f"Delete {file_path} via AutoMaintainer IDE",
+                            file.sha,
+                            branch=branch_name,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {file_path}: {e}")
+                else:
+                    # Create or update file
+                    message = f"{'Create' if status == 'created' else 'Update'} {file_path} via AutoMaintainer IDE"
+                    try:
+                        file = repo.get_contents(file_path, ref=branch_name)
+                        repo.update_file(
+                            file.path, message, content, file.sha, branch=branch_name
+                        )
+                    except Exception:
+                        # File doesn't exist, create it
+                        repo.create_file(
+                            file_path, message, content, branch=branch_name
+                        )
+
+            # Create Pull Request
+            pr = repo.create_pull(
+                title=payload.title,
+                body=payload.description
+                or "Changes proposed via AutoMaintainer WebIDE",
+                head=branch_name,
+                base=default_branch,
+            )
+
+            return {
+                "branch_name": branch_name,
+                "pr_number": pr.number,
+                "pr_url": pr.html_url,
+                "base_branch": default_branch,
+            }
+
+        except Exception as e:
+            # Try to clean up branch on failure
+            try:
+                ref = repo.get_git_ref(f"heads/{branch_name}")
+                ref.delete()
+            except Exception:
+                pass
+            raise internal_error(500, "Failed to propose changes", e)
+
+    return await asyncio.to_thread(_open_pull_request)
 
 
 # --- GitHub App installation claim ---
