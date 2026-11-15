@@ -10,6 +10,7 @@ import {
   Search,
   Shield,
 } from "lucide-react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { UserMenu } from "@/components/ui/UserMenu";
 import { StatusDot } from "@/components/ui/StatusDot";
@@ -37,6 +38,50 @@ const CREW = [
   { name: "Implementer", role: "Developer" },
   { name: "Maintainer", role: "Senior Engineer" },
 ];
+
+/**
+ * Repository input that keeps a local draft and only reports the value on
+ * Enter or blur. Propagating every keystroke made the IDE reload its tree,
+ * drop open tabs and the terminal open a new shell per character.
+ */
+function RepoInput({
+  initialValue,
+  onCommit,
+  onCancel,
+}: {
+  initialValue: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(initialValue);
+  // Enter commits and unmounts the input; guard against a trailing blur
+  // committing a second time.
+  const doneRef = useRef(false);
+
+  const finish = (commit: boolean) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    if (commit) onCommit(draft.trim());
+    else onCancel();
+  };
+
+  return (
+    <input
+      id="target-repo-input"
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => finish(true)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") finish(true);
+        else if (e.key === "Escape") finish(false);
+      }}
+      className="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-mono focus:outline-none focus:border-indigo-500"
+      placeholder="e.g. facebook/react"
+      autoFocus
+    />
+  );
+}
 
 export function Sidebar({
   user,
@@ -136,18 +181,13 @@ export function Sidebar({
                 Repository Identifier
               </label>
               {isEditingRepo ? (
-                <input
-                  id="target-repo-input"
-                  type="text"
-                  value={repoUrl}
-                  onChange={(e) => onRepoUrlChange(e.target.value)}
-                  onBlur={() => onSetIsEditingRepo(false)}
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && onSetIsEditingRepo(false)
-                  }
-                  className="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-mono focus:outline-none focus:border-indigo-500"
-                  placeholder="e.g. facebook/react"
-                  autoFocus
+                <RepoInput
+                  initialValue={repoUrl === "owner/repo" ? "" : repoUrl}
+                  onCommit={(value) => {
+                    if (value && value !== repoUrl) onRepoUrlChange(value);
+                    onSetIsEditingRepo(false);
+                  }}
+                  onCancel={() => onSetIsEditingRepo(false)}
                 />
               ) : (
                 <div

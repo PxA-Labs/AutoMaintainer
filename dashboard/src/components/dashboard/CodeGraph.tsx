@@ -11,10 +11,14 @@ export function CodeGraph({ repoUrl }: CodeGraphProps) {
         <h2 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
           <GitGraph className="w-5 h-5 text-indigo-400" />
           Repository Code Graph
+          <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            Preview
+          </span>
         </h2>
         <p className="text-xs text-zinc-500 mt-0.5">
-          Knowledge graph visualization of architecture, call graphs, and dependency topology for{" "}
-          <span className="font-mono text-zinc-400">{repoUrl || "configured repository"}</span>.
+          Planned knowledge graph view for{" "}
+          <span className="font-mono text-zinc-400">{repoUrl || "the configured repository"}</span>.
+          This screen is illustrative: no graph data is loaded yet.
         </p>
       </div>
 

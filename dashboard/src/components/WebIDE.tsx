@@ -99,6 +99,8 @@ interface SearchResult {
 
 interface WebIDEProps {
   repoUrl: string;
+  /** Reports whether any open tab has unsaved edits. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 interface FileChange {
@@ -209,9 +211,9 @@ const FileTreeNode = ({
       </div>
       {isDir && isOpen && node.children && (
         <div>
-          {node.children.map((child, idx) => (
+          {node.children.map((child) => (
             <FileTreeNode
-              key={idx}
+              key={child.path}
               node={child}
               activePath={activePath}
               onSelect={onSelect}
@@ -540,7 +542,19 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
   );
 }
 
-export default function WebIDE({ repoUrl }: WebIDEProps) {
+/**
+ * All editor state (tabs, buffers, staged changes, in-flight loads) belongs to
+ * one repository, so the workspace is keyed by it: switching repository
+ * mounts a fresh workspace instead of resetting a dozen state slices in an
+ * effect, and responses still in flight for the old repository land on the
+ * unmounted instance and are dropped. The sidebar only commits a new
+ * repository on Enter/blur, after confirming if there are unsaved edits.
+ */
+export default function WebIDE(props: WebIDEProps) {
+  return <WebIDEWorkspace key={props.repoUrl} {...props} />;
+}
+
+function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
   // Tree State
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -552,6 +566,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   const [fileContents, setFileContents] = useState<Record<string, string>>({});
   const [editedContents, setEditedContents] = useState<Record<string, string>>({});
   const [loadingFiles, setLoadingFiles] = useState<Record<string, boolean>>({});
+  // Per-tab load errors. Kept apart from file contents so an error message can
+  // never end up in an editable buffer (and be saved over the real file).
+  const [fileErrors, setFileErrors] = useState<Record<string, string>>({});
+
+  // Race guards for file loads. `aliveRef` is false once this workspace (and
+  // therefore its repository) is gone; each load also gets a unique id so a
+  // response superseded by a close/reopen or retry is dropped.
+  const aliveRef = useRef(true);
+  const openTabsRef = useRef<string[]>([]);
+  const fileRequestSeq = useRef(0);
+  const fileRequestIds = useRef<Record<string, number>>({});
 
   // Sidebar State
   const [activeSidebarMode, setActiveSidebarMode] = useState<"explorer" | "search">("explorer");
@@ -586,6 +611,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   useEffect(() => {
     activeTabRef.current = activeTab;
   }, [activeTab]);
+
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+  }, [openTabs]);
 
   const clearPreviewDecorations = () => {
     if (editorRef.current && previewDecorationsRef.current.length > 0) {
@@ -781,11 +810,13 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       const res = await authedFetch(`/repo/${encodeURIComponent(repoUrl)}/tree`);
       if (!res.ok) throw new Error("Repository not found or API error");
       const data = await res.json();
-      setTree(data);
+      if (aliveRef.current) setTree(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
+      if (aliveRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to fetch repository tree");
+      }
     } finally {
-      setLoadingTree(false);
+      if (aliveRef.current) setLoadingTree(false);
     }
 
   }, [repoUrl]);
@@ -796,27 +827,17 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
   }, []);
 
   useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      // Dispose this repository's Monaco models; the next workspace starts clean.
+      const monaco = monacoRef.current;
+      monaco?.editor?.getModels?.().forEach(model => model.dispose());
+    };
+  }, []);
+
+  useEffect(() => {
     let active = true;
-
-    // Repository switch state isolation & Monaco cleanup
-    if (monacoRef.current?.editor?.getModels) {
-      const models = monacoRef.current.editor.getModels();
-      models.forEach(model => model.dispose());
-    }
-
-    setOpenTabs([]);
-    setActiveTab(null);
-    setFileContents({});
-    setEditedContents({});
-    setOriginalContents({});
-    setStagedChanges([]);
-    setProposedChanges([]);
-    clearInlineAssistState();
-
-    setLoadingTree(true);
-    setError(null);
-    setTree(null);
-
     authedFetch(`/repo/${encodeURIComponent(repoUrl)}/tree`)
       .then(res => {
         if (!res.ok) throw new Error("Repository not found or API error");
@@ -834,7 +855,7 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     return () => {
       active = false;
     };
-  }, [repoUrl, clearInlineAssistState]);
+  }, [repoUrl]);
 
 
 
@@ -848,35 +869,46 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
     setOpenTabs(prev => prev.includes(path) ? prev : [...prev, path]);
     setActiveTab(path);
 
-    if (fileContents[path] === undefined) {
-      setLoadingFiles(prev => ({...prev, [path]: true}));
-      const currentRepoUrl = repoUrl;
-      try {
-        const res = await authedFetch(`/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
-        if (!res.ok) throw new Error("File not found");
-        const data = await res.json();
-        // Guard against race conditions
-        setOpenTabs(currentTabs => {
-          if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {
-            setFileContents(prev => ({...prev, [path]: data.content}));
-            setEditedContents(prev => ({...prev, [path]: data.content}));
-            setOriginalContents(prev => ({...prev, [path]: data.content}));
-          }
-          return currentTabs;
-        });
-      } catch (err: unknown) {
-        setOpenTabs(currentTabs => {
-          if (currentTabs.includes(path) && currentRepoUrl === repoUrl) {
-            const msg = err instanceof Error ? err.message : String(err);
-            setFileContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
-            setEditedContents(prev => ({...prev, [path]: `// Error: ${msg}`}));
-          }
-          return currentTabs;
-        });
-      } finally {
+    // Already loaded, or a load for this path is in flight (e.g. a
+    // double-click): do not issue a duplicate request that could later
+    // clobber edits typed after the first response.
+    if (fileContents[path] !== undefined || fileRequestIds.current[path] !== undefined) {
+      return;
+    }
+
+    const requestId = ++fileRequestSeq.current;
+    fileRequestIds.current[path] = requestId;
+    // Stale when the workspace was unmounted (repository switched), or the
+    // tab was closed/retried (which replaces or clears this path's id).
+    const isCurrent = () =>
+      aliveRef.current && fileRequestIds.current[path] === requestId;
+
+    setFileErrors(prev => { const n = {...prev}; delete n[path]; return n; });
+    setLoadingFiles(prev => ({...prev, [path]: true}));
+    try {
+      const res = await authedFetch(`/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(path)}`);
+      if (!res.ok) throw new Error(res.status === 404 ? "File not found" : `Failed to load file (HTTP ${res.status})`);
+      const data = await res.json();
+      if (!isCurrent() || !openTabsRef.current.includes(path)) return;
+      setFileContents(prev => ({...prev, [path]: data.content}));
+      // Never overwrite a buffer the user has already started editing.
+      setEditedContents(prev => prev[path] !== undefined ? prev : {...prev, [path]: data.content});
+      setOriginalContents(prev => ({...prev, [path]: data.content}));
+    } catch (err: unknown) {
+      if (!isCurrent()) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setFileErrors(prev => ({...prev, [path]: msg}));
+    } finally {
+      if (isCurrent()) {
+        delete fileRequestIds.current[path];
         setLoadingFiles(prev => ({...prev, [path]: false}));
       }
     }
+  };
+
+  const retryFile = (path: string) => {
+    delete fileRequestIds.current[path];
+    void openFile(path);
   };
 
   const closeTabByPath = useCallback((path: string, force: boolean = false) => {
@@ -916,7 +948,10 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
       return newTabs;
     });
 
-    // Clean up memory
+    // Clean up memory; dropping the request id makes any in-flight load stale.
+    delete fileRequestIds.current[path];
+    setFileErrors(prev => { const n = {...prev}; delete n[path]; return n; });
+    setLoadingFiles(prev => { const n = {...prev}; delete n[path]; return n; });
     setFileContents(prev => { const n = {...prev}; delete n[path]; return n; });
     setEditedContents(prev => { const n = {...prev}; delete n[path]; return n; });
     setOriginalContents(prev => { const n = {...prev}; delete n[path]; return n; });
@@ -1159,6 +1194,15 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
 
   const hasStagedChanges = stagedChanges.length > 0;
 
+  const hasUnsavedChanges = openTabs.some(
+    tab => editedContents[tab] !== undefined && editedContents[tab] !== fileContents[tab]
+  );
+  useEffect(() => {
+    onDirtyChange?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges, onDirtyChange]);
+  // An unmounted IDE no longer holds anything that a repo switch could discard.
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
   return (
     <div className="flex h-full w-full bg-[#1e1e1e] border-l border-zinc-800 font-sans shadow-2xl overflow-hidden relative">
       {/* Proposed Changes Panel */}
@@ -1236,9 +1280,9 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
             ) : error ? (
               <div className="p-4 text-sm text-red-400">{error}</div>
             ) : tree && tree.children ? (
-              tree.children.map((child, idx) => (
+              tree.children.map((child) => (
                 <FileTreeNode
-                  key={idx}
+                  key={child.path}
                   node={child}
                   activePath={activeTab}
                   onSelect={openFile}
@@ -1369,6 +1413,19 @@ export default function WebIDE({ repoUrl }: WebIDEProps) {
             <div ref={editorContainerRef} className="flex-1 overflow-hidden bg-[#1e1e1e] relative">
               {activeTab && loadingFiles[activeTab] ? (
                 <div className="p-8 text-[#cccccc] text-sm animate-pulse">Loading file content...</div>
+              ) : activeTab && fileErrors[activeTab] ? (
+                // Read-only error state: there is no editable buffer, so Save
+                // stays disabled and the real file cannot be overwritten.
+                <div role="alert" className="p-8 text-sm text-red-400 flex flex-col items-start gap-3">
+                  <span>Could not load {activeTab}: {fileErrors[activeTab]}</span>
+                  <button
+                    onClick={() => retryFile(activeTab)}
+                    className="flex items-center gap-1 px-3 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 border border-zinc-700"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Retry
+                  </button>
+                </div>
               ) : activeTab && editedContents[activeTab] !== undefined ? (
                 <>
                   <Editor

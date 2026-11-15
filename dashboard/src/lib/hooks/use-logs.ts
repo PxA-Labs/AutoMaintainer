@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { getBrowserClient } from "@/lib/supabase";
 import type { LogEntry } from "./use-agent-run";
+import { appendCapped, prependCapped } from "@/lib/logs";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -41,7 +42,7 @@ export function useLogs(activeRunId: string | null) {
     useState<Record<string, string>>(DEFAULT_AGENT_STATUS);
 
   const addLog = useCallback((entry: LogEntry) => {
-    setLogs((prev) => [...prev, entry]);
+    setLogs((prev) => appendCapped(prev, [entry]));
   }, []);
 
   const resetState = useCallback(() => {
@@ -120,7 +121,7 @@ export function useLogs(activeRunId: string | null) {
           });
         }
         if (msgData.activity)
-          setActivity((prev) => [msgData.activity, ...prev]);
+          setActivity((prev) => prependCapped(prev, msgData.activity));
       } else {
         const date = new Date(row.created_at || Date.now());
         const logEntry: LogEntry = {
@@ -132,7 +133,7 @@ export function useLogs(activeRunId: string | null) {
         if (accumulator) {
           accumulator.historyLogs.push(logEntry);
         } else {
-          setLogs((prev) => [...prev, logEntry]);
+          setLogs((prev) => appendCapped(prev, [logEntry]));
         }
       }
     };
@@ -149,15 +150,16 @@ export function useLogs(activeRunId: string | null) {
 
         if (error) {
           console.error("Error fetching historical logs:", error);
-          setLogs((prev) => [
-            ...prev,
-            {
-              time: new Date().toLocaleTimeString(),
-              agent: "System",
-              msg: `Failed to load historical logs: ${error.message || String(error)}`,
-              color: "text-red-400",
-            },
-          ]);
+          setLogs((prev) =>
+            appendCapped(prev, [
+              {
+                time: new Date().toLocaleTimeString(),
+                agent: "System",
+                msg: `Failed to load historical logs: ${error.message || String(error)}`,
+                color: "text-red-400",
+              },
+            ])
+          );
           return;
         }
 
@@ -185,21 +187,22 @@ export function useLogs(activeRunId: string | null) {
           }
 
           if (accumulator.historyLogs.length > 0) {
-            setLogs((prev) => [...prev, ...accumulator.historyLogs]);
+            setLogs((prev) => appendCapped(prev, accumulator.historyLogs));
           }
         }
       } catch (err) {
         if (isMounted) {
           console.error("Error fetching historical logs:", err);
-          setLogs((prev) => [
-            ...prev,
-            {
-              time: new Date().toLocaleTimeString(),
-              agent: "System",
-              msg: `Error loading historical logs: ${err instanceof Error ? err.message : String(err)}`,
-              color: "text-red-400",
-            },
-          ]);
+          setLogs((prev) =>
+            appendCapped(prev, [
+              {
+                time: new Date().toLocaleTimeString(),
+                agent: "System",
+                msg: `Error loading historical logs: ${err instanceof Error ? err.message : String(err)}`,
+                color: "text-red-400",
+              },
+            ])
+          );
         }
       } finally {
         if (isMounted) {

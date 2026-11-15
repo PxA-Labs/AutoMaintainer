@@ -1,8 +1,10 @@
-import { Play, Square } from "lucide-react";
+import { Loader2, Play, Square } from "lucide-react";
 import { StatusDot } from "@/components/ui/StatusDot";
 
 interface HeaderProps {
   isRunning: boolean;
+  /** A start/stop request is in flight; the control is disabled meanwhile. */
+  isPending?: boolean;
   tokensUsed: number;
   latency: number;
   onStartStop: () => void;
@@ -10,6 +12,7 @@ interface HeaderProps {
 
 export function Header({
   isRunning,
+  isPending = false,
   tokensUsed,
   latency,
   onStartStop,
@@ -35,14 +38,21 @@ export function Header({
         )}
         <button
           onClick={onStartStop}
+          disabled={isPending}
+          aria-busy={isPending}
           aria-label={isRunning ? "Stop agent loop" : "Start agent loop"}
-          className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors active:scale-[0.98] ${
+          className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed ${
             isRunning
               ? "bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20"
               : "bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 border border-emerald-500/20"
           }`}
         >
-          {isRunning ? (
+          {isPending ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {isRunning ? "Stopping" : "Starting"}
+            </>
+          ) : isRunning ? (
             <>
               <Square className="w-3.5 h-3.5" />
               Stop
