@@ -167,7 +167,7 @@ def test_sync_never_puts_token_in_argv(monkeypatch, tmp_path):
     assert asyncio.run(sync_repo_clone("o/r", repo_dir, TOKEN))
 
     subcommands = [argv[1] for argv, _ in calls]
-    assert subcommands == ["clone", "fetch", "reset"]
+    assert subcommands == ["clone", "remote", "fetch", "reset"]
     for argv, env in calls:
         assert not any(TOKEN in a or "extraheader" in a for a in argv), argv
         assert "-c" not in argv
@@ -193,7 +193,8 @@ def test_sync_scrubs_token_persisted_by_old_clones(upstream, tmp_path):
     including clones under the previous (unhashed) directory naming."""
     repo_dir = str(get_safe_repo_dir("o/r"))
     legacy_dir = str(workspace.get_base_workspace_dir() / "o_r")
-    for d in (repo_dir, legacy_dir):
+    id_dir = str(get_safe_repo_dir("o/other", github_repo_id=9))
+    for d in (repo_dir, legacy_dir, id_dir):
         result = git(
             "clone",
             "-q",
@@ -210,7 +211,7 @@ def test_sync_scrubs_token_persisted_by_old_clones(upstream, tmp_path):
         sync_repo_clone("o/r", repo_dir, TOKEN, remote_url=str(upstream))
     )
 
-    for d in (repo_dir, legacy_dir):
+    for d in (repo_dir, legacy_dir, id_dir):
         assert "FAKE" not in open(os.path.join(d, ".git", "config")).read(), d
 
 
@@ -249,6 +250,85 @@ def test_sync_follows_a_renamed_repository_into_its_existing_clone(upstream, tmp
     assert str(get_safe_repo_dir("o/new", github_repo_id=7)) == repo_dir
     assert asyncio.run(sync_repo_clone("o/new", repo_dir, None, remote_url=str(moved)))
     assert open(os.path.join(repo_dir, "app.py")).read() == "v2\n"
+
+
+@requires_git
+def test_sync_points_origin_at_the_current_location(upstream, tmp_path):
+    """Runners push to "origin". After a rename, a stale origin would push to
+    whatever repository is later created at the old name."""
+    repo_dir = str(get_safe_repo_dir("o/old", github_repo_id=7))
+    assert asyncio.run(
+        sync_repo_clone("o/old", repo_dir, None, remote_url=str(upstream))
+    )
+    moved = tmp_path / "renamed"
+    upstream.rename(moved)
+    # A different repository now lives at the old location.
+    impostor = tmp_path / "upstream"
+    impostor.mkdir()
+    git("init", "-q", "-b", "main", cwd=impostor)
+
+    assert asyncio.run(sync_repo_clone("o/new", repo_dir, None, remote_url=str(moved)))
+
+    origin = git("remote", "get-url", "origin", cwd=repo_dir).stdout.strip()
+    assert origin == str(moved)
+
+
+@requires_git
+def test_sync_restores_a_missing_origin(upstream):
+    repo_dir = str(get_safe_repo_dir("o/r", github_repo_id=8))
+    assert asyncio.run(sync_repo_clone("o/r", repo_dir, None, remote_url=str(upstream)))
+    git("remote", "remove", "origin", cwd=repo_dir)
+
+    assert asyncio.run(sync_repo_clone("o/r", repo_dir, None, remote_url=str(upstream)))
+
+    origin = git("remote", "get-url", "origin", cwd=repo_dir).stdout.strip()
+    assert origin == str(upstream)
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://github.com/o/r.git", "https://github.com/o/r.git"),
+        (
+            "https://x-access-token:ghs_secret@github.com/o/r.git",
+            "https://github.com/o/r.git",
+        ),
+        ("https://user@github.com:443/o/r.git", "https://github.com:443/o/r.git"),
+        ("/srv/git/o/r", "/srv/git/o/r"),
+    ],
+)
+def test_origin_url_never_carries_credentials(url, expected):
+    assert workspace._without_userinfo(url) == expected
+
+
+def test_sync_sets_origin_without_credentials(monkeypatch, tmp_path):
+    calls = []
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*argv, **kwargs):
+        calls.append(argv)
+        return Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+
+    assert asyncio.run(
+        sync_repo_clone(
+            "o/r",
+            str(repo_dir),
+            TOKEN,
+            remote_url="https://x-access-token:secret@github.com/o/r.git",
+        )
+    )
+
+    [set_url] = [a for a in calls if a[1] == "remote"]
+    assert set_url[1:] == ("remote", "set-url", "origin", "https://github.com/o/r.git")
 
 
 @requires_git

@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
 
@@ -269,8 +270,25 @@ async def scrub_workspace_credentials() -> None:
     if not base.is_dir():
         return
     for entry in base.iterdir():
-        if entry.is_dir() and not entry.is_symlink():
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        if entry.name == REPO_ID_DIR:
+            # Id-keyed clones never persisted a token, but scrub them too so
+            # this stays true for every clone the workspace holds.
+            for clone in entry.iterdir():
+                if clone.is_dir() and not clone.is_symlink():
+                    await scrub_clone_credentials(str(clone))
+        else:
             await scrub_clone_credentials(str(entry))
+
+
+def _without_userinfo(url: str) -> str:
+    """``url`` with any ``user:password@`` removed (http(s) URLs only)."""
+    parts = urlsplit(url)
+    if parts.scheme in ("http", "https") and "@" in parts.netloc:
+        host = parts.netloc.rsplit("@", 1)[1]
+        return urlunsplit(parts._replace(netloc=host))
+    return url
 
 
 async def sync_repo_clone(
@@ -308,9 +326,19 @@ async def sync_repo_clone(
         return True
 
     await scrub_clone_credentials(repo_dir)
-    # Fetch from the repository's current URL, not the clone's "origin": a
-    # clone keyed by repository id outlives a rename or transfer, and its
-    # origin still names the old location.
+    # A clone keyed by repository id outlives a rename or transfer, so its
+    # "origin" may still name the old owner/name. Point origin at the current
+    # URL before fetching: runners push to "origin", and if someone recreates
+    # a repository at the old name, a stale origin would send this
+    # repository's branch there. Never written with credentials in it.
+    origin = _without_userinfo(remote)
+    rc = await _run_git(
+        ["remote", "set-url", "origin", origin], repo_dir, env, timeout, quiet=True
+    )
+    if rc != 0:
+        rc = await _run_git(["remote", "add", "origin", origin], repo_dir, env, timeout)
+        if rc != 0:
+            return False
     rc = await _run_git(
         ["fetch", "--quiet", "--", remote, "HEAD"], repo_dir, env, timeout
     )
