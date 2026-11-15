@@ -148,6 +148,12 @@ CREATE INDEX runs_repo_idx ON runs(repository_id);
 CREATE INDEX runs_status_idx ON runs(status);
 CREATE INDEX runs_created_idx ON runs(created_at DESC);
 
+-- Step checkpoints (issue_number, branch_name, pr_number, merge state, ...)
+-- written by the agent graph so a redelivered Celery task resumes the run
+-- instead of repeating GitHub side effects. Idempotent: existing deployments
+-- can run this statement on its own as a migration.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb;
+
 -- ============================================================================
 -- 5. AGENT LOGS (Real-time streaming - now multi-tenant)
 -- ============================================================================
