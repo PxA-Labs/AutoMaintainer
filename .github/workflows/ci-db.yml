@@ -1,0 +1,112 @@
+name: Database & Contract Tests
+
+# Epic #419. Two suites that need more than the unit-test job provides:
+# - backend/tests/contract: the OpenAPI snapshot and the dashboard <-> API
+#   contract (reads dashboard/src, so dashboard changes trigger it too);
+# - backend/tests/rls: supabase_schema.sql applied to a real PostgreSQL 16 and
+#   its row level security checked per tenant table. Skipped everywhere else
+#   (they need DATABASE_URL_RLS_TEST); this job fails if they were skipped.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - 'supabase_schema.sql'
+      - 'dashboard/src/**'
+      - '.github/workflows/ci-db.yml'
+
+permissions:
+  contents: read
+
+# Same uv version as ci-backend.yml and evals.yml (keep in step with the Dockerfile).
+env:
+  UV_VERSION: "0.13.8"
+  UV_PYTHON: "3.11"
+  UV_PYTHON_DOWNLOADS: never
+
+concurrency:
+  group: ci-db-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  db-and-contract:
+    name: Contract & RLS tests (PostgreSQL 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Throwaway service container reachable only from this job; trust
+          # auth avoids committing even a dummy password.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
+      run: uv sync --frozen --group dev
+
+    - name: Contract tests (OpenAPI snapshot, dashboard calls)
+      run: uv run --frozen pytest tests/contract -v -p no:cacheprovider
+
+    - name: RLS tests against PostgreSQL
+      env:
+        DATABASE_URL_RLS_TEST: postgresql://postgres@localhost:5432/postgres
+      run: |
+        uv run --frozen pytest tests/rls -v -rxXs -p no:cacheprovider \
+          --junitxml="$RUNNER_TEMP/rls.xml"
+
+    # A typo in the URL or a missing driver would turn the whole suite into
+    # skips and a green job; refuse that.
+    - name: Fail if the RLS tests were skipped
+      run: |
+        python - "$RUNNER_TEMP/rls.xml" <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        suite = ET.parse(sys.argv[1]).getroot()
+        suite = suite if suite.tag == "testsuite" else suite.find("testsuite")
+        tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+        cases = suite.iter("testcase")
+        # Strict-xfail tests are reported as skipped by JUnit XML; only
+        # count skips that are not expected failures.
+        real_skips = [
+            c.get("name")
+            for c in cases
+            if (s := c.find("skipped")) is not None
+            and s.get("type") != "pytest.xfail"
+        ]
+        print(f"RLS tests: {tests} collected, {skipped} skipped/xfailed")
+        if tests == 0 or real_skips:
+            sys.exit(f"RLS tests did not run against PostgreSQL: {real_skips[:5]}")
+        EOF
