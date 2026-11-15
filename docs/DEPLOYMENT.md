@@ -383,4 +383,5 @@ not automated.
 
 - **Supabase redirect URL:** add `<your-origin>/auth/callback/` to the Supabase Auth allowed redirect URLs before deploying the dashboard. GitHub sign-in now returns to that page.
 - **Workspace directory names changed** to `owner_repo-<hash>` so different repositories can never share a clone. Existing clones under the old names are not reused; each repository is cloned again on its next run. Old directories can be deleted once the new ones exist.
+- **Workspace directories keyed by repository id:** agent runs and the IDE/file/terminal routes now share a clone at `_by_id/<GitHub repository id>` in the workspace, so a renamed repository keeps its clone and a recreated one gets a fresh one. Existing clones move there on first use (one re-clone per repository); the old `owner_repo-<hash>` directories can then be deleted.
 - **Clone credentials:** the worker no longer writes the GitHub token into `.git/config`, and it scrubs `http.extraheader` from existing clones on first use. If a token was ever stored there, rotate it.

@@ -407,7 +407,8 @@ def test_terminal_rejects_repo_outside_callers_org(monkeypatch, tmp_path, fake_p
     from workspace import get_safe_repo_dir
 
     monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path))
-    get_safe_repo_dir("victim/private").mkdir(parents=True)
+    # The victim's clone, keyed by its repository id as its runs key it.
+    get_safe_repo_dir("victim/private", 1).mkdir(parents=True)
     victim_repo = {"id": 1, "github_installation_id": 2}
     victim_repo.update(org_id="org-victim", full_name="victim/private")
     sb = _supabase_stub([MEMBER], [victim_repo])
@@ -445,7 +446,8 @@ def test_terminal_uses_authorized_repo_clone_as_cwd(
     from workspace import get_safe_repo_dir
 
     monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path))
-    clone = get_safe_repo_dir("own/repo")
+    # Keyed by the repository id, as the agent run that cloned it keys it.
+    clone = get_safe_repo_dir("own/repo", 1)
     clone.mkdir(parents=True)
     own_repo = {"id": 1, "github_installation_id": 2}
     own_repo.update(org_id="org-1", full_name="own/repo")

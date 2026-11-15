@@ -1160,6 +1160,10 @@ from collections.abc import Sequence
 
 class AgentState(TypedDict):
     repo_name: str
+    # GitHub's repository id (``repositories.id``), or None when the run has
+    # no database row (local dev). Keys the local clone directory; see
+    # workspace.get_safe_repo_dir.
+    repository_id: Optional[int]
     target_issue: int | None
     architect_directive: str
     idea: str
@@ -1574,7 +1578,9 @@ async def architect_node(state: AgentState):
     import shutil
     from workspace import get_safe_repo_dir, sync_repo_clone
 
-    repo_dir = str(get_safe_repo_dir(repo))
+    # Keyed by the repository id when the run has one, exactly as the IDE,
+    # file and terminal routes key it, so they read the clone written here.
+    repo_dir = str(get_safe_repo_dir(repo, state.get("repository_id")))
 
     # The token reaches git through its environment only: `clone -c
     # http.extraheader=...` persisted it in plaintext in .git/config and
@@ -2970,6 +2976,7 @@ async def run_agent_loop(
     run_id: str = None,
     emitter: Optional[EventEmitter] = None,
     github_installation_id: Optional[int] = None,
+    repository_id: Optional[int] = None,
 ):
     """Run the agent graph for ``repo_name``.
 
@@ -2977,6 +2984,15 @@ async def run_agent_loop(
     repository (``repositories.github_installation_id``); every GitHub call of
     the run acts with that installation's token. In ``app`` auth mode a run
     without one is refused rather than run with the global PAT.
+
+    ``repository_id`` is GitHub's repository id (``repositories.id``, also
+    ``runs.repository_id``). The local clone is keyed by it, which is how the
+    IDE/file/terminal routes find the same clone. Without it (no database,
+    local dev) the clone falls back to the name-keyed directory. Runs queued
+    through /start always carry it (tasks.py passes ``runs.repository_id``);
+    the routes always have it too, because they refuse requests without a
+    database. Only a run started directly without the id (a local script)
+    writes a name-keyed clone the IDE routes do not read.
     """
     if not run_id:
         import uuid
@@ -3041,6 +3057,7 @@ async def run_agent_loop(
 
     initial_state = {
         "repo_name": repo_name,
+        "repository_id": repository_id,
         "target_issue": target_issue,
         "architect_directive": "",
         "idea": "",
