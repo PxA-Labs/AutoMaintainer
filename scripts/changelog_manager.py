@@ -257,7 +257,13 @@ def update_compare_links(
     # Remove existing compare block
     content = re.sub(r"\n\[Unreleased\]:\s+https?://[^\n]+", "", content)
     content = re.sub(r"\n\[[0-9a-zA-Z._-]+\]:\s+https?://[^\n]+", "", content)
+    # Also drop the separator(s) that preceded the old block. Previously only
+    # the link lines were removed and a new "---" appended, so every run added
+    # one more trailing rule; strip any run of them so the result is the same
+    # however many times this is called.
     content = content.rstrip()
+    while content.endswith("\n---") or content == "---":
+        content = content[: -len("---")].rstrip()
 
     compare_block = (
         f"\n\n---\n\n"
