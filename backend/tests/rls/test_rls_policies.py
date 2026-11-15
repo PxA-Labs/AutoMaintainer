@@ -604,12 +604,6 @@ def test_schema_can_be_reapplied_without_losing_data(db):
         db.rollback()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="runs has no repo_name column, but POST /start inserts it, the agent loop "
-    "upserts it, the stale-run reaper selects it and the dashboard reads it from "
-    "/status, /runs and /admin/runs",
-)
 def test_runs_has_the_columns_the_backend_uses(db):
     # Columns written or read through the Supabase client: run_data in
     # main.start_agents(), update_run_status() calls and the stale-run reaper
@@ -645,11 +639,6 @@ def test_runs_has_the_columns_the_backend_uses(db):
     assert used <= columns, f"missing columns: {sorted(used - columns)}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="runs_insert_own checks only org_id and user_id, not that repository_id "
-    "and github_installation_id belong to the same org",
-)
 def test_run_cannot_reference_another_orgs_repository(db):
     with session(db, "authenticated", USER_A) as cur:
         result = attempt(
@@ -661,11 +650,6 @@ def test_run_cannot_reference_another_orgs_repository(db):
         assert result == "denied"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ide_update_own's WITH CHECK only tests user_id, so a user can move "
-    "their IDE session (and its run/repository ids) into another org",
-)
 def test_ide_session_cannot_be_moved_to_another_org(db):
     with session(db, "authenticated", USER_A) as cur:
         moved = attempt(
