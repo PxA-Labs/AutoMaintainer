@@ -5,6 +5,7 @@ Provides distributed tracing, metrics, and structured logging.
 
 import os
 import logging
+import re
 from typing import Optional, Any
 from contextlib import contextmanager
 
@@ -88,7 +89,6 @@ try:
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
-    from opentelemetry.instrumentation.logging import LoggingInstrumentor
     from opentelemetry.trace import Status, StatusCode
     from opentelemetry.metrics import CallbackOptions, Observation
     from opentelemetry.propagate import inject, extract, set_global_textmap
@@ -112,6 +112,110 @@ except ImportError:
     class StatusCode:
         ERROR = "ERROR"
         OK = "OK"
+
+
+# --- Metric catalogue (#404) ---
+# Every metric this process exports, with the complete set of label
+# (attribute) names it may carry. Labels must take a small, bounded set of
+# values: a label such as repo_name, run_id, a user id, a raw URL path, a Host
+# header or an error message creates one time series per distinct value and
+# can exhaust the metrics backend. High-cardinality identifiers belong in
+# logs and span attributes only. docs/OBSERVABILITY.md documents the values.
+#
+# ``metric_views`` turns the catalogue into OpenTelemetry Views, so a label
+# that is not listed here is dropped when it is recorded, whichever code (ours
+# or an instrumentation library) adds it.
+
+# FastAPI/ASGI server metrics. In the default (old) HTTP semantic conventions
+# the route template is carried in ``http.target`` ("/runs/{run_id}"); it is
+# absent for requests that match no route, never the raw path. The stable
+# conventions (OTEL_SEMCONV_STABILITY_OPT_IN=http) use ``http.route``.
+# Dropped on purpose: http.server_name (copied from the client's Host header,
+# so any caller can mint new values), http.host, net.host.port, http.scheme
+# and http.flavor.
+_HTTP_SERVER_LABELS = frozenset(
+    {
+        "http.method",
+        "http.status_code",
+        "http.target",
+        "http.request.method",
+        "http.response.status_code",
+        "http.route",
+    }
+)
+_HTTP_SERVER_ACTIVE_LABELS = frozenset({"http.method", "http.request.method"})
+# httpx/requests client metrics: the peer host is one of the configured
+# services (GitHub, Supabase, Groq, ...); full URLs are never labels.
+_HTTP_CLIENT_LABELS = frozenset(
+    {
+        "http.method",
+        "http.status_code",
+        "net.peer.name",
+        "http.request.method",
+        "http.response.status_code",
+        "server.address",
+    }
+)
+
+METRIC_LABELS: dict[str, frozenset[str]] = {
+    # Custom application metrics (record_* helpers below).
+    "agent_runs_total": frozenset({"mode", "outcome"}),
+    "agent_run_duration_seconds": frozenset({"mode", "outcome"}),
+    "agent_runs_active": frozenset({"mode"}),
+    "llm_tokens_total": frozenset({"model"}),
+    "llm_request_duration_seconds": frozenset({"model", "outcome"}),
+    "github_api_calls_total": frozenset({"operation", "outcome"}),
+    "celery_queue_depth": frozenset({"queue"}),
+    "celery_task_duration_seconds": frozenset({"task_name", "queue", "outcome"}),
+    # Instrumentation-library metrics.
+    "http.server.duration": _HTTP_SERVER_LABELS,
+    "http.server.request.duration": _HTTP_SERVER_LABELS,
+    "http.server.request.size": _HTTP_SERVER_LABELS,
+    "http.server.request.body.size": _HTTP_SERVER_LABELS,
+    "http.server.response.size": _HTTP_SERVER_LABELS,
+    "http.server.response.body.size": _HTTP_SERVER_LABELS,
+    "http.server.active_requests": _HTTP_SERVER_ACTIVE_LABELS,
+    "http.client.duration": _HTTP_CLIENT_LABELS,
+    "http.client.request.duration": _HTTP_CLIENT_LABELS,
+}
+
+# Bounded values for labels whose input can come from a request.
+AGENT_MODES = frozenset({"autonomous", "targeted_issue", "code_review", "refactor"})
+RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled"})
+OTHER = "other"
+# operation, task_name, queue and model must be code constants or
+# configuration (e.g. "get_pull", "agents.run", "llama-3.3-70b-versatile").
+# Anything that does not look like one (a path, a sentence, an error message)
+# is recorded as "other" rather than becoming a new series.
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+
+
+def _one_of(value, allowed: frozenset[str]) -> str:
+    return value if value in allowed else OTHER
+
+
+def _identifier(value) -> str:
+    if isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value):
+        return value
+    return OTHER
+
+
+def _outcome(success: bool) -> str:
+    return "success" if success else "failure"
+
+
+def metric_views() -> list:
+    """One View per catalogued metric that keeps only its catalogued labels.
+
+    Requires the OpenTelemetry SDK (imported here so the catalogue can be
+    used and tested without it).
+    """
+    from opentelemetry.sdk.metrics.view import View
+
+    return [
+        View(instrument_name=name, attribute_keys=set(labels))
+        for name, labels in METRIC_LABELS.items()
+    ]
 
 
 # Global state
@@ -198,7 +302,9 @@ def init_observability(
                 logger.error(f"Failed to configure OTLP metric exporter: {e}")
 
         if readers:
-            _meter_provider = MeterProvider(resource=resource, metric_readers=readers)
+            _meter_provider = MeterProvider(
+                resource=resource, metric_readers=readers, views=metric_views()
+            )
             metrics.set_meter_provider(_meter_provider)
 
         # --- Instrumentations ---
@@ -206,7 +312,6 @@ def init_observability(
             HTTPXClientInstrumentor().instrument()
             RequestsInstrumentor().instrument()
             RedisInstrumentor().instrument()
-            LoggingInstrumentor().instrument(set_logging_format=True)
             set_global_textmap(TraceContextTextMapPropagator())
         except Exception as e:
             logger.warning(f"Failed to apply some instrumentations: {e}")
@@ -357,8 +462,9 @@ def trace_agent_execution(mode: str, repo: str, run_id: Optional[str] = None):
             "agent.run_id": run_id or "unknown",
         },
     ) as span:
+        labels = {"mode": _one_of(mode, AGENT_MODES)}
         try:
-            agent_run_active.add(1, {"mode": mode})
+            agent_run_active.add(1, labels)
             yield span
         except Exception as e:
             if hasattr(span, "set_status"):
@@ -367,7 +473,7 @@ def trace_agent_execution(mode: str, repo: str, run_id: Optional[str] = None):
                 span.record_exception(e)
             raise
         finally:
-            agent_run_active.add(-1, {"mode": mode})
+            agent_run_active.add(-1, labels)
 
 
 @contextmanager
@@ -436,47 +542,42 @@ def trace_celery_task(task_name: str, queue: str = ""):
 # --- Helper Functions ---
 
 
-def record_agent_run_complete(
-    run_id: str, repo_name: str, mode: str, status: str, duration: float
-):
-    """Record metrics for a completed agent run."""
-    attributes = {
-        "repo_name": repo_name,
-        "mode": mode,
-        "status": status,
+def record_agent_run_complete(mode: str, status: str, duration: float):
+    """Record metrics for a finished agent run.
+
+    The run id and repository are not labels (#404): log them, or set them on
+    the run's span (``trace_agent_execution`` does).
+    """
+    labels = {
+        "mode": _one_of(mode, AGENT_MODES),
+        "outcome": _one_of(status, RUN_OUTCOMES),
     }
-    agent_runs_total.add(1, attributes)
-    agent_run_duration.record(duration, attributes)
+    agent_runs_total.add(1, labels)
+    agent_run_duration.record(duration, labels)
 
 
-def record_llm_tokens(model: str, tokens: int, run_id: str = ""):
-    """Record LLM token usage."""
-    attributes = {"model": model}
-    if run_id:
-        attributes["run_id"] = run_id
-    llm_tokens_total.add(tokens, attributes)
+def record_llm_tokens(model: str, tokens: int):
+    """Record LLM token usage (per model, not per run)."""
+    llm_tokens_total.add(tokens, {"model": _identifier(model)})
 
 
 def record_llm_request(model: str, duration: float, success: bool):
     """Record LLM request duration."""
-    llm_request_duration.record(duration, {"model": model, "success": str(success)})
+    llm_request_duration.record(
+        duration, {"model": _identifier(model), "outcome": _outcome(success)}
+    )
 
 
-def record_github_api_call(operation: str, repo: str, success: bool):
-    """Record GitHub API call."""
+def record_github_api_call(operation: str, success: bool):
+    """Record a GitHub API call; ``operation`` is a code constant such as "get_pull"."""
     github_api_calls_total.add(
-        1,
-        {
-            "operation": operation,
-            "repo": repo,
-            "success": str(success),
-        },
+        1, {"operation": _identifier(operation), "outcome": _outcome(success)}
     )
 
 
 def set_celery_queue_depth(queue: str, depth: int):
     """Set Celery queue depth gauge."""
-    celery_queue_depth.set(depth, {"queue": queue})
+    celery_queue_depth.set(depth, {"queue": _identifier(queue)})
 
 
 def record_celery_task_duration(
@@ -486,9 +587,9 @@ def record_celery_task_duration(
     celery_task_duration.record(
         duration,
         {
-            "task_name": task_name,
-            "queue": queue,
-            "success": str(success),
+            "task_name": _identifier(task_name),
+            "queue": _identifier(queue),
+            "outcome": _outcome(success),
         },
     )
 

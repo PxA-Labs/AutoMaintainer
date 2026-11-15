@@ -11,7 +11,7 @@ import agents
 # MERGE_POLICY=ci also requires a passed change verification (verification.py).
 VERIFIED = ("automaintainer/verification", "success")
 
-APPROVE = "VERDICT: APPROVE\nLooks correct."
+APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 
 
 def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()):
@@ -142,7 +142,7 @@ async def test_ci_policy_never_merges_rejected_review(monkeypatch):
     monkeypatch.setenv("MERGE_POLICY", "ci")
     repo, pr, _ = _setup(
         monkeypatch,
-        review="VERDICT: REJECT\nOff-by-one.",
+        review='{"verdict": "reject", "reasons": ["Off-by-one."], "blocking_issues": ["Off-by-one."]}',
         statuses=[("ci/build", "success")],
     )
     result = await agents.maintainer_node(_state())
@@ -296,7 +296,7 @@ async def test_targeted_issue_injection_full_run_leaves_pr_open(monkeypatch, tmp
         prompts.append(system)
         if "Implementer" in system:
             return "x = 2"
-        return APPROVE + " LGTM"  # PM and Maintainer both approve (any format)
+        return APPROVE  # PM and Maintainer both approve
 
     monkeypatch.setattr(agents, "run_llm_with_tools", llm)
     result = await agents.run_agent_loop("o/r", target_issue=3, run_id="r")

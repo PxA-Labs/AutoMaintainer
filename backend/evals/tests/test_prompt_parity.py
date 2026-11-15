@@ -75,7 +75,10 @@ async def test_prompt_matches_implementer_for_new_file(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prompt_matches_implementer_with_maintainer_feedback(monkeypatch):
-    review = "VERDICT: REJECT\nThe empty last page is still dropped."
+    review = (
+        '{"verdict": "reject", "reasons": ["Off-by-one."], '
+        '"requested_changes": ["The empty last page is still dropped."]}'
+    )
     state, captured = _capture_prompt(monkeypatch, CONTENT, iteration=1, review=review)
     await agents.implementer_node(state)
     assert captured == [build_implementer_prompt(TASK, FILE, CONTENT, review=review)]
