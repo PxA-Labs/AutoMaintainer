@@ -38,6 +38,15 @@ from urllib.parse import urlsplit
 from celery_app import celery_app, redis_configured
 from tasks import run_agent_loop_task, cancel_run_task, cleanup_stale_runs
 from github_app import (
+    SETUP_STATE_TTL_SECONDS,
+    SetupStateError,
+    SetupStateExpired,
+    build_install_url,
+    create_setup_state,
+    exchange_oauth_code,
+    github_user_id_for_token,
+    install_flow_configured,
+    verify_setup_state,
     AUTH_MODE_APP,
     GitHubAuthError,
     InstallationClaimError,
@@ -1361,6 +1370,21 @@ async def claim_github_installation(
     except Exception as e:
         raise internal_error(502, "Could not verify the installation with GitHub", e)
 
+    await _link_installation(sb, org_id, record)
+    return {
+        "status": "claimed",
+        "installation_id": record["id"],
+        "account_login": record["account_login"],
+        "account_type": record["account_type"],
+    }
+
+
+async def _link_installation(sb, org_id: str, record: dict) -> None:
+    """Write a verified installation ``record`` for ``org_id``.
+
+    Shared by the claim endpoint and the install callback. An installation
+    already linked to another org is never moved (409).
+    """
     try:
         existing = await asyncio.to_thread(
             lambda: sb.table("github_installations")
@@ -1403,30 +1427,30 @@ async def claim_github_installation(
     except Exception as e:
         raise internal_error(409, "Failed to link installation", e)
 
-    return {
-        "status": "claimed",
-        "installation_id": record["id"],
-        "account_login": record["account_login"],
-        "account_type": record["account_type"],
-    }
 
-
-# --- GitHub App setup URL (install callback) ---
+# --- GitHub App install flow -------------------------------------------------
 #
-# GitHub sends the installer's browser here after an install or a permission
-# update, with ?installation_id=N&setup_action=install|update. Anyone can
-# craft that URL, and a top-level browser navigation carries neither the
-# Supabase access token (the dashboard keeps it in localStorage) nor the
-# GitHub user token, so this route cannot verify anything. It therefore
-# trusts nothing: it writes nothing, calls nothing, and only forwards a
-# validated installation id to the dashboard, which links it through the
-# verified POST /github/installations/claim (caller's org role + GitHub user
-# token proving they administer the installation's account). A spoofed id is
-# rejected there like any other claim.
+# 1. POST /github/app/install-url (org owner/admin, with the GitHub user token
+#    in X-GitHub-User-Token) returns the App's install URL carrying a signed,
+#    expiring ``state`` bound to (user, org, GitHub user id); see
+#    github_app.create_setup_state.
+# 2. The App is registered with "Request user authorization (OAuth) during
+#    installation", so after the install GitHub sends the browser to
+#    GET /github/app/setup with installation_id, setup_action, state and an
+#    OAuth code.
+# 3. The callback verifies the state, re-checks that the user is still an
+#    owner/admin of the org, exchanges the code for the installer's
+#    user-to-server token, and runs the same verification and write as
+#    POST /github/installations/claim (verify_installation_claim, which here
+#    also requires the token to belong to the GitHub user named in the state).
+#    The installation_id in the URL is only ever a lookup key into what that
+#    token can access, so a spoofed id is rejected.
 #
-# The redirect target is server configuration only (DASHBOARD_URL, or the
-# dashboard this API serves at "/"); no request parameter or header
-# influences it, so the route cannot be used as an open redirect.
+# The browser is then redirected to the dashboard with only a fixed status
+# word (and the verified installation id on success). The redirect target is
+# server configuration only (DASHBOARD_URL, or the dashboard this API serves
+# at "/"); no request parameter or header influences it, so the route cannot
+# be used as an open redirect.
 
 from fastapi.responses import RedirectResponse  # noqa: E402
 from urllib.parse import urlencode  # noqa: E402
@@ -1435,6 +1459,46 @@ GITHUB_SETUP_ACTIONS = frozenset({"install", "update", "request"})
 # GitHub ids are positive 64-bit integers; ASCII digits only (str.isdigit
 # would also accept other Unicode digits).
 _INSTALLATION_ID_RE = re.compile(r"[0-9]{1,19}")
+# GitHub OAuth codes are short opaque tokens; anything else is not forwarded.
+_OAUTH_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,256}")
+
+
+@app.post("/github/app/install-url")
+async def github_app_install_url(
+    user: dict = Depends(get_current_user),
+    x_github_user_token: Annotated[str | None, Header()] = None,
+):
+    """Return the GitHub App install URL with a signed ``state`` for the
+    caller (org owner/admin). The state expires after
+    SETUP_STATE_TTL_SECONDS seconds."""
+    if user.get("role") not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization owners and admins can install the GitHub App",
+        )
+    if not install_flow_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub App install flow is not configured "
+            "(GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET)",
+        )
+    user_token = (x_github_user_token or "").strip()
+    if not user_token:
+        raise HTTPException(
+            status_code=400, detail="Missing X-GitHub-User-Token header"
+        )
+    try:
+        github_user_id = await github_user_id_for_token(user_token)
+    except InstallationClaimError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except Exception as e:
+        raise internal_error(502, "Could not identify the GitHub user", e)
+
+    state = create_setup_state(user["user_id"], user["org_id"], github_user_id)
+    return {
+        "install_url": build_install_url(state),
+        "expires_in": SETUP_STATE_TTL_SECONDS,
+    }
 
 
 def _dashboard_base_url() -> str:
@@ -1459,36 +1523,102 @@ def _dashboard_base_url() -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _setup_callback_params(
-    installation_id: Optional[str], setup_action: Optional[str]
+def _parse_installation_id(raw: Optional[str]) -> Optional[int]:
+    if not raw or not _INSTALLATION_ID_RE.fullmatch(raw):
+        return None
+    iid = int(raw)
+    return iid if 0 < iid < 2**63 else None
+
+
+async def _org_admin_still(sb, user_id: str, org_id: str) -> bool:
+    """The state's user is still an accepted owner/admin of the state's org."""
+    result = await asyncio.to_thread(
+        lambda: sb.table("organization_members")
+        .select("role, joined_at")
+        .eq("user_id", user_id)
+        .eq("org_id", org_id)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data if isinstance(getattr(result, "data", None), list) else []
+    return bool(
+        rows and rows[0].get("joined_at") and rows[0].get("role") in ADMIN_ROLES
+    )
+
+
+_CLAIM_ERROR_OUTCOMES = {401: "unauthorized", 403: "forbidden"}
+
+
+async def _complete_app_setup(
+    installation_id: Optional[str],
+    setup_action: Optional[str],
+    state: Optional[str],
+    code: Optional[str],
 ) -> dict:
+    """Run the verified claim for a setup callback; return redirect params."""
     if setup_action not in GITHUB_SETUP_ACTIONS:
         return {"github_setup": "invalid"}
     if setup_action == "request" and not installation_id:
         # An org member asked an owner to install the App; nothing to link.
         return {"github_setup": "requested"}
-    if not installation_id or not _INSTALLATION_ID_RE.fullmatch(installation_id):
+    iid = _parse_installation_id(installation_id)
+    if iid is None:
         return {"github_setup": "invalid"}
-    iid = int(installation_id)
-    if not 0 < iid < 2**63:
+    if not state or not code:
+        # Not started from POST /github/app/install-url (or OAuth during
+        # installation is off): nothing proves who is installing, so nothing
+        # is linked. The dashboard can still link it with the verified
+        # POST /github/installations/claim.
+        return {"github_setup": "unverified"}
+    if not _OAUTH_CODE_RE.fullmatch(code):
         return {"github_setup": "invalid"}
-    return {
-        "github_setup": "claim",
-        "github_installation_id": str(iid),
-        "github_setup_action": setup_action,
-    }
+    if not install_flow_configured():
+        return {"github_setup": "unavailable"}
+    try:
+        claim = verify_setup_state(state)
+    except SetupStateError as e:
+        logger.warning(f"GitHub App setup callback with a bad state: {e}")
+        expired = isinstance(e, SetupStateExpired)
+        return {"github_setup": "expired" if expired else "invalid"}
+
+    from agents import supabase as sb
+
+    if not sb:
+        return {"github_setup": "unavailable"}
+    user_id, org_id = claim["u"], claim["o"]
+    try:
+        if not await _org_admin_still(sb, user_id, org_id):
+            return {"github_setup": "forbidden"}
+        user_token = await exchange_oauth_code(code)
+        record = await verify_installation_claim(
+            user_token, iid, expected_github_user_id=claim["g"]
+        )
+        await _link_installation(sb, org_id, record)
+    except InstallationClaimError as e:
+        logger.warning(f"GitHub App setup for org {org_id} rejected: {e.detail}")
+        return {"github_setup": _CLAIM_ERROR_OUTCOMES.get(e.status_code, "error")}
+    except HTTPException as e:
+        return {"github_setup": "conflict" if e.status_code == 409 else "error"}
+    except Exception as e:
+        logger.error(f"GitHub App setup for org {org_id} failed: {e}")
+        return {"github_setup": "error"}
+    return {"github_setup": "linked", "github_installation_id": str(record["id"])}
 
 
 @app.get("/github/app/setup", include_in_schema=False)
 async def github_app_setup_callback(
-    installation_id: Optional[str] = None, setup_action: Optional[str] = None
+    installation_id: Optional[str] = None,
+    setup_action: Optional[str] = None,
+    state: Optional[str] = None,
+    code: Optional[str] = None,
 ):
-    """GitHub App setup URL: hand the (unverified) installation id to the
-    dashboard, which claims it through the verified claim endpoint."""
-    params = _setup_callback_params(installation_id, setup_action)
+    """GitHub App setup URL: verify the signed state and the installer's
+    OAuth code, link the installation, then redirect to the dashboard."""
+    params = await _complete_app_setup(installation_id, setup_action, state, code)
     location = f"{_dashboard_base_url()}/?{urlencode(params)}"
     response = RedirectResponse(location, status_code=303)
     response.headers["Cache-Control"] = "no-store"
+    # The URL carried a single-use OAuth code; keep it out of Referer headers.
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
 

@@ -21,9 +21,10 @@ PUBLIC_PATHS = {
     # and verifies X-Hub-Signature-256 over the raw body with compare_digest.
     "/webhooks/github",
     # GitHub App setup URL: a browser redirect from GitHub, which carries no
-    # Supabase token. It writes nothing and only redirects to the configured
-    # dashboard, which links the installation through the authenticated,
-    # GitHub-verified POST /github/installations/claim.
+    # Supabase token. Instead it requires the HMAC-signed, expiring state that
+    # the authenticated POST /github/app/install-url issued (bound to the
+    # user, org and GitHub user) plus the installer's OAuth code, and verifies
+    # ownership with GitHub before linking anything.
     "/github/app/setup",
     # FastAPI's generated documentation.
     "/openapi.json",

@@ -22,10 +22,15 @@ a warning logged at import.
 """
 
 import os
+import base64
+import hashlib
+import hmac
+import secrets
 import threading
 import time
 import json
 import asyncio
+from urllib.parse import quote, urlencode
 from datetime import datetime, timezone
 import jwt
 import httpx
@@ -695,7 +700,11 @@ async def _user_get(client: httpx.AsyncClient, path: str, token: str, **params):
     )
 
 
-async def verify_installation_claim(user_token: str, installation_id: int) -> dict:
+async def verify_installation_claim(
+    user_token: str,
+    installation_id: int,
+    expected_github_user_id: Optional[int] = None,
+) -> dict:
     """Prove that the holder of ``user_token`` controls ``installation_id``.
 
     ``user_token`` is the caller's GitHub user-to-server token (the Supabase
@@ -710,6 +719,10 @@ async def verify_installation_claim(user_token: str, installation_id: int) -> di
        alone is not enough, since /user/installations also lists installations
        where the user is merely a collaborator.
 
+    When ``expected_github_user_id`` is given (the install callback), the
+    token must also belong to that GitHub user, so a token for someone else
+    cannot complete a flow another user started.
+
     Returns the github_installations columns derived from GitHub's response
     (org_id is added by the caller). Raises InstallationClaimError otherwise.
     """
@@ -718,7 +731,16 @@ async def verify_installation_claim(user_token: str, installation_id: int) -> di
         if me.status_code in (401, 403):
             raise InstallationClaimError(401, "GitHub user token is invalid or expired")
         me.raise_for_status()
-        user_login = (me.json().get("login") or "").lower()
+        me_data = me.json()
+        user_login = (me_data.get("login") or "").lower()
+        if expected_github_user_id is not None and me_data.get("id") != int(
+            expected_github_user_id
+        ):
+            raise InstallationClaimError(
+                403,
+                "The GitHub account that installed the App is not the one "
+                "that started the installation",
+            )
 
         installation = None
         for page in range(1, _USER_INSTALLATIONS_MAX_PAGES + 1):
@@ -775,6 +797,169 @@ async def verify_installation_claim(user_token: str, installation_id: int) -> di
         "events": installation.get("events") or [],
         "suspended_at": installation.get("suspended_at"),
     }
+
+
+# --- GitHub App install flow (setup URL callback) ---------------------------
+#
+# An authenticated org owner/admin asks for an install URL. It carries a
+# ``state`` that is HMAC-signed, expires, and is bound to the AutoMaintainer
+# user, their org and their GitHub user id. With "Request user authorization
+# (OAuth) during installation" enabled, GitHub sends the browser back with
+# that state, the installation id and an OAuth ``code``. The callback checks
+# the state, exchanges the code for the installer's user-to-server token and
+# runs verify_installation_claim with it, so the installation id in the URL is
+# never trusted by itself. Binding the GitHub user id stops a "link my org to
+# your installation" CSRF: a state minted by one user fails when a different
+# GitHub user completes the install.
+
+SETUP_STATE_TTL_SECONDS = 600
+_SETUP_STATE_VERSION = "v1"
+_SETUP_STATE_CONTEXT = b"automaintainer/github-app-setup-state/v1"
+GITHUB_OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
+
+
+class SetupStateError(Exception):
+    """The setup ``state`` is missing, forged, malformed or expired."""
+
+
+class SetupStateExpired(SetupStateError):
+    """A correctly signed state whose lifetime has passed."""
+
+
+def install_flow_configured() -> bool:
+    """Slug (for the install URL) and OAuth client credentials are set."""
+    return all(
+        (os.getenv(k) or "").strip()
+        for k in ("GITHUB_APP_SLUG", "GITHUB_APP_CLIENT_ID", "GITHUB_APP_CLIENT_SECRET")
+    )
+
+
+def _setup_state_key() -> bytes:
+    # Derived from the App's OAuth client secret with a fixed context, so no
+    # extra secret has to be configured and the raw client secret is never
+    # used directly as an HMAC key. Rotating the client secret invalidates
+    # states still in flight (at most SETUP_STATE_TTL_SECONDS old).
+    secret = (os.getenv("GITHUB_APP_CLIENT_SECRET") or "").strip()
+    if not secret:
+        raise SetupStateError("GitHub App client secret is not configured")
+    return hmac.new(secret.encode(), _SETUP_STATE_CONTEXT, hashlib.sha256).digest()
+
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def create_setup_state(
+    user_id: str, org_id: str, github_user_id: int, now: Optional[float] = None
+) -> str:
+    """A signed, expiring state bound to (user_id, org_id, github_user_id)."""
+    payload = {
+        "u": str(user_id),
+        "o": str(org_id),
+        "g": int(github_user_id),
+        "exp": int((time.time() if now is None else now) + SETUP_STATE_TTL_SECONDS),
+        "n": secrets.token_urlsafe(12),
+    }
+    body = _b64(json.dumps(payload, separators=(",", ":")).encode())
+    signed = f"{_SETUP_STATE_VERSION}.{body}"
+    sig = hmac.new(_setup_state_key(), signed.encode(), hashlib.sha256).digest()
+    return f"{signed}.{_b64(sig)}"
+
+
+def verify_setup_state(state: Optional[str], now: Optional[float] = None) -> dict:
+    """Return the state's payload ({u, o, g, exp, n}) or raise SetupStateError.
+
+    The signature is checked (constant time) before the payload is parsed.
+    A state is not single-use: within its lifetime it can be replayed, but it
+    only completes a link together with a fresh, single-use OAuth code issued
+    to the same GitHub user, which already proves who is installing.
+    """
+    if not state or len(state) > 1024:
+        raise SetupStateError("missing state")
+    parts = state.split(".")
+    if len(parts) != 3 or parts[0] != _SETUP_STATE_VERSION:
+        raise SetupStateError("malformed state")
+    signed = f"{parts[0]}.{parts[1]}"
+    expected = hmac.new(_setup_state_key(), signed.encode(), hashlib.sha256).digest()
+    try:
+        sig = _unb64(parts[2])
+    except Exception:
+        raise SetupStateError("malformed state")
+    if not hmac.compare_digest(sig, expected):
+        raise SetupStateError("bad state signature")
+    try:
+        payload = json.loads(_unb64(parts[1]))
+        if not isinstance(payload, dict):
+            raise ValueError
+        payload["g"] = int(payload["g"])
+        payload["exp"] = int(payload["exp"])
+        if not payload.get("u") or not payload.get("o"):
+            raise ValueError
+    except Exception:
+        raise SetupStateError("malformed state")
+    if payload["exp"] <= (time.time() if now is None else now):
+        raise SetupStateExpired("expired state")
+    return payload
+
+
+def build_install_url(state: str) -> str:
+    """https://github.com/apps/<GITHUB_APP_SLUG>/installations/new?state=..."""
+    slug = (os.getenv("GITHUB_APP_SLUG") or "").strip()
+    return (
+        f"https://github.com/apps/{quote(slug, safe='')}/installations/new?"
+        f"{urlencode({'state': state})}"
+    )
+
+
+async def github_user_id_for_token(user_token: str) -> int:
+    """The numeric GitHub id of the user behind ``user_token``."""
+    async with _user_api_client() as client:
+        me = await _user_get(client, "/user", user_token)
+    if me.status_code in (401, 403):
+        raise InstallationClaimError(401, "GitHub user token is invalid or expired")
+    me.raise_for_status()
+    uid = me.json().get("id")
+    if not isinstance(uid, int) or isinstance(uid, bool):
+        raise InstallationClaimError(502, "GitHub did not return a user id")
+    return uid
+
+
+def _oauth_client() -> httpx.AsyncClient:
+    """HTTP client for the OAuth code exchange (patched in tests)."""
+    return httpx.AsyncClient(timeout=15.0)
+
+
+async def exchange_oauth_code(code: str) -> str:
+    """Exchange an install-time OAuth ``code`` for a user-to-server token.
+
+    Raises InstallationClaimError (401) when GitHub rejects the code; codes
+    are single-use and short-lived, so a replayed or stale one fails here.
+    """
+    async with _oauth_client() as client:
+        resp = await client.post(
+            GITHUB_OAUTH_TOKEN_URL,
+            data={
+                "client_id": (os.getenv("GITHUB_APP_CLIENT_ID") or "").strip(),
+                "client_secret": (os.getenv("GITHUB_APP_CLIENT_SECRET") or "").strip(),
+                "code": code,
+            },
+            headers={"Accept": "application/json"},
+        )
+    if resp.status_code != 200:
+        raise InstallationClaimError(502, "GitHub OAuth code exchange failed")
+    try:
+        token = (resp.json() or {}).get("access_token")
+    except ValueError:
+        token = None
+    if not token:
+        # GitHub answers 200 with {"error": "bad_verification_code"} for an
+        # invalid, expired or already-used code.
+        raise InstallationClaimError(401, "GitHub rejected the authorization code")
+    return token
 
 
 async def handle_github_webhook(

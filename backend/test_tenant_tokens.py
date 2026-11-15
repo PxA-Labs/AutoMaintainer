@@ -7,6 +7,7 @@ through httpx.MockTransport, and the database is an in-memory double.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -488,7 +489,9 @@ def test_celery_task_passes_installation_id_to_the_real_run_agent_loop():
 # --- installation claim -----------------------------------------------------
 
 
-def github_api(installations, login="alice", memberships=None, user_status=200):
+def github_api(
+    installations, login="alice", memberships=None, user_status=200, user_id=42
+):
     """MockTransport for the user-token GitHub endpoints."""
     memberships = memberships or {}
     seen = []
@@ -498,7 +501,7 @@ def github_api(installations, login="alice", memberships=None, user_status=200):
         assert request.headers["authorization"] == "Bearer gh-user-token"
         path = request.url.path
         if path == "/user":
-            return httpx.Response(user_status, json={"login": login})
+            return httpx.Response(user_status, json={"login": login, "id": user_id})
         if path == "/user/installations":
             return httpx.Response(
                 200,
@@ -656,13 +659,73 @@ def test_reclaim_by_same_org_updates_in_place(claim):
     assert writes(store, "github_installations", "insert") == []
 
 
-# --- GitHub App setup URL (install callback) --------------------------------
+# --- GitHub App install flow (install URL + setup callback) -----------------
+
+
+@pytest.fixture
+def install_flow(monkeypatch, claim):
+    """Install flow configured; org-a's owner 'u' (GitHub user 42) can link.
+
+    ``oauth`` records the OAuth code exchanges; ``oauth_result`` controls the
+    token endpoint's answer.
+    """
+    monkeypatch.setenv("GITHUB_APP_SLUG", "auto-maintainer")
+    monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv1.client")
+    monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("DASHBOARD_URL", "https://app.example.com")
+    exchanged = []
+    answer = {"status": 200, "json": {"access_token": "gh-user-token"}}
+
+    def handler(request: httpx.Request):
+        from urllib.parse import parse_qs
+
+        assert str(request.url) == github_app.GITHUB_OAUTH_TOKEN_URL
+        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        exchanged.append(form)
+        return httpx.Response(answer["status"], json=answer["json"])
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        github_app, "_oauth_client", lambda: httpx.AsyncClient(transport=transport)
+    )
+
+    def setup(members=None, **kw):
+        store = claim.setup(**kw)
+        store["organization_members"] = (
+            members
+            if members is not None
+            else [
+                {
+                    "user_id": "u",
+                    "org_id": "org-a",
+                    "role": "owner",
+                    "joined_at": "2026-01-01T00:00:00Z",
+                }
+            ]
+        )
+        return store
+
+    return SimpleNamespace(
+        setup=setup, api=claim.api, exchanged=exchanged, answer=answer
+    )
+
+
+def state_for(user_id="u", org_id="org-a", github_user_id=42, now=None):
+    return github_app.create_setup_state(user_id, org_id, github_user_id, now=now)
 
 
 def setup_callback(query, **headers):
     return client.get(
         f"/github/app/setup{query}", headers=headers, follow_redirects=False
     )
+
+
+def install_callback(iid=555, state=None, code="oauth-code", action="install"):
+    from urllib.parse import urlencode
+
+    params = {"installation_id": iid, "setup_action": action, "code": code}
+    params["state"] = state_for() if state is None else state
+    return setup_callback("?" + urlencode(params))
 
 
 def redirect_params(response):
@@ -673,12 +736,65 @@ def redirect_params(response):
     return location, {k: v[0] for k, v in parse_qs(location.query).items()}
 
 
-def test_setup_callback_forwards_the_installation_to_the_dashboard(monkeypatch, claim):
-    monkeypatch.setenv("DASHBOARD_URL", "https://app.example.com")
-    store = claim.setup()
-    seen = claim.api([installation()])
+def admin_installation():
+    return dict(
+        installations=[installation()],
+        memberships={"acme": {"state": "active", "role": "admin"}},
+    )
 
-    r = setup_callback("?installation_id=555&setup_action=install")
+
+def test_install_url_carries_a_state_bound_to_the_caller(install_flow):
+    from urllib.parse import parse_qs, urlsplit
+
+    install_flow.setup()
+    install_flow.api(**admin_installation())
+
+    r = client.post(
+        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
+    )
+
+    assert r.status_code == 200, r.text
+    url = urlsplit(r.json()["install_url"])
+    assert (url.netloc, url.path) == (
+        "github.com",
+        "/apps/auto-maintainer/installations/new",
+    )
+    [state] = parse_qs(url.query)["state"]
+    payload = github_app.verify_setup_state(state)
+    assert (payload["u"], payload["o"], payload["g"]) == ("u", "org-a", 42)
+    assert r.json()["expires_in"] == github_app.SETUP_STATE_TTL_SECONDS
+
+
+@pytest.mark.parametrize("role", ["member", "viewer", None])
+def test_install_url_requires_org_owner_or_admin(install_flow, role):
+    install_flow.setup(role=role)
+    seen = install_flow.api([])
+    r = client.post(
+        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
+    )
+    assert r.status_code == 403
+    assert seen == []
+
+
+def test_install_url_requires_github_user_token(install_flow):
+    install_flow.setup()
+    assert client.post("/github/app/install-url").status_code == 400
+
+
+def test_install_url_is_503_when_the_flow_is_not_configured(install_flow, monkeypatch):
+    install_flow.setup()
+    monkeypatch.delenv("GITHUB_APP_CLIENT_SECRET")
+    r = client.post(
+        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
+    )
+    assert r.status_code == 503
+
+
+def test_setup_callback_links_a_verified_installation(install_flow):
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+
+    r = install_callback()
 
     location, params = redirect_params(r)
     assert (location.scheme, location.netloc, location.path) == (
@@ -686,32 +802,189 @@ def test_setup_callback_forwards_the_installation_to_the_dashboard(monkeypatch, 
         "app.example.com",
         "/",
     )
-    assert params == {
-        "github_setup": "claim",
-        "github_installation_id": "555",
-        "github_setup_action": "install",
-    }
+    assert params == {"github_setup": "linked", "github_installation_id": "555"}
     assert r.headers["cache-control"] == "no-store"
-    # The id is not trusted: nothing is written and GitHub is not asked.
-    assert writes(store, "github_installations") == []
-    assert seen == []
+    assert r.headers["referrer-policy"] == "no-referrer"
+    [row] = writes(store, "github_installations", "insert")
+    assert row["id"] == 555 and row["org_id"] == "org-a"
+    [form] = install_flow.exchanged
+    assert form == {
+        "client_id": "Iv1.client",
+        "client_secret": "client-secret",
+        "code": "oauth-code",
+    }
 
 
-def test_spoofed_installation_id_from_the_callback_cannot_be_claimed(
-    monkeypatch, claim
-):
-    """An attacker crafts the setup URL with someone else's installation id.
-    The callback links nothing; the dashboard's follow-up claim is verified
-    with GitHub and rejected because the user cannot access that id."""
-    store = claim.setup()
-    claim.api([installation(iid=111)])  # the user's own installation
-
-    _, params = redirect_params(
-        setup_callback("?installation_id=999&setup_action=install")
+def test_setup_callback_reclaim_by_same_org_updates_in_place(install_flow):
+    store = install_flow.setup(
+        installations=[{"id": 555, "org_id": "org-a", "account_login": "old"}]
     )
-    r = post_claim(int(params["github_installation_id"]))
+    install_flow.api(**admin_installation())
+    _, params = redirect_params(install_callback())
+    assert params["github_setup"] == "linked"
+    [row] = store["github_installations"]
+    assert row["account_login"] == "acme"
 
-    assert r.status_code == 403
+
+def test_setup_callback_never_moves_installation_from_another_org(install_flow):
+    store = install_flow.setup(
+        installations=[{"id": 555, "org_id": "org-b", "account_login": "acme"}]
+    )
+    install_flow.api(**admin_installation())
+    _, params = redirect_params(install_callback())
+    assert params == {"github_setup": "conflict"}
+    assert writes(store, "github_installations") == []
+    assert store["github_installations"][0]["org_id"] == "org-b"
+
+
+def test_spoofed_installation_id_is_not_linked(install_flow):
+    """A valid state and code, but an installation id the installer's token
+    cannot access (someone else's installation): nothing is linked."""
+    store = install_flow.setup()
+    install_flow.api(
+        [installation(iid=111)],
+        memberships={"acme": {"state": "active", "role": "admin"}},
+    )
+
+    _, params = redirect_params(install_callback(iid=999))
+
+    assert params == {"github_setup": "forbidden"}
+    assert writes(store, "github_installations") == []
+
+
+def test_installation_of_an_org_the_installer_does_not_own_is_not_linked(
+    install_flow,
+):
+    store = install_flow.setup()
+    install_flow.api(
+        [installation()], memberships={"acme": {"state": "active", "role": "member"}}
+    )
+    _, params = redirect_params(install_callback())
+    assert params == {"github_setup": "forbidden"}
+    assert writes(store, "github_installations") == []
+
+
+def _tampered(state):
+    version, body, sig = state.split(".")
+    payload = json.loads(github_app._unb64(body))
+    payload["o"] = "org-evil"
+    forged = github_app._b64(json.dumps(payload).encode())
+    return f"{version}.{forged}.{sig}"
+
+
+@pytest.mark.parametrize(
+    "make_state",
+    [
+        lambda: "not-a-state",
+        lambda: "v1.e30.AAAA",
+        lambda: _tampered(state_for()),
+        # Signed with a different client secret (another deployment).
+        lambda: "v1." + state_for().split(".", 1)[1][:-4] + "AAAA",
+        lambda: "v2." + state_for().split(".", 1)[1],
+        lambda: "x" * 2000,
+    ],
+    ids=["garbage", "unsigned", "tampered-org", "bad-signature", "version", "huge"],
+)
+def test_forged_state_links_nothing(install_flow, make_state):
+    store = install_flow.setup()
+    seen = install_flow.api(**admin_installation())
+
+    _, params = redirect_params(install_callback(state=make_state()))
+
+    assert params == {"github_setup": "invalid"}
+    assert install_flow.exchanged == []  # the code is not even redeemed
+    assert seen == []
+    assert writes(store, "github_installations") == []
+
+
+def test_state_signed_with_another_secret_is_rejected(install_flow, monkeypatch):
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+    monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "other-secret")
+    other = state_for()
+    monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
+
+    _, params = redirect_params(install_callback(state=other))
+
+    assert params == {"github_setup": "invalid"}
+    assert writes(store, "github_installations") == []
+
+
+def test_expired_state_links_nothing(install_flow):
+    import time as _time
+
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+    old = state_for(now=_time.time() - github_app.SETUP_STATE_TTL_SECONDS - 1)
+
+    _, params = redirect_params(install_callback(state=old))
+
+    assert params == {"github_setup": "expired"}
+    assert install_flow.exchanged == []
+    assert writes(store, "github_installations") == []
+
+
+def test_state_from_another_github_user_links_nothing(install_flow):
+    """Login-CSRF: Mallory mints a state for her org and gets Alice to
+    install with it. Alice's OAuth token is not Mallory's GitHub user, so
+    Alice's installation is not linked to Mallory's org."""
+    store = install_flow.setup()
+    install_flow.api(**admin_installation(), user_id=42)
+
+    _, params = redirect_params(install_callback(state=state_for(github_user_id=7)))
+
+    assert params == {"github_setup": "forbidden"}
+    assert writes(store, "github_installations") == []
+
+
+def test_state_for_a_user_who_is_not_an_org_admin_links_nothing(install_flow):
+    """A state for a user who is not (or no longer) an owner/admin of the
+    org it names: e.g. another user's state, or a demoted admin."""
+    store = install_flow.setup(
+        members=[
+            {"user_id": "u", "org_id": "org-a", "role": "member", "joined_at": "x"},
+            {"user_id": "v", "org_id": "org-a", "role": "admin", "joined_at": None},
+        ]
+    )
+    install_flow.api(**admin_installation())
+
+    for state in (state_for(), state_for(user_id="v"), state_for(org_id="org-b")):
+        _, params = redirect_params(install_callback(state=state))
+        assert params == {"github_setup": "forbidden"}
+    assert install_flow.exchanged == []
+    assert writes(store, "github_installations") == []
+
+
+def test_rejected_oauth_code_links_nothing(install_flow):
+    store = install_flow.setup()
+    seen = install_flow.api(**admin_installation())
+    install_flow.answer["json"] = {"error": "bad_verification_code"}
+
+    _, params = redirect_params(install_callback())
+
+    assert params == {"github_setup": "unauthorized"}
+    assert seen == []
+    assert writes(store, "github_installations") == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?installation_id=555&setup_action=install",
+        "?installation_id=555&setup_action=install&code=c",
+        "?installation_id=555&setup_action=update&state=s",
+    ],
+)
+def test_callback_without_state_and_code_is_not_trusted(install_flow, query):
+    """An id alone (e.g. a crafted URL, or OAuth during install turned off)
+    links nothing; it is not forwarded either."""
+    store = install_flow.setup()
+    seen = install_flow.api(**admin_installation())
+
+    _, params = redirect_params(setup_callback(query))
+
+    assert params == {"github_setup": "unverified"}
+    assert seen == [] and install_flow.exchanged == []
     assert writes(store, "github_installations") == []
 
 
@@ -725,12 +998,13 @@ def test_spoofed_installation_id_from_the_callback_cannot_be_claimed(
         "?installation_id=%EF%BC%95&setup_action=install",  # fullwidth digit
         "?installation_id=5%0d%0aSet-Cookie:x=1&setup_action=install",
         "?installation_id=5&setup_action=delete",
+        "?installation_id=5&setup_action=install&state=s&code=a%0d%0ab",
         "?installation_id=5",
         "",
     ],
 )
-def test_setup_callback_rejects_malformed_input_without_echoing_it(claim, query):
-    store = claim.setup()
+def test_setup_callback_rejects_malformed_input_without_echoing_it(install_flow, query):
+    store = install_flow.setup()
     r = setup_callback(query)
     location, params = redirect_params(r)
     assert params == {"github_setup": "invalid"}
@@ -739,39 +1013,46 @@ def test_setup_callback_rejects_malformed_input_without_echoing_it(claim, query)
     assert writes(store, "github_installations") == []
 
 
-def test_setup_callback_for_an_install_request_has_nothing_to_link(claim):
-    claim.setup()
+def test_setup_callback_for_an_install_request_has_nothing_to_link(install_flow):
+    install_flow.setup()
     _, params = redirect_params(setup_callback("?setup_action=request"))
     assert params == {"github_setup": "requested"}
 
 
 @pytest.mark.parametrize(
-    "query",
+    "extra",
     [
         "&redirect_uri=https://evil.example",
         "&next=//evil.example",
         "&return_to=https%3A%2F%2Fevil.example",
-        "&state=https://evil.example",
-        "&code=oauth-code",
     ],
 )
-def test_setup_callback_is_not_an_open_redirect(monkeypatch, claim, query):
-    monkeypatch.setenv("DASHBOARD_URL", "https://app.example.com")
-    claim.setup()
+@pytest.mark.parametrize("valid", [True, False], ids=["linked", "rejected"])
+def test_setup_callback_is_not_an_open_redirect(install_flow, extra, valid):
+    from urllib.parse import urlencode
+
+    install_flow.setup()
+    install_flow.api(**admin_installation())
+    state = state_for() if valid else "https://evil.example"
+    query = urlencode(
+        {
+            "installation_id": 555,
+            "setup_action": "install",
+            "state": state,
+            "code": "oauth-code",
+        }
+    )
     r = setup_callback(
-        f"?installation_id=555&setup_action=install{query}",
+        f"?{query}{extra}",
         host="evil.example",
         **{"x-forwarded-host": "evil.example", "referer": "https://evil.example/"},
     )
     location, params = redirect_params(r)
     assert location.netloc == "app.example.com"
     assert "evil" not in r.headers["location"]
-    # Extra parameters (including an OAuth code) are never forwarded.
-    assert set(params) == {
-        "github_setup",
-        "github_installation_id",
-        "github_setup_action",
-    }
+    # Never the state or the OAuth code, nor any extra parameter.
+    assert set(params) <= {"github_setup", "github_installation_id"}
+    assert params["github_setup"] == ("linked" if valid else "invalid")
 
 
 @pytest.mark.parametrize(
@@ -779,11 +1060,12 @@ def test_setup_callback_is_not_an_open_redirect(monkeypatch, claim, query):
     ["", "javascript:alert(1)", "https://app.example.com/path", "//evil.example"],
 )
 def test_setup_callback_without_a_valid_dashboard_url_stays_on_this_origin(
-    monkeypatch, claim, dashboard_url
+    monkeypatch, install_flow, dashboard_url
 ):
+    install_flow.setup()
+    install_flow.api(**admin_installation())
     monkeypatch.setenv("DASHBOARD_URL", dashboard_url)
-    claim.setup()
-    r = setup_callback("?installation_id=555&setup_action=install", host="evil.example")
+    r = install_callback()
     assert r.headers["location"].startswith("/?")
     assert not r.headers["location"].startswith("//")
 
