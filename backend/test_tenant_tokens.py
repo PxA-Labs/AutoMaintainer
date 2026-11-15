@@ -9,12 +9,14 @@ through httpx.MockTransport, and the database is an in-memory double.
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from postgrest.exceptions import APIError
 
 import agents
 import github_app
@@ -701,3 +703,65 @@ async def test_sync_never_reassigns_a_repository_owned_by_another_org(caplog):
     assert by_id[3]["org_id"] == "org-a"
     assert [w["id"] for w in writes(store, "repositories", "upsert")] == [2, 3]
     assert "already belongs to org org-victim" in caplog.text
+
+
+class ImmutableOrgRows(Rows):
+    """Rows plus the repositories_org_immutable trigger: an upsert that
+    would change an existing repository's org_id fails like PostgREST."""
+
+    def execute(self):
+        kind, row = self.op
+        if self.table == "repositories" and kind == "upsert":
+            for existing in self.store.get("repositories", []):
+                if existing["id"] == row["id"] and existing["org_id"] != row["org_id"]:
+                    raise APIError(
+                        {
+                            "message": "repository_org_immutable: repository "
+                            f"{row['id']} belongs to another organization",
+                            "code": "23514",
+                        }
+                    )
+        return super().execute()
+
+
+@pytest.mark.asyncio
+async def test_sync_race_is_stopped_by_the_database_guard(monkeypatch, caplog):
+    """Another org's row appears after this sync's ownership read but before
+    its upsert: the database rejects the reassignment and sync skips it."""
+    store = {"repositories": [{"id": 1, "org_id": "org-victim", "full_name": "v/x"}]}
+    sb = MagicMock()
+    sb.table.side_effect = lambda name: ImmutableOrgRows(store, name)
+    # The ownership read ran before the victim's row was inserted.
+    monkeypatch.setattr(
+        github_app, "_existing_repository_orgs", AsyncMock(return_value={})
+    )
+    repos = [_gh_repo(1, "v/x"), _gh_repo(2, "a/mine")]
+
+    with patch.object(
+        github_app, "get_installation_repositories", new=AsyncMock(return_value=repos)
+    ), caplog.at_level(logging.WARNING, logger="github_app"):
+        synced = await github_app.sync_installation_repositories(sb, 7, "org-a")
+
+    assert synced == 1
+    by_id = {r["id"]: r for r in store["repositories"]}
+    assert by_id[1]["org_id"] == "org-victim"
+    assert by_id[2]["org_id"] == "org-a"
+    assert "another org linked it concurrently" in caplog.text
+    # A conflict is expected under concurrency, not an error.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_schema_guard_against_repository_org_change_is_re_runnable():
+    sql = (Path(__file__).resolve().parent.parent / "supabase_schema.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "CREATE OR REPLACE FUNCTION prevent_repository_org_change()" in sql
+    drop = sql.index(
+        "DROP TRIGGER IF EXISTS repositories_org_immutable ON repositories"
+    )
+    create = sql.index(
+        "CREATE TRIGGER repositories_org_immutable BEFORE UPDATE OF org_id"
+    )
+    assert drop < create
+    assert "NEW.org_id IS DISTINCT FROM OLD.org_id" in sql
+    assert github_app.REPOSITORY_ORG_CONFLICT_MARKER + ":" in sql

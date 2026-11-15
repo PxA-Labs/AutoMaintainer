@@ -566,10 +566,12 @@ async def sync_installation_repositories(
     without this check a second installation covering the same repository
     would reassign another tenant's repository (and its runs) to this org.
 
-    Known gap: the ownership read and the upsert are two statements, so a row
-    inserted by another org between them could still be overwritten. Closing
-    that needs a database-side guard (a unique (installation, repo) key or an
-    immutable org_id), which epic #412 tracks.
+    The ownership read and the upsert are two statements, so another org's
+    sync can insert the row in between. The database closes that race: the
+    repositories_org_immutable trigger (supabase_schema.sql) rejects any
+    update that changes org_id, so the losing upsert fails, is logged as a
+    conflict and is not counted. The read above stays as the cheap common
+    path and keeps the expected case out of the error log.
     """
     repos = await get_installation_repositories(installation_id)
     synced = 0
@@ -619,9 +621,31 @@ async def sync_installation_repositories(
             )
             synced += 1
         except Exception as e:
+            if _is_repository_org_conflict(e):
+                logger.warning(
+                    "Not syncing repo %s (id %s) from installation %s into org %s: "
+                    "another org linked it concurrently (repository_org_immutable)",
+                    repo_data["full_name"],
+                    repo_data["id"],
+                    installation_id,
+                    org_id,
+                )
+                continue
             logger.error(f"Failed to sync repo {repo_data['full_name']}: {e}")
 
     return synced
+
+
+# Raised by the repositories_org_immutable trigger (supabase_schema.sql).
+REPOSITORY_ORG_CONFLICT_MARKER = "repository_org_immutable"
+
+
+def _is_repository_org_conflict(exc: Exception) -> bool:
+    """True if ``exc`` is the database refusing to move a repository to
+    another org. postgrest-py's APIError carries the message in ``message``
+    (and in str()); the check accepts either."""
+    text = f"{getattr(exc, 'message', '') or ''} {exc}"
+    return REPOSITORY_ORG_CONFLICT_MARKER in text
 
 
 async def _existing_repository_orgs(supabase_client, repo_ids: list) -> dict:
