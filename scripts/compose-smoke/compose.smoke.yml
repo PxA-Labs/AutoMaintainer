@@ -1,0 +1,80 @@
+# Compose override for the end-to-end smoke test ONLY (scripts/compose-smoke.sh).
+#
+#   docker compose -f docker-compose.yml -f scripts/compose-smoke/compose.smoke.yml ...
+#
+# Never use this file for a deployment: it turns on AUTH_DEV_BYPASS (every
+# request is trusted as the dev user) and points the stack at an in-memory
+# fake of Supabase's REST API instead of a real database. The base
+# docker-compose.yml keeps its production defaults; nothing here leaks into it.
+#
+# Relative paths resolve against the project directory (the repository root,
+# where docker-compose.yml lives), not against this file.
+
+x-smoke-env: &smoke-env
+  # AUTH_DEV_BYPASS is refused when ENVIRONMENT=production (the API will not
+  # even start), so the smoke test has to run in development mode.
+  ENVIRONMENT: development
+  AUTH_DEV_BYPASS: "true"
+  # In-network fake PostgREST (scripts/compose-smoke/fake_supabase.py). The key
+  # is a placeholder, not a credential: the fake server ignores it.
+  SUPABASE_URL: http://fake-supabase:54321
+  SUPABASE_SERVICE_KEY: smoke-test-placeholder-not-a-secret
+  # App mode without App credentials: the run fails at its first GitHub step
+  # with "GitHub credentials unavailable" before any network call to GitHub or
+  # the LLM provider. That failure is the terminal state the test waits for.
+  GITHUB_AUTH_MODE: app
+  # Belt and braces next to `env_file: !reset []` below: real credentials from
+  # a developer's shell or backend/.env must never reach the smoke stack.
+  GITHUB_APP_ID: ""
+  GITHUB_APP_PRIVATE_KEY: ""
+  GITHUB_APP_PRIVATE_KEY_PATH: ""
+  GITHUB_TOKEN: ""
+  GROQ_API_KEY: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+services:
+  api:
+    # Do not read backend/.env: a developer's file may hold real credentials.
+    env_file: !reset []
+    environment: *smoke-env
+    depends_on:
+      fake-supabase:
+        condition: service_healthy
+
+  worker:
+    env_file: !reset []
+    environment: *smoke-env
+    depends_on:
+      fake-supabase:
+        condition: service_healthy
+
+  beat:
+    env_file: !reset []
+    environment: *smoke-env
+    depends_on:
+      fake-supabase:
+        condition: service_healthy
+
+  fake-supabase:
+    # Reuses the application image for its Python interpreter; the server
+    # itself is standard library only and is mounted read-only.
+    image: automaintainer:local
+    init: true
+    user: "10001:10001"
+    working_dir: /smoke
+    command: ["python", "/smoke/fake_supabase.py"]
+    environment:
+      FAKE_SUPABASE_PORT: "54321"
+      # The repository /start validates against. org_id is the default
+      # AUTH_DEV_ORG_ID that the dev bypass assigns to every request.
+      FAKE_SUPABASE_SEED: >-
+        {"repositories": [{"id": 4242, "org_id": "00000000-0000-0000-0000-000000000002",
+        "full_name": "smoke-test/fixture-repo", "github_installation_id": 4242}]}
+    volumes:
+      - ./scripts/compose-smoke:/smoke:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:54321/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Not published to the host: only the app containers talk to it.
