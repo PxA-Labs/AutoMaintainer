@@ -377,7 +377,11 @@ async def test_missing_target_issue_aborts(offline, monkeypatch):
     async def llm(s, u, estimated_tokens=3000):
         if "Architect" in s:
             return "Fix app.py:1-5"
-        return "VERDICT: APPROVE" if ("Maintainer" in s or "Product" in s) else "x = 2"
+        return (
+            '{"verdict": "approve"}'
+            if ("Maintainer" in s or "Product" in s)
+            else "x = 2"
+        )
 
     monkeypatch.setattr(agents, "run_llm_with_tools", llm)
     result = await agents.run_agent_loop("o/r", target_issue=99999, run_id="r")
@@ -396,7 +400,11 @@ async def test_target_that_is_a_pull_request_aborts(offline, monkeypatch):
     )
 
     async def llm(s, u, estimated_tokens=3000):
-        return "VERDICT: APPROVE" if ("Maintainer" in s or "Product" in s) else "x = 2"
+        return (
+            '{"verdict": "approve"}'
+            if ("Maintainer" in s or "Product" in s)
+            else "x = 2"
+        )
 
     monkeypatch.setattr(agents, "run_llm_with_tools", llm)
     result = await agents.run_agent_loop("o/r", target_issue=5, run_id="r")

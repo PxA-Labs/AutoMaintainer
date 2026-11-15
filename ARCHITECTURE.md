@@ -150,8 +150,9 @@ plus `requested_changes` for the Maintainer (`decision` is accepted as an alias
 of `verdict`). An approval that lists blocking issues is invalid. A reply that
 does not parse or validate gets one corrective retry; a second failure is a
 rejection, so the step fails closed. The older `VERDICT: APPROVE` /
-`VERDICT: REJECT` first line is still accepted, but it is rejected when the
-text after it carries another decision.
+`VERDICT: REJECT` line format is no longer accepted: such a reply is treated
+like any other non-JSON reply, and a run checkpointed with a legacy verdict
+resumes as a rejection.
 
 ### Merge policy
 
@@ -374,7 +375,9 @@ regression signal, not a measure of quality in production.
 
 ## Observability
 
-Source: `backend/observability.py`.
+Source: `backend/observability.py`. The metric catalogue (names, the bounded
+label set of each, and why ids stay out of labels) is in
+[docs/OBSERVABILITY.md](./docs/OBSERVABILITY.md).
 
 - **Tracing**: OpenTelemetry with FastAPI instrumentation. Spans go to OTLP
   when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and to the console outside

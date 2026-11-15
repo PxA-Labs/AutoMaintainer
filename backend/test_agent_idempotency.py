@@ -19,7 +19,7 @@ from events import NullEmitter
 
 RUN_ID = "3f2c9a1e-7b4d-4c8e-9a01-5d6e7f809abc"
 CODE = "x = 2\n"
-APPROVE = "VERDICT: APPROVE\nLooks correct."
+APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 
 
 class WorkerCrash(BaseException):
@@ -393,7 +393,12 @@ async def test_rerun_continues_maintainer_iterations_from_checkpoint(
 ):
     """A crash after a "changes requested" review resumes at the next
     iteration instead of starting the review loop again."""
-    reviews = iter(["VERDICT: REJECT\nHandle None.", APPROVE])
+    reviews = iter(
+        [
+            '{"verdict": "reject", "reasons": ["Handle None."], "blocking_issues": ["Handle None."]}',
+            APPROVE,
+        ]
+    )
     codes = iter(["x = 2\n", "x = 3\n"])
     real_llm = agents.run_llm_with_tools
 

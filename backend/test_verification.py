@@ -524,7 +524,7 @@ def _maintainer_setup(monkeypatch, statuses):
     monkeypatch.setattr(
         agents,
         "run_llm_with_tools",
-        AsyncMock(return_value="VERDICT: APPROVE\nLooks correct."),
+        AsyncMock(return_value='{"verdict": "approve", "reasons": ["Looks correct."]}'),
     )
     return pr
 
