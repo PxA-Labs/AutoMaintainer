@@ -365,6 +365,7 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
 
 async def require_repo_access(
     repo_name: str,
+    request: Request,
     org_id: str = Depends(get_org_id),
     user_id: str = Depends(get_user_id),
 ) -> str:
@@ -374,14 +375,42 @@ async def require_repo_access(
     handlers: FastAPI resolves ``repo_name`` from the path and awaits this
     before the endpoint runs. Returns the caller's org_id so handlers can
     scope filesystem and database access to the tenant.
+
+    The repository id found by the same lookup is kept on the request for
+    _repo_dir_for_request, so keying the clone by id costs no second query.
     """
     from agents import supabase as agents_supabase
 
     if not agents_supabase:
         raise HTTPException(status_code=503, detail="Database not configured")
 
-    await validate_repo_access(repo_name, org_id, user_id, agents_supabase)
+    repository_id, _ = await validate_repo_access(
+        repo_name, org_id, user_id, agents_supabase
+    )
+    _remember_repository_id(request, repo_name, repository_id)
     return org_id
+
+
+def _remember_repository_id(request: Request, repo_name: str, repository_id) -> None:
+    ids = getattr(request.state, "repository_ids", None)
+    if ids is None:
+        ids = {}
+        request.state.repository_ids = ids
+    ids[repo_name] = repository_id
+
+
+def _repo_dir_for_request(request: Request, repo_name: str) -> Path:
+    """The local clone of ``repo_name`` for a route guarded by require_repo_access.
+
+    Keyed by the repository id that require_repo_access looked up (org-scoped,
+    ``repositories.id``), which is the id the agent run is given
+    (``runs.repository_id``), so the IDE reads the clone the agent wrote.
+    require_repo_access always finds an id or refuses the request, so the
+    name-keyed fallback is only reached when that dependency did not run
+    (tests that override it).
+    """
+    ids = getattr(request.state, "repository_ids", None) or {}
+    return get_safe_repo_dir(repo_name, ids.get(repo_name))
 
 
 async def require_repo_write_access(
@@ -1062,6 +1091,7 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(
     repo_name: str,
+    request: Request,
     payload: FileUpdateRequest,
     org_id: str = Depends(require_repo_write_access),
 ):
@@ -1076,7 +1106,7 @@ async def update_repo_file(
     # Validate the local mirror path BEFORE any GitHub call. Checking it only
     # after the commit meant a path the workspace refuses (.git/..., symlink
     # escapes) still got an upstream commit, followed by a 500.
-    repo_dir = get_safe_repo_dir(repo_name)
+    repo_dir = _repo_dir_for_request(request, repo_name)
     target_path = get_safe_target_path(repo_dir, payload.file_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
@@ -1107,6 +1137,7 @@ async def update_repo_file(
 @app.post("/repo/{repo_name:path}/file/create")
 async def create_repo_file(
     repo_name: str,
+    request: Request,
     payload: FileCreateRequest,
     org_id: str = Depends(require_repo_write_access),
 ):
@@ -1125,7 +1156,7 @@ async def create_repo_file(
         actual_content = ""
 
     # Validate the local mirror path BEFORE committing upstream (see update).
-    repo_dir = get_safe_repo_dir(repo_name)
+    repo_dir = _repo_dir_for_request(request, repo_name)
     target_path = get_safe_target_path(repo_dir, actual_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
@@ -1748,7 +1779,7 @@ async def _authorize_terminal_cwd(
     if not agents_supabase:
         return False, None
     try:
-        await validate_repo_access(
+        repository_id, _ = await validate_repo_access(
             repo_name, user.get("org_id"), user.get("user_id"), agents_supabase
         )
     except Exception:
@@ -1756,7 +1787,8 @@ async def _authorize_terminal_cwd(
         return False, None
 
     try:
-        repo_dir = get_safe_repo_dir(repo_name)
+        # Keyed by the repository id like the agent's clone (runs.repository_id).
+        repo_dir = get_safe_repo_dir(repo_name, repository_id)
     except HTTPException:
         return False, None
     real_dir = os.path.realpath(str(repo_dir))
@@ -1911,9 +1943,10 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
 @app.get("/repo/{repo_name:path}/tree")
 def get_repo_tree(
     repo_name: str,
+    request: Request,
     org_id: str = Depends(require_repo_access),
 ):
-    repo_dir = get_safe_repo_dir(repo_name)
+    repo_dir = _repo_dir_for_request(request, repo_name)
 
     if not os.path.exists(repo_dir):
         raise HTTPException(
@@ -1966,10 +1999,11 @@ def get_repo_tree(
 @app.get("/repo/{repo_name:path}/search")
 def search_repo(
     repo_name: str,
+    request: Request,
     q: str,
     org_id: str = Depends(require_repo_access),
 ):
-    repo_dir = get_safe_repo_dir(repo_name)
+    repo_dir = _repo_dir_for_request(request, repo_name)
 
     if not repo_dir.exists():
         raise HTTPException(status_code=404, detail="Repo not found locally")
@@ -2024,10 +2058,11 @@ def search_repo(
 @app.get("/repo/{repo_name:path}/file")
 def get_repo_file(
     repo_name: str,
+    request: Request,
     file_path: str,
     org_id: str = Depends(require_repo_access),
 ):
-    repo_dir = get_safe_repo_dir(repo_name)
+    repo_dir = _repo_dir_for_request(request, repo_name)
     target_path = get_safe_target_path(repo_dir, file_path)
 
     import os, stat

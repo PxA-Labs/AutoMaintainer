@@ -225,8 +225,9 @@ def _agent_loop_kwargs(**kwargs) -> dict:
     Drop keyword arguments run_agent_loop doesn't accept (yet).
 
     github_installation_id is passed through so runs can act with the
-    installation's credentials; older run_agent_loop signatures don't take
-    it, so filter by signature rather than risk a TypeError mid-task.
+    installation's credentials, and repository_id so the run's clone is keyed
+    like the IDE routes key it; older run_agent_loop signatures don't take
+    them, so filter by signature rather than risk a TypeError mid-task.
     """
     try:
         params = inspect.signature(run_agent_loop).parameters
@@ -397,6 +398,7 @@ def _execute_agent_run(
                     target_issue=target_issue_number,
                     run_id=run_id,
                     github_installation_id=github_installation_id,
+                    repository_id=repository_id,
                 )
             )
         )
