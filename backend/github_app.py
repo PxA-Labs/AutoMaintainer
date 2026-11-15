@@ -331,6 +331,13 @@ def _mint_installation_token(
         # Suspension between the two calls: GitHub answers 403.
         if resp.status_code == 403 and "suspend" in resp.text.lower():
             raise _suspended(installation_id, "suspended on GitHub")
+        # A repository the installation does not cover (not selected, or
+        # removed from the installation) is a 422, not a server error.
+        if resp.status_code == 422 and repository:
+            raise GitHubAuthError(
+                f"Repository {repository} is not accessible to GitHub App "
+                f"installation {installation_id}"
+            )
         resp.raise_for_status()
         data = resp.json()
 
@@ -359,9 +366,13 @@ def _token_cache_key(
 def invalidate_installation_tokens(installation_id: int) -> None:
     """Drop every cached token of ``installation_id`` in this process.
 
-    Called when the installation is suspended or deleted. Tokens cached by
-    other processes stay until they expire, but GitHub itself rejects the
-    tokens of a suspended or deleted installation.
+    Called when the installation is suspended or deleted, from the webhook
+    processor, which normally runs in the Celery worker. The cache is
+    per-process: tokens already cached by the API server and by agent
+    processes are not cleared and stay cached until they near expiry (at most
+    about an hour). That is acceptable because GitHub itself rejects the
+    tokens of a suspended or deleted installation, and every new mint
+    re-checks the row and GitHub first.
     """
     installation_id = int(installation_id)
     with _installation_token_lock:

@@ -208,6 +208,17 @@ def test_repository_of_another_account_is_refused(gh):
     assert gh.posts == []
 
 
+def test_repository_not_covered_by_the_installation_is_an_auth_error(gh):
+    """GitHub answers 422 when the named repository is not selected for the
+    installation; callers that branch on GitHubAuthError must see it."""
+    gh.post_response = httpx.Response(
+        422, json={"message": "There is at least one repository that does not exist"}
+    )
+    with pytest.raises(github_app.GitHubAuthError, match="not accessible"):
+        github_app.get_installation_token_sync(7, repository="acme/unselected")
+    assert github_app._installation_token_cache == {}
+
+
 def test_each_repository_scope_is_cached_separately(gh):
     a = github_app.get_installation_token_sync(7, repository="acme/a")
     assert github_app.get_installation_token_sync(7, repository="ACME/A") == a
