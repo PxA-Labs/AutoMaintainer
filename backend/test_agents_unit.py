@@ -318,7 +318,7 @@ def test_workspace_helpers(tmp_path, monkeypatch):
     assert base == tmp_path
 
     repo_dir = get_safe_repo_dir("PxA-Labs/AutoMaintainer")
-    assert repo_dir.name.startswith("PxA-Labs_AutoMaintainer-")
+    assert repo_dir.name.startswith("pxa-labs_automaintainer-")
     assert repo_dir.parent == base
 
     with pytest.raises(HTTPException):
