@@ -91,8 +91,12 @@ export async function mockGitHubAppTables(
 
 // Monaco is loaded by @monaco-editor/loader from jsdelivr at runtime. The
 // network is fenced off, so serve the same files from the locally installed
-// monaco-editor package (any version: only the editor's own DOM is needed).
-const MONACO_VS = join(__dirname, "..", "node_modules", "monaco-editor", "min", "vs");
+// monaco-editor package. That package is a pinned devDependency at the
+// version the loader requests; serveMonacoFromNodeModules checks both, so a
+// loader or monaco bump fails loudly here instead of serving other files.
+const MONACO_ROOT = join(__dirname, "..", "node_modules", "monaco-editor");
+const MONACO_VS = join(MONACO_ROOT, "min", "vs");
+const LOADER_CONFIG = join(__dirname, "..", "node_modules", "@monaco-editor", "loader", "lib", "es", "config", "index.js");
 const MONACO_TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -100,8 +104,25 @@ const MONACO_TYPES: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
 };
 
+/** The monaco-editor version @monaco-editor/loader fetches from jsdelivr. */
+async function loaderMonacoVersion(): Promise<string> {
+  const config = await readFile(LOADER_CONFIG, "utf-8");
+  const match = /cdn\.jsdelivr\.net\/npm\/monaco-editor@([0-9A-Za-z.-]+)\/min\/vs/.exec(config);
+  if (!match) throw new Error(`No monaco-editor CDN version found in ${LOADER_CONFIG}`);
+  return match[1];
+}
+
 export async function serveMonacoFromNodeModules(context: BrowserContext) {
-  await context.route(/^https:\/\/cdn\.jsdelivr\.net\/npm\/monaco-editor@[^/]+\/min\/vs\/(.+)$/, async (route) => {
+  const requested = await loaderMonacoVersion();
+  const installed: string = JSON.parse(await readFile(join(MONACO_ROOT, "package.json"), "utf-8")).version;
+  if (requested !== installed) {
+    throw new Error(
+      `@monaco-editor/loader requests monaco-editor@${requested} but ${installed} is installed; ` +
+        `pin the monaco-editor devDependency to ${requested}.`
+    );
+  }
+  const prefix = `https://cdn.jsdelivr.net/npm/monaco-editor@${requested}/min/vs/`;
+  await context.route((url) => url.href.startsWith(prefix), async (route) => {
     const rel = decodeURIComponent(new URL(route.request().url()).pathname.replace(/^.*\/min\/vs\//, ""));
     const file = normalize(join(MONACO_VS, rel));
     if (!file.startsWith(MONACO_VS + sep)) return route.abort("blockedbyclient");
