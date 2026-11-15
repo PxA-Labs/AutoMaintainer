@@ -59,8 +59,9 @@ AUTH_MODE_PAT = "pat"
 # not fail half-way.
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 
-# Cache for installation tokens (installation_id -> (token, expires_at))
-_installation_token_cache: Dict[int, tuple[str, float]] = {}
+# Cache for installation tokens:
+# (installation_id, repository or None, permissions key) -> (token, expires_at)
+_installation_token_cache: Dict[tuple, tuple[str, float]] = {}
 _installation_token_lock = threading.Lock()
 
 
@@ -148,39 +149,279 @@ def generate_app_jwt() -> str:
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
-def get_installation_token_sync(installation_id: int) -> str:
+# Permissions an agent run (and a repository route acting for one) needs:
+# read/write code, open and merge pull requests, open and comment on issues,
+# post the verification commit status. ``metadata: read`` is implied by any
+# other permission but is listed so the token's scope is explicit.
+RUN_TOKEN_PERMISSIONS: Dict[str, str] = {
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "statuses": "write",
+    "metadata": "read",
+}
+# Added to a run token only when the installation has granted it.
+# MERGE_POLICY=ci reads check runs; without this permission that read fails
+# and the merge fails closed. Requesting a permission the installation does
+# not have makes GitHub refuse the whole token, so it cannot be mandatory
+# without breaking every run of installations that never granted it.
+OPTIONAL_RUN_TOKEN_PERMISSIONS: Dict[str, str] = {"checks": "read"}
+# Repository sync only lists the installation's repositories.
+SYNC_TOKEN_PERMISSIONS: Dict[str, str] = {"metadata": "read"}
+
+_PERMISSION_LEVELS = {"read": 1, "write": 2, "admin": 3}
+
+
+class InstallationSuspendedError(GitHubAuthError):
+    """The installation is suspended or uninstalled; no token is minted."""
+
+
+def _app_api_client() -> httpx.Client:
+    """HTTP client for App-JWT GitHub calls (patched in tests)."""
+    return httpx.Client(base_url=GITHUB_API_URL, timeout=15.0)
+
+
+def _app_headers() -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {generate_app_jwt()}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _installation_status_client():
+    """The service-role Supabase client, or None when it is not configured.
+
+    Imported lazily: agents imports this module at import time.
+    """
+    try:
+        import agents
+    except Exception:  # pragma: no cover - agents logs its own import errors
+        return None
+    return getattr(agents, "supabase", None)
+
+
+def _installation_row_suspended_at(installation_id: int) -> Optional[str]:
+    """``suspended_at`` of the installation's row (set by the installation
+    suspend/deleted webhooks), or None.
+
+    A database error is logged and treated as "not suspended": GitHub's own
+    ``suspended_at`` is checked right after and is authoritative, so the row
+    is a fast local refusal rather than the only line of defence.
+    """
+    sb = _installation_status_client()
+    if sb is None:
+        return None
+    try:
+        result = (
+            sb.table("github_installations")
+            .select("suspended_at")
+            .eq("id", installation_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not read installation %s status from the database: %s",
+            installation_id,
+            e,
+        )
+        return None
+    rows = result.data if isinstance(getattr(result, "data", None), list) else []
+    return rows[0].get("suspended_at") if rows else None
+
+
+def _resolve_permissions(
+    installation_id: int,
+    required: Dict[str, str],
+    optional: Dict[str, str],
+    granted: Dict[str, str],
+) -> Dict[str, str]:
+    """The permission set to request: all of ``required`` (a clear error if
+    the installation lacks any of it) plus whatever of ``optional`` the
+    installation has granted."""
+
+    def level(value: Optional[str]) -> int:
+        return _PERMISSION_LEVELS.get(value or "", 0)
+
+    missing = sorted(
+        f"{name}:{needed}"
+        for name, needed in required.items()
+        if level(granted.get(name)) < level(needed)
+    )
+    if missing:
+        raise GitHubAuthError(
+            f"GitHub App installation {installation_id} has not granted the "
+            f"permissions AutoMaintainer needs: {', '.join(missing)}. Accept "
+            "the App's updated permissions in the installation settings."
+        )
+    resolved = dict(required)
+    for name, wanted in optional.items():
+        if level(granted.get(name)) >= level(wanted):
+            resolved[name] = wanted
+    return resolved
+
+
+def _split_repository(repository: str) -> tuple[str, str]:
+    owner, sep, name = (repository or "").partition("/")
+    if not sep or not owner or not name or "/" in name:
+        raise GitHubAuthError(f"Invalid repository name {repository!r}")
+    return owner, name
+
+
+def _suspended(installation_id: int, where: str) -> InstallationSuspendedError:
+    return InstallationSuspendedError(
+        f"GitHub App installation {installation_id} is {where}; no token was issued"
+    )
+
+
+def _mint_installation_token(
+    installation_id: int,
+    repository: Optional[str],
+    required: Dict[str, str],
+    optional: Dict[str, str],
+) -> tuple[str, float]:
+    """POST /app/installations/{id}/access_tokens with a narrowed scope.
+
+    Refuses (InstallationSuspendedError) before any token exists when the
+    installation row or GitHub (``suspended_at``, or 404 once uninstalled)
+    says the installation is not active.
+    """
+    if _installation_row_suspended_at(installation_id):
+        raise _suspended(installation_id, "suspended or uninstalled")
+
+    with _app_api_client() as client:
+        headers = _app_headers()
+        resp = client.get(f"/app/installations/{installation_id}", headers=headers)
+        if resp.status_code == 404:
+            raise _suspended(installation_id, "uninstalled (not found on GitHub)")
+        resp.raise_for_status()
+        installation = resp.json()
+        if installation.get("suspended_at"):
+            raise _suspended(installation_id, "suspended on GitHub")
+
+        body: Dict[str, Any] = {
+            "permissions": _resolve_permissions(
+                installation_id,
+                required,
+                optional,
+                installation.get("permissions") or {},
+            )
+        }
+        if repository:
+            owner, name = _split_repository(repository)
+            account = ((installation.get("account") or {}).get("login") or "").lower()
+            if account and owner.lower() != account:
+                raise GitHubAuthError(
+                    f"Repository {repository} does not belong to the account of "
+                    f"GitHub App installation {installation_id}"
+                )
+            body["repositories"] = [name]
+
+        resp = client.post(
+            f"/app/installations/{installation_id}/access_tokens",
+            headers=headers,
+            json=body,
+        )
+        # Suspension between the two calls: GitHub answers 403.
+        if resp.status_code == 403 and "suspend" in resp.text.lower():
+            raise _suspended(installation_id, "suspended on GitHub")
+        resp.raise_for_status()
+        data = resp.json()
+
+    expires_raw = data.get("expires_at")
+    if expires_raw:
+        expires_at = datetime.fromisoformat(
+            expires_raw.replace("Z", "+00:00")
+        ).timestamp()
+    else:
+        expires_at = time.time() + 3600
+    return data["token"], expires_at
+
+
+def _token_cache_key(
+    installation_id: int,
+    repository: Optional[str],
+    permissions: Optional[Dict[str, str]],
+) -> tuple:
+    return (
+        installation_id,
+        repository.lower() if repository else None,
+        None if permissions is None else tuple(sorted(permissions.items())),
+    )
+
+
+def invalidate_installation_tokens(installation_id: int) -> None:
+    """Drop every cached token of ``installation_id`` in this process.
+
+    Called when the installation is suspended or deleted. Tokens cached by
+    other processes stay until they expire, but GitHub itself rejects the
+    tokens of a suspended or deleted installation.
+    """
+    installation_id = int(installation_id)
+    with _installation_token_lock:
+        for key in [k for k in _installation_token_cache if k[0] == installation_id]:
+            del _installation_token_cache[key]
+
+
+def get_installation_token_sync(
+    installation_id: int,
+    *,
+    repository: Optional[str] = None,
+    permissions: Optional[Dict[str, str]] = None,
+) -> str:
     """Installation access token for ``installation_id``, cached until shortly
     before it expires (TOKEN_REFRESH_MARGIN_SECONDS).
+
+    The token is narrowed to ``repository`` ("owner/name", when given) and to
+    ``permissions`` (default: RUN_TOKEN_PERMISSIONS plus whichever
+    OPTIONAL_RUN_TOKEN_PERMISSIONS the installation granted), so a leaked run
+    token reaches one repository with only what the pipeline uses. Each scope
+    is cached separately. A suspended or deleted installation raises
+    InstallationSuspendedError and nothing is cached.
 
     Synchronous so PyGithub calls running in worker threads can refresh their
     credential. Two callers missing the cache at once may both mint a token;
     both are valid and the later one simply replaces the earlier.
     """
     installation_id = int(installation_id)
+    key = _token_cache_key(installation_id, repository, permissions)
     with _installation_token_lock:
-        cached = _installation_token_cache.get(installation_id)
+        cached = _installation_token_cache.get(key)
     if cached and time.time() < cached[1] - TOKEN_REFRESH_MARGIN_SECONDS:
         return cached[0]
 
-    integration = get_github_integration()
+    if permissions is None:
+        required, optional = RUN_TOKEN_PERMISSIONS, OPTIONAL_RUN_TOKEN_PERMISSIONS
+    else:
+        required, optional = dict(permissions), {}
     try:
-        auth = integration.get_installation_auth(installation_id)
+        token, expires_at = _mint_installation_token(
+            installation_id, repository, required, optional
+        )
     except Exception as e:
         logger.error(f"Failed to get installation token for {installation_id}: {e}")
         raise
-    token = auth.token
-    expires_at = auth.expires_at.timestamp() if auth.expires_at else time.time() + 3600
     with _installation_token_lock:
-        _installation_token_cache[installation_id] = (token, expires_at)
+        _installation_token_cache[key] = (token, expires_at)
     return token
 
 
-async def get_installation_token(installation_id: int) -> str:
+async def get_installation_token(
+    installation_id: int,
+    *,
+    repository: Optional[str] = None,
+    permissions: Optional[Dict[str, str]] = None,
+) -> str:
     """
     Get a valid installation access token for a GitHub App installation.
     Uses caching to avoid repeated API calls; minting runs off the event loop.
     """
-    return await asyncio.to_thread(get_installation_token_sync, installation_id)
+    return await asyncio.to_thread(
+        lambda: get_installation_token_sync(
+            installation_id, repository=repository, permissions=permissions
+        )
+    )
 
 
 class GitHubCredentials:
@@ -192,11 +433,17 @@ class GitHubCredentials:
     """
 
     def __init__(
-        self, *, installation_id: Optional[int] = None, pat: Optional[str] = None
+        self,
+        *,
+        installation_id: Optional[int] = None,
+        pat: Optional[str] = None,
+        repository: Optional[str] = None,
     ):
         if (installation_id is None) == (pat is None):
             raise ValueError("Pass exactly one of installation_id or pat")
         self.installation_id = installation_id
+        # App mode: the token is scoped to this repository when it is known.
+        self.repository = repository
         self._pat = pat
         self._client: Optional[Github] = None
         self._client_token: Optional[str] = None
@@ -208,7 +455,9 @@ class GitHubCredentials:
     def token(self) -> str:
         if self._pat is not None:
             return self._pat
-        return get_installation_token_sync(self.installation_id)
+        return get_installation_token_sync(
+            self.installation_id, repository=self.repository
+        )
 
     def client(self) -> Github:
         """PyGithub client for the current token, rebuilt after a refresh."""
@@ -225,11 +474,13 @@ class GitHubCredentials:
 
 
 def credentials_for_installation(
-    installation_id: Optional[int], *, purpose: str
+    installation_id: Optional[int], *, purpose: str, repository: Optional[str] = None
 ) -> GitHubCredentials:
     """Pick the credential for an operation on a repository of ``installation_id``.
 
-    ``app`` mode: that installation's token. Without an installation id the
+    ``app`` mode: that installation's token, with RUN_TOKEN_PERMISSIONS and,
+    when ``repository`` ("owner/name") is given, access to that repository
+    only. Without an installation id the
     only remaining credential would be the global PAT, so this logs at ERROR
     and raises GitHubAuthError instead. ``pat`` mode: GITHUB_TOKEN.
     ``purpose`` only labels log lines.
@@ -250,7 +501,9 @@ def credentials_for_installation(
             raise GitHubAuthError(
                 "GITHUB_AUTH_MODE is 'app' but GitHub App credentials are not configured"
             )
-        return GitHubCredentials(installation_id=int(installation_id))
+        return GitHubCredentials(
+            installation_id=int(installation_id), repository=repository
+        )
 
     pat = os.getenv("GITHUB_TOKEN")
     if not pat:
@@ -258,15 +511,22 @@ def credentials_for_installation(
     return GitHubCredentials(pat=pat)
 
 
-async def get_github_client_for_installation(installation_id: int) -> Github:
+async def get_github_client_for_installation(
+    installation_id: int, *, permissions: Optional[Dict[str, str]] = None
+) -> Github:
     """Get an authenticated PyGithub client for a specific installation."""
-    token = await get_installation_token(installation_id)
+    token = await get_installation_token(installation_id, permissions=permissions)
     return Github(auth=github.Auth.Token(token))
 
 
 async def get_installation_repositories(installation_id: int) -> list[Dict[str, Any]]:
-    """List repositories accessible to a GitHub App installation."""
-    client = await get_github_client_for_installation(installation_id)
+    """List repositories accessible to a GitHub App installation.
+
+    Uses a metadata-only token: listing needs nothing more.
+    """
+    client = await get_github_client_for_installation(
+        installation_id, permissions=SYNC_TOKEN_PERMISSIONS
+    )
     try:
         repos = []
         for repo in client.get_installation_repos():
@@ -620,6 +880,9 @@ __all__ = [
     "credentials_for_installation",
     "GitHubCredentials",
     "GitHubAuthError",
+    "InstallationSuspendedError",
+    "invalidate_installation_tokens",
+    "RUN_TOKEN_PERMISSIONS",
     "verify_installation_claim",
     "InstallationClaimError",
     "get_installation_repositories",

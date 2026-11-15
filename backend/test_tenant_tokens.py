@@ -50,7 +50,7 @@ def app_creds(monkeypatch):
     monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
     minted = []
 
-    def mint(installation_id):
+    def mint(installation_id, **_scope):
         minted.append(int(installation_id))
         return f"inst-{int(installation_id)}-token"
 
@@ -215,17 +215,37 @@ def test_installation_token_is_cached_until_shortly_before_expiry(monkeypatch):
     now = [1_000_000.0]
     monkeypatch.setattr(github_app.time, "time", lambda: now[0])
     monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
+    monkeypatch.setattr(github_app, "generate_app_jwt", lambda: "app-jwt")
+    monkeypatch.setattr(github_app, "_installation_status_client", lambda: None)
     issued = []
 
-    def get_installation_auth(installation_id):
-        issued.append(installation_id)
-        return SimpleNamespace(
-            token=f"tok-{len(issued)}",
-            expires_at=datetime.fromtimestamp(now[0] + 3600, tz=timezone.utc),
+    def handler(request: httpx.Request):
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 5,
+                    "account": {"login": "o"},
+                    "suspended_at": None,
+                    "permissions": dict(github_app.RUN_TOKEN_PERMISSIONS),
+                },
+            )
+        issued.append(request.url.path)
+        expires = datetime.fromtimestamp(now[0] + 3600, tz=timezone.utc)
+        return httpx.Response(
+            201,
+            json={
+                "token": f"tok-{len(issued)}",
+                "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
         )
 
-    integration = MagicMock(get_installation_auth=get_installation_auth)
-    monkeypatch.setattr(github_app, "get_github_integration", lambda: integration)
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        github_app,
+        "_app_api_client",
+        lambda: httpx.Client(base_url=github_app.GITHUB_API_URL, transport=transport),
+    )
 
     assert github_app.get_installation_token_sync(5) == "tok-1"
     now[0] += 3600 - github_app.TOKEN_REFRESH_MARGIN_SECONDS - 1
@@ -239,7 +259,7 @@ def test_installation_token_is_cached_until_shortly_before_expiry(monkeypatch):
 def test_credentials_client_is_rebuilt_after_token_refresh(monkeypatch):
     tokens = iter(["t1", "t1", "t2"])
     monkeypatch.setattr(
-        github_app, "get_installation_token_sync", lambda _id: next(tokens)
+        github_app, "get_installation_token_sync", lambda _id, **_k: next(tokens)
     )
     creds = github_app.GitHubCredentials(installation_id=1)
     first = creds.client()
@@ -428,7 +448,7 @@ async def test_run_fails_fast_when_installation_token_cannot_be_minted(
     monkeypatch.setattr(github_app, "GITHUB_APP_ID", "123")
     monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "pem")
 
-    def revoked(_id):
+    def revoked(_id, **_scope):
         raise RuntimeError("404 installation not found")
 
     monkeypatch.setattr(github_app, "get_installation_token_sync", revoked)
