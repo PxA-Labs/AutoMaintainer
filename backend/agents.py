@@ -2247,6 +2247,84 @@ def should_implement(state: AgentState):
     return "implementer" if is_approved_verdict(state.get("pm_decision")) else END
 
 
+async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: str):
+    """Run the repository's tests on the pushed head of ``branch_name`` and
+    publish the outcome: a commit status, a section in the PR body and a
+    TestResultEvent. Returns a log message for the run.
+
+    The commit status (context ``automaintainer/verification``) is what gates
+    MERGE_POLICY=ci: ``_ci_checks_passed`` requires that status to be present
+    and ``success`` on the head, and only a passed verification posts it. If
+    no status can be posted under MERGE_POLICY=ci (the head is unknown or
+    GitHub refuses the write) the run stops instead of handing the
+    Maintainer a head the gate would only ever leave unmerged.
+    """
+    import verification
+
+    run_id = current_run_id.get(None)
+    try:
+        head_sha = gh_repo.get_branch(branch_name).commit.sha
+        clone_url = gh_repo.clone_url
+    except Exception as e:
+        logger.warning("Cannot resolve the head of %s: %s", branch_name, e)
+        head_sha = clone_url = None
+    token = await asyncio.to_thread(_run_github_token)
+    result = await verification.verify_pr_branch(
+        clone_url, branch_name, head_sha, token, changed_paths=[path]
+    )
+
+    if run_id:
+        await emit_event(
+            TestResultEvent(
+                run_id=run_id,
+                phase=AgentPhase.IMPLEMENTER,
+                exit_code=0 if result.passed else (result.exit_code or -1),
+                passed_count=1 if result.passed else 0,
+                failed_count=1 if result.status == verification.FAILED else 0,
+                tracebacks=(
+                    []
+                    if result.passed
+                    else [f"{result.status}: {result.summary}\n{result.output_tail}"]
+                ),
+            )
+        )
+    try:
+        pr = gh_repo.get_pull(pr_number)
+        pr.edit(
+            body=verification.upsert_pr_section(
+                getattr(pr, "body", ""), verification.render_pr_section(result)
+            )
+        )
+    except Exception as e:
+        logger.warning("Could not add verification results to PR #%s: %s", pr_number, e)
+    status_error = None
+    if result.head_sha:
+        state, description = verification.commit_status(result)
+        try:
+            gh_repo.get_commit(result.head_sha).create_status(
+                state=state,
+                description=description,
+                context=verification.STATUS_CONTEXT,
+            )
+        except Exception as e:
+            status_error = e
+    else:
+        status_error = "the PR head commit could not be resolved"
+    if status_error is not None:
+        if get_merge_policy() == "ci":
+            raise PipelineAbortError(
+                "VERIFICATION_STATUS_FAILED",
+                f"Could not record the verification status on PR #{pr_number}: "
+                f"{status_error}",
+                AgentPhase.IMPLEMENTER,
+            )
+        logger.warning("Could not post verification status: %s", status_error)
+    return {
+        "agent": "System",
+        "msg": f"Verification {result.status} on PR #{pr_number}: {result.summary}",
+    }
+
+
 async def implementer_node(state: AgentState):
     new_logs = []
     idea = state["idea"]
@@ -2296,18 +2374,22 @@ async def implementer_node(state: AgentState):
         pushed = gh_repo.get_contents(path, ref=branch_name)
         if isinstance(pushed, list):
             raise ValueError(f"Implementer target is a directory, not a file: {path}")
+        resume_log = {
+            "agent": "System",
+            "msg": f"Resuming: PR #{checkpoint['pr_number']} already has "
+            f"the changes of iteration {iteration}.",
+        }
+        # The earlier attempt may have crashed before (or while) verifying the
+        # pushed head; verify again so the PR still carries a fresh result.
+        verify_log = await _verify_and_report(
+            gh_repo, checkpoint["pr_number"], branch_name, path
+        )
         return {
             "code": pushed.decoded_content.decode("utf-8"),
             "branch_name": branch_name,
             "target_file_path": path,
             "pr_number": checkpoint["pr_number"],
-            "log_messages": [
-                {
-                    "agent": "System",
-                    "msg": f"Resuming: PR #{checkpoint['pr_number']} already has "
-                    f"the changes of iteration {iteration}.",
-                }
-            ],
+            "log_messages": [resume_log, verify_log],
         }
 
     default_branch = gh_repo.default_branch
@@ -2465,6 +2547,8 @@ async def implementer_node(state: AgentState):
             }
         )
 
+    new_logs.append(await _verify_and_report(gh_repo, pr_number, branch_name, path))
+
     # Deliberately no write into the local clone. That clone is the shared
     # mirror of the DEFAULT branch, while this code lives only on the PR branch
     # until it is merged: writing it there showed unmerged code in the IDE and
@@ -2487,7 +2571,8 @@ async def implementer_node(state: AgentState):
 # MERGE_POLICY decides what happens after the Maintainer approves a PR:
 #   human (default) - never auto-merge; leave the PR open and request review.
 #   ci              - merge only when every commit status / check run on the PR
-#                     head passed and at least one check exists.
+#                     head passed, at least one check exists and the
+#                     automaintainer/verification status is present and green.
 #   auto            - legacy behaviour: merge on approval alone.
 MERGE_POLICIES = ("human", "ci", "auto")
 MAX_REVIEW_DIFF_CHARS = 20000
@@ -2529,10 +2614,17 @@ def _review_diff_incomplete(diff_text: str | None) -> bool:
 def _ci_checks_passed(gh_repo, sha: str) -> tuple[bool, str]:
     """Return (passed, detail) for all commit statuses and check runs on ``sha``.
 
-    Fails closed: no checks at all, or any pending/failed check, is not a pass.
+    Fails closed: no checks at all, any pending/failed check, or a head without
+    a ``success`` verification status (see verification.py) is not a pass.
     """
+    import verification
+
     commit = gh_repo.get_commit(sha)
     results = [(s.context, s.state) for s in commit.get_combined_status().statuses]
+    if (verification.STATUS_CONTEXT, "success") not in results:
+        # Absent counts as failed: a crash, a skipped step or an unposted
+        # status must never let other green CI merge an unverified head.
+        return False, f"{verification.STATUS_CONTEXT} did not pass on the PR head"
     for run in commit.get_check_runs():
         state = run.conclusion if run.status == "completed" else run.status
         results.append((run.name, state))
