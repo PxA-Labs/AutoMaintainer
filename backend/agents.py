@@ -15,6 +15,7 @@ import asyncio
 from github import Github, GithubException
 from github.IssuePullRequest import IssuePullRequest
 import uuid
+import itertools
 import json
 import re
 import time
@@ -1206,6 +1207,177 @@ async def architect_node(state: AgentState):
     }
 
 
+# --- Idempotent, run-scoped side effects --------------------------------------
+# Celery delivers a task at least once (acks_late), so the same run_id can run
+# the graph again after a worker crash. Every GitHub artifact is therefore tied
+# to the run and looked up before it is created:
+#   issue  - hidden RUN_MARKER in the body, found by scanning recent issues
+#   branch - deterministic name derived from the run id
+#   PR     - looked up by head branch
+#   commit - skipped when the file on the branch already has the content
+# Completed steps are also recorded in runs.checkpoint so a re-run skips the
+# LLM calls and comments of steps that already finished. The checkpoint is the
+# fast path; the GitHub lookups stay correct when a checkpoint write was lost.
+
+RUN_MARKER_PREFIX = "<!-- automaintainer-run:"
+# How many of the newest issues are scanned for a run's marker. A redelivery
+# follows the crash within minutes, so the run's issue is among the newest.
+# The search API is not used because its index lags behind issue creation.
+RUN_ISSUE_SCAN_LIMIT = 100
+# Values copied from runs.checkpoint back into the graph state on resume. The
+# iteration is restored separately (from implemented_iteration): the run
+# re-enters the loop at the last implemented iteration, whose Implementer and
+# Maintainer steps then replay from the checkpoint.
+_RESUMABLE_STATE_KEYS = (
+    "idea",
+    "issue_number",
+    "pm_decision",
+    "branch_name",
+    "pr_number",
+    "target_file_path",
+)
+
+
+def run_marker(run_id: str) -> str:
+    """Hidden HTML comment that ties a GitHub issue to the run that opened it."""
+    return f"{RUN_MARKER_PREFIX} {run_id} -->"
+
+
+def run_branch_name(run_id: str | None, issue_number: int) -> str:
+    """Deterministic PR branch for a run, so a re-run reuses the same branch.
+
+    Without a run id (a node called outside run_agent_loop) there is nothing to
+    be idempotent against, so a random suffix keeps branches unique.
+    """
+    short = re.sub(r"[^a-z0-9]", "", (run_id or "").lower())[:12]
+    if not short:
+        return f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
+    return f"automaintainer/run-{short}"
+
+
+async def _load_checkpoint(run_id: str | None) -> dict:
+    """The run's completed steps from runs.checkpoint ({} when unavailable)."""
+    if not run_id or not supabase:
+        return {}
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("runs")
+            .select("checkpoint")
+            .eq("id", run_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+        checkpoint = rows[0].get("checkpoint") if rows else None
+        return dict(checkpoint) if isinstance(checkpoint, dict) else {}
+    except Exception as e:
+        logger.warning("Could not load checkpoint of run %s: %s", run_id, e)
+        return {}
+
+
+async def _save_checkpoint(run_id: str | None, **updates) -> None:
+    """Merge ``updates`` into runs.checkpoint.
+
+    Read-modify-write is safe because a run holds its Redis lock, so only one
+    worker writes a run's checkpoint at a time. A failed write is logged, not
+    raised: the GitHub lookups below still prevent duplicates, the re-run only
+    repeats LLM work.
+    """
+    if not run_id or not supabase:
+        return
+    checkpoint = {**await _load_checkpoint(run_id), **updates}
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("runs")
+            .update({"checkpoint": checkpoint})
+            .eq("id", run_id)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("Could not save checkpoint of run %s: %s", run_id, e)
+
+
+def _find_run_issue(gh_repo, run_id: str):
+    """The issue this run already opened (identified by its marker), or None."""
+    marker = run_marker(run_id)
+    issues = gh_repo.get_issues(state="all", sort="created", direction="desc")
+    for issue in itertools.islice(iter(issues), RUN_ISSUE_SCAN_LIMIT):
+        if getattr(issue, "pull_request", None) is not None:
+            continue  # the issues API also lists pull requests
+        if marker in (issue.body or ""):
+            return issue
+    return None
+
+
+def _idea_from_issue_body(body: str) -> str:
+    """Recover the brainstormed idea from an issue this run created earlier."""
+    _, sep, rest = (body or "").partition("### Proposed Feature\n")
+    if not sep:
+        return ""
+    return rest.split(RUN_MARKER_PREFIX, 1)[0].strip()
+
+
+def _ensure_branch(gh_repo, branch_name: str, base_branch: str) -> bool:
+    """Create ``branch_name`` from ``base_branch`` unless it exists already.
+
+    Returns True when the branch was created by this call.
+    """
+    try:
+        gh_repo.get_branch(branch_name)
+        return False
+    except GithubException as e:
+        if e.status != 404:
+            raise
+    base = gh_repo.get_branch(base_branch)
+    try:
+        gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
+    except GithubException as e:
+        # 422 "Reference already exists": created concurrently; reuse it.
+        if e.status != 422:
+            raise
+        return False
+    return True
+
+
+def _commit_file_if_changed(
+    gh_repo, path: str, content: str, message: str, branch: str
+) -> bool:
+    """Write ``content`` to ``path`` on ``branch`` unless it is already there.
+
+    Returns True when a commit was made. Comparing against the branch (not the
+    base) is what makes a re-run after a crash skip an already-pushed commit.
+    """
+    try:
+        existing = gh_repo.get_contents(path, ref=branch)
+    except GithubException as e:
+        if e.status != 404:
+            raise
+        gh_repo.create_file(path=path, message=message, content=content, branch=branch)
+        return True
+    if isinstance(existing, list):
+        raise ValueError(f"Implementer target is a directory, not a file: {path}")
+    if existing.decoded_content == content.encode("utf-8"):
+        return False
+    gh_repo.update_file(
+        path=path, message=message, content=content, sha=existing.sha, branch=branch
+    )
+    return True
+
+
+def _find_pr_for_branch(gh_repo, branch_name: str):
+    """An existing PR (open or closed) whose head is ``branch_name``, or None.
+
+    Closed PRs count too: if a human closed the run's PR, a retry must not
+    open it again under a new number.
+    """
+    owner = getattr(getattr(gh_repo, "owner", None), "login", None)
+    head = f"{owner}:{branch_name}" if isinstance(owner, str) else branch_name
+    for pr in gh_repo.get_pulls(state="all", head=head):
+        if getattr(getattr(pr, "head", None), "ref", branch_name) == branch_name:
+            return pr
+    return None
+
+
 async def brainstormer_node(state: AgentState):
     new_logs = []
     repo = state["repo_name"]
@@ -1224,9 +1396,34 @@ async def brainstormer_node(state: AgentState):
             )
         )
 
+    # A redelivered run resumes here: the first node with side effects puts
+    # every completed step back into the graph state, and the later nodes skip
+    # the steps their own checkpoint entries mark as done.
+    checkpoint = await _load_checkpoint(run_id)
+    if checkpoint.get("issue_number"):
+        restored = {k: checkpoint[k] for k in _RESUMABLE_STATE_KEYS if k in checkpoint}
+        restored["iteration"] = checkpoint.get("implemented_iteration") or 0
+        new_logs.append(
+            {
+                "agent": "System",
+                "msg": (
+                    f"Resuming run from checkpoint (Issue "
+                    f"#{checkpoint['issue_number']}"
+                    + (
+                        f", PR #{checkpoint['pr_number']}"
+                        if checkpoint.get("pr_number")
+                        else ""
+                    )
+                    + ")."
+                ),
+            }
+        )
+        return {**restored, "log_messages": new_logs}
+
     if target_issue:
         state["idea"] = directive
         state["issue_number"] = target_issue
+        await _save_checkpoint(run_id, issue_number=target_issue, idea=directive)
         new_logs.append({"type": "ui_update", "agentStatus": {"Visionary": "active"}})
         new_logs.append(
             {
@@ -1277,22 +1474,37 @@ async def brainstormer_node(state: AgentState):
     if gh:
         try:
             gh_repo = gh.get_repo(repo)
-            issue = gh_repo.create_issue(
-                title="[Feature Request] Implement proposed architecture enhancements",
-                body=f"### Architect Directive\n{directive}\n\n### Proposed Feature\n{idea}",
-            )
+            # Reuse the issue an earlier attempt of this run opened (its
+            # checkpoint write may have been lost) instead of opening another.
+            issue = _find_run_issue(gh_repo, run_id) if run_id else None
+            if issue is not None:
+                # Keep the idea the issue describes; this attempt's
+                # brainstorm differs from it.
+                idea = _idea_from_issue_body(issue.body) or idea
+                state["idea"] = idea
+                verb = "Reusing"
+            else:
+                body = f"### Architect Directive\n{directive}\n\n### Proposed Feature\n{idea}"
+                if run_id:
+                    body += f"\n\n{run_marker(run_id)}"
+                issue = gh_repo.create_issue(
+                    title="[Feature Request] Implement proposed architecture enhancements",
+                    body=body,
+                )
+                verb = "Created"
             state["issue_number"] = issue.number
+            await _save_checkpoint(run_id, issue_number=issue.number, idea=idea)
             new_logs.append(
                 {
                     "agent": "System",
-                    "msg": f"Created GitHub Issue #{issue.number}",
+                    "msg": f"{verb} GitHub Issue #{issue.number}",
                 }
             )
             new_logs.append(
                 {
                     "type": "ui_update",
                     "activity": {
-                        "title": f"Created Issue #{issue.number}",
+                        "title": f"{verb} Issue #{issue.number}",
                         "time": "Just now",
                         "type": "search",
                     },
@@ -1343,6 +1555,12 @@ async def pm_node(state: AgentState):
                 iteration=state.get("iteration", 0),
             )
         )
+
+    # An earlier attempt of this run already decided and posted the verdict;
+    # deciding again would post a second, possibly different, one.
+    checkpoint = await _load_checkpoint(run_id)
+    if checkpoint.get("pm_decision"):
+        return {"pm_decision": checkpoint["pm_decision"], "log_messages": new_logs}
 
     new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "active"}})
     new_logs.append(
@@ -1414,6 +1632,7 @@ async def pm_node(state: AgentState):
                     )
                 )
 
+    await _save_checkpoint(run_id, pm_decision=decision)
     new_logs.append({"type": "ui_update", "agentStatus": {"Reviewer": "idle"}})
     return {"pm_decision": decision, "log_messages": new_logs}
 
@@ -1456,6 +1675,35 @@ async def implementer_node(state: AgentState):
         raise RuntimeError("Implementer requires GitHub access and an issue number.")
 
     gh_repo = gh.get_repo(state["repo_name"])
+
+    # This iteration was committed and has a PR already (an earlier attempt of
+    # the run crashed later on): hand the pushed code to the Maintainer instead
+    # of generating, committing and commenting again.
+    checkpoint = await _load_checkpoint(run_id)
+    if (
+        checkpoint.get("implemented_iteration") == iteration
+        and checkpoint.get("pr_number")
+        and checkpoint.get("branch_name")
+    ):
+        branch_name = checkpoint["branch_name"]
+        path = checkpoint.get("target_file_path") or path
+        pushed = gh_repo.get_contents(path, ref=branch_name)
+        if isinstance(pushed, list):
+            raise ValueError(f"Implementer target is a directory, not a file: {path}")
+        return {
+            "code": pushed.decoded_content.decode("utf-8"),
+            "branch_name": branch_name,
+            "target_file_path": path,
+            "pr_number": checkpoint["pr_number"],
+            "log_messages": [
+                {
+                    "agent": "System",
+                    "msg": f"Resuming: PR #{checkpoint['pr_number']} already has "
+                    f"the changes of iteration {iteration}.",
+                }
+            ],
+        }
+
     default_branch = gh_repo.default_branch
     source_ref = state.get("branch_name") if iteration > 0 else default_branch
     original_content = ""
@@ -1543,61 +1791,62 @@ async def implementer_node(state: AgentState):
         )
 
     if iteration == 0:
-        sb = gh_repo.get_branch(default_branch)
-        branch_name = f"feature/issue-{issue_number}-{uuid.uuid4().hex[:4]}"
-        gh_repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=sb.commit.sha)
-        if target_file and target_file_exists:
-            gh_repo.update_file(
-                path=target_file,
-                message=f"Implement fix for Issue #{issue_number}",
-                content=code,
-                sha=file.sha,
-                branch=branch_name,
-            )
-        else:
-            gh_repo.create_file(
-                path=path,
-                message=(
-                    f"Implement fix for Issue #{issue_number}"
-                    if target_file
-                    else f"Implement Feature for Issue #{issue_number}"
-                ),
-                content=code,
-                branch=branch_name,
-            )
-        pr = gh_repo.create_pull(
-            title=f"Implement Issue #{issue_number}",
-            body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
-            head=branch_name,
-            base=default_branch,
+        # Every step below first looks for what an earlier attempt of this run
+        # left behind, so a redelivered task converges on one branch, one
+        # commit and one PR.
+        branch_name = run_branch_name(run_id, issue_number)
+        _ensure_branch(gh_repo, branch_name, default_branch)
+        await _save_checkpoint(run_id, branch_name=branch_name, target_file_path=path)
+        _commit_file_if_changed(
+            gh_repo,
+            path,
+            code,
+            f"Implement fix for Issue #{issue_number}",
+            branch_name,
         )
+        pr = _find_pr_for_branch(gh_repo, branch_name)
+        verb = "Reusing"
+        if pr is None:
+            pr = gh_repo.create_pull(
+                title=f"Implement Issue #{issue_number}",
+                body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
+                head=branch_name,
+                base=default_branch,
+            )
+            verb = "Created"
         pr_number = pr.number
+        await _save_checkpoint(
+            run_id, pr_number=pr_number, implemented_iteration=iteration
+        )
         new_logs.append(
             {
                 "agent": "System",
-                "msg": f"Created PR #{pr_number}: {pr.html_url}",
+                "msg": f"{verb} PR #{pr_number}: {pr.html_url}",
             }
         )
     else:
         branch_name = state["branch_name"]
-        file = gh_repo.get_contents(path, ref=branch_name)
-        if isinstance(file, list):
-            raise ValueError(f"Implementer target is a directory, not a file: {path}")
-        gh_repo.update_file(
-            path=path,
-            message=f"Fix: Address maintainer feedback (Iteration {iteration})",
-            content=code,
-            sha=file.sha,
-            branch=branch_name,
-        )
         pr_number = state["pr_number"]
-        gh_repo.get_pull(pr_number).create_issue_comment(
-            f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
+        committed = _commit_file_if_changed(
+            gh_repo,
+            path,
+            code,
+            f"Fix: Address maintainer feedback (Iteration {iteration})",
+            branch_name,
         )
+        if committed:
+            gh_repo.get_pull(pr_number).create_issue_comment(
+                f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
+            )
+        await _save_checkpoint(run_id, implemented_iteration=iteration)
         new_logs.append(
             {
                 "agent": "System",
-                "msg": f"Pushed fix to PR #{pr_number}",
+                "msg": (
+                    f"Pushed fix to PR #{pr_number}"
+                    if committed
+                    else f"PR #{pr_number} already has this fix; nothing to push."
+                ),
             }
         )
 
@@ -1750,6 +1999,26 @@ async def maintainer_node(state: AgentState):
             )
         )
 
+    # An earlier attempt already reviewed this iteration; reviewing again would
+    # post a second review and could merge twice. Replay its outcome so
+    # should_iterate takes the same branch it took then.
+    checkpoint = await _load_checkpoint(run_id)
+    if checkpoint.get("reviewed_iteration") == iteration and checkpoint.get(
+        "merge_status"
+    ):
+        return {
+            "review": checkpoint.get("review", ""),
+            "merge_status": checkpoint["merge_status"],
+            "iteration": checkpoint.get("next_iteration", iteration),
+            "log_messages": [
+                {
+                    "agent": "System",
+                    "msg": f"Resuming: PR #{pr_number} was already reviewed "
+                    f"({checkpoint['merge_status']}).",
+                }
+            ],
+        }
+
     gh_repo = pr = None
     diff_text = None
     if gh and pr_number:
@@ -1853,7 +2122,10 @@ async def maintainer_node(state: AgentState):
                 should_merge, reason = False, "the reviewed diff was incomplete"
 
             if should_merge:
-                _merge_pr(pr, pr_number, head_sha)
+                # An earlier attempt may have merged and crashed before saving
+                # its checkpoint; merging again would fail the run.
+                if getattr(pr, "merged", None) is not True:
+                    _merge_pr(pr, pr_number, head_sha)
                 merge_status = "merged"
                 new_logs.append(
                     {
@@ -1897,6 +2169,13 @@ async def maintainer_node(state: AgentState):
     if not is_approved:
         state["iteration"] = iteration + 1
 
+    await _save_checkpoint(
+        run_id,
+        review=review,
+        merge_status=merge_status,
+        reviewed_iteration=iteration,
+        next_iteration=state.get("iteration", 0),
+    )
     new_logs.append({"type": "ui_update", "agentStatus": {"Maintainer": "idle"}})
     return {
         "review": review,
