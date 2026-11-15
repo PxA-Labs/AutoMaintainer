@@ -89,7 +89,6 @@ try:
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
-    from opentelemetry.instrumentation.logging import LoggingInstrumentor
     from opentelemetry.trace import Status, StatusCode
     from opentelemetry.metrics import CallbackOptions, Observation
     from opentelemetry.propagate import inject, extract, set_global_textmap
@@ -313,7 +312,6 @@ def init_observability(
             HTTPXClientInstrumentor().instrument()
             RequestsInstrumentor().instrument()
             RedisInstrumentor().instrument()
-            LoggingInstrumentor().instrument(set_logging_format=True)
             set_global_textmap(TraceContextTextMapPropagator())
         except Exception as e:
             logger.warning(f"Failed to apply some instrumentations: {e}")
