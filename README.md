@@ -64,7 +64,7 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 ## Development & Local Setup
 
 ### 1. Prerequisites
-- [Node.js](https://nodejs.org/en/) (v20+)
+- [Node.js](https://nodejs.org/en/) (v22.18+; the gitnexus CLI requires `^22.18 || >=24.11`)
 - [Python](https://www.python.org/) (3.11+)
 - A [Groq API Key](https://console.groq.com/keys)
 - A [GitHub Token](https://github.com/settings/tokens) or GitHub App credentials
@@ -90,7 +90,11 @@ GITHUB_TOKEN="your_github_token_here"
 SUPABASE_URL="https://your-project.supabase.co"
 SUPABASE_SERVICE_KEY="your_supabase_service_role_key"
 REDIS_URL="redis://localhost:6379/0"
+# Local development only - never set in a deployment:
+# ENVIRONMENT="development"
+# AUTH_DEV_BYPASS="true"
 ```
+See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md#environment-variables) for the full list of variables.
 
 **Frontend Environment (`dashboard/.env.local`):**
 ```bash
@@ -106,6 +110,17 @@ pip install -r requirements.txt
 fastapi dev main.py
 ```
 
+Agent runs are executed by a Celery worker. Without one, runs stay `queued`:
+```bash
+cd backend
+celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
+```
+
+Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docker:
+```bash
+docker compose up --build   # http://localhost:8000
+```
+
 ### 4. Run Frontend (Next.js)
 ```bash
 cd dashboard
@@ -118,14 +133,17 @@ Open `http://localhost:3000` in your browser.
 
 ## Deployment (Production SaaS)
 
-AutoMaintainer is configured for distributed cloud deployment:
+Read [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) before deploying. It covers the topology, every environment variable, and the security checklist. The API and the agent worker **must share the repository workspace directory**.
 
-* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with root directory set to `dashboard/`. Uses [`dashboard/vercel.json`](./dashboard/vercel.json) for static export and security headers.
-* **Backend & Workers (Render):** Deploy using the included [`render.yaml`](./render.yaml) blueprint to launch the FastAPI control plane, Redis broker, and Celery background workers.
-* **Containerized Deployment (Docker / GHCR):** Pull the pre-built multi-arch image:
+* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with the root directory set to `dashboard/`. It uses [`dashboard/vercel.json`](./dashboard/vercel.json) for the static export and security headers.
+* **Backend and workers (Render):** The [`render.yaml`](./render.yaml) blueprint builds the Docker image. It runs the API and the `agent_runs` worker together in one single-instance web service, plus a maintenance/beat worker and Redis. Render disks cannot be shared between services, so splitting them would break the IDE routes.
+* **Docker Compose:** `docker compose up --build` starts the API, worker, beat and Redis, with a shared workspace volume.
+* **Container image (GHCR):** Published from `main` and release tags (linux/amd64). It runs as a non-root user with `ENVIRONMENT=production`:
   ```bash
   docker pull ghcr.io/pxa-labs/automaintainer:latest
   ```
+
+Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unless you have read the terminal section of the deployment guide.
 
 ---
 

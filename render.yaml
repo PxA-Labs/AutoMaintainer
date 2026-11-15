@@ -1,3 +1,31 @@
+# Render Blueprint for AutoMaintainer. See docs/DEPLOYMENT.md.
+#
+# Topology:
+#   automaintainer-backend             web     uvicorn API + Celery `agent_runs`
+#                                              worker in ONE container
+#   automaintainer-celery-maintenance  worker  Celery `maintenance,github_sync`
+#                                              + embedded beat
+#   automaintainer-redis               redis   broker / result backend / locks
+#
+# Why the API and the agent worker share a service: the worker clones target
+# repositories into AUTOMAINTAINER_WORKSPACE_DIR and the API's IDE routes
+# (/repo/.../tree, /file, /search) and terminal read those clones from local
+# disk. Render persistent disks are attached to exactly one service and cannot
+# be shared, so separate API and worker services would never see each other's
+# clones (IDE routes return 404). Running both processes in one container is
+# the simplest correct option. Consequences:
+#   - the backend service must stay at ONE instance (each instance has its own
+#     filesystem), so it has no autoscaling block;
+#   - clones live on the container's ephemeral filesystem and are re-cloned
+#     after a deploy/restart, which the agent already does on demand.
+#
+# All services build the repo Dockerfile so gitnexus/Node and git are present
+# (Render's native Python runtime has neither) and run as a non-root user with
+# ENVIRONMENT=production.
+#
+# Security defaults: ENABLE_TERMINAL and AUTH_DEV_BYPASS are intentionally NOT
+# declared here. Do not add AUTH_DEV_BYPASS to any deployed service.
+
 services:
   # Redis for Celery task queue and caching
   # noeviction is required: with allkeys-lru, memory pressure would silently
@@ -8,23 +36,32 @@ services:
     plan: starter
     region: oregon
     maxmemoryPolicy: noeviction
+    ipAllowList: [] # only reachable from services in this account
 
-  # Backend API (FastAPI)
+  # Backend API (FastAPI) + agent_runs Celery worker
   - type: web
     name: automaintainer-backend
-    env: python
+    runtime: docker
     region: oregon
     plan: starter
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Launcher baked into the image: starts the agent_runs worker and uvicorn
+    # (on $PORT), and exits if either dies so Render restarts the service.
+    dockerCommand: automaintainer-api-and-worker
     # Liveness probe only - /healthz/supabase is a readiness/monitoring check
     # and would flap deployments on transient database blips.
     healthCheckPath: /healthz
     autoDeploy: true
+    # Must stay at 1: API and worker share this instance's filesystem.
+    numInstances: 1
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.0"
+      - key: ENVIRONMENT
+        value: "production"
+      - key: CELERY_QUEUES
+        value: "agent_runs"
+      - key: CELERY_CONCURRENCY
+        value: "2"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
@@ -47,8 +84,6 @@ services:
       - key: ALLOWED_ORIGINS
         sync: false
       # Observability
-      - key: ENVIRONMENT
-        value: "production"
       - key: OTEL_EXPORTER_OTLP_ENDPOINT
         sync: false
       # Supabase connection pooling (use Supabase's built-in pgbouncer)
@@ -56,70 +91,26 @@ services:
         sync: false
       - key: SUPABASE_POOLER_KEY
         sync: false
-    # Required for Celery worker scaling
-    scaling:
-      minInstances: 1
-      maxInstances: 3
 
-  # Celery Worker for Agent Runs
-  - type: worker
-    name: automaintainer-celery-worker
-    env: python
-    region: oregon
-    plan: starter
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: celery -A celery_app worker -Q agent_runs -l info --concurrency=2
-    autoDeploy: true
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.0"
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SERVICE_KEY
-        sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GITHUB_APP_ID
-        sync: false
-      - key: GITHUB_APP_PRIVATE_KEY
-        sync: false
-      - key: GITHUB_WEBHOOK_SECRET
-        sync: false
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: automaintainer-redis
-          property: connectionURL
-      # Observability
-      - key: ENVIRONMENT
-        value: "production"
-      - key: OTEL_EXPORTER_OTLP_ENDPOINT
-        sync: false
-      # Supabase connection pooling
-      - key: SUPABASE_POOLER_URL
-        sync: false
-      - key: SUPABASE_POOLER_KEY
-        sync: false
-    scaling:
-      minInstances: 1
-      maxInstances: 5
-
-  # Celery Worker for Maintenance Tasks
+  # Celery worker for maintenance + GitHub sync, with the embedded beat
+  # scheduler (-B). Exactly one instance so periodic tasks are not duplicated.
+  # These tasks only use Supabase/GitHub APIs, never repository clones, so
+  # this service does not need the backend's filesystem.
   - type: worker
     name: automaintainer-celery-maintenance
-    env: python
+    runtime: docker
     region: oregon
     plan: starter
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: celery -A celery_app worker -Q maintenance,github_sync -l info --concurrency=1 -B
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Beat schedule file goes to /tmp: the app directory is read-only for the
+    # unprivileged container user.
+    dockerCommand: celery -A celery_app worker -Q maintenance,github_sync -l info --concurrency=1 -B -s /tmp/celerybeat-schedule
     autoDeploy: true
+    numInstances: 1
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.0"
+      - key: ENVIRONMENT
+        value: "production"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
@@ -140,8 +131,6 @@ services:
           name: automaintainer-redis
           property: connectionURL
       # Observability
-      - key: ENVIRONMENT
-        value: "production"
       - key: OTEL_EXPORTER_OTLP_ENDPOINT
         sync: false
       # Supabase connection pooling
@@ -149,37 +138,26 @@ services:
         sync: false
       - key: SUPABASE_POOLER_KEY
         sync: false
-    scaling:
-      minInstances: 1
-      maxInstances: 1
 
   # Note: Supabase provides built-in connection pooling (pgbouncer) via:
   # - Connection pooling endpoint: `aws-0-region.pooler.supabase.com:6543` (transaction mode)
   # - Session pooler: `aws-0-region.pooler.supabase.com:5432` (session mode)
-  # 
+  #
   # To enable:
   # 1. Go to Supabase Dashboard > Settings > Database > Connection Pooling
   # 2. Enable "Session Pooler" and/or "Transaction Pooler"
   # 3. Add the pooler URL and credentials as SUPABASE_POOLER_URL and SUPABASE_POOLER_KEY
-  # 
+  #
   # The application should use SUPABASE_POOLER_URL for high-concurrency scenarios
   # and fall back to SUPABASE_URL for operations requiring session features.
   #
-  # Celery Beat Scheduler (alternative: use -B flag on maintenance worker)
-  # - type: worker
-  #   name: automaintainer-celery-beat
-  #   env: python
-  #   region: oregon
-  #   plan: starter
-  #   rootDir: backend
-  #   buildCommand: pip install -r requirements.txt
-  #   startCommand: celery -A celery_app beat -l info
-  #   autoDeploy: true
-  #   envVars:
-  #     - key: PYTHON_VERSION
-  #       value: "3.11.0"
-  #     - key: REDIS_URL
-  #       fromService:
-  #         type: redis
-  #         name: automaintainer-redis
-  #         property: connectionURL
+  # Scaling agent capacity: raise CELERY_CONCURRENCY on the backend service or
+  # move to a larger plan. Running agent workers in separate services requires
+  # the IDE routes to stop reading local clones (fetch via the GitHub API
+  # instead) - tracked in the deployment epic (#418).
+  #
+  # Migrating from the previous blueprint: the standalone
+  # `automaintainer-celery-worker` service was removed (its job now runs inside
+  # automaintainer-backend). Delete it in the Render dashboard if blueprint
+  # sync leaves it behind, otherwise it keeps consuming agent_runs on its own
+  # unshared filesystem.

@@ -1,40 +1,140 @@
-# Stage 1: Build the Next.js static frontend
-FROM node:20-alpine AS frontend-builder
+# AutoMaintainer image: FastAPI API (also serves the static dashboard), Celery
+# worker/beat (same image, different command) and the gitnexus CLI.
+#
+# Base images are pinned to exact versions on the same Debian release
+# (bookworm) so that native Node/Python modules built in the builder stages
+# link against the same glibc as the runtime stage. Bump them together.
+ARG NODE_IMAGE=node:22.23.5-bookworm-slim
+ARG PYTHON_IMAGE=python:3.11.18-slim-bookworm
+
+# ---------------------------------------------------------------------------
+# Stage 1: build the Next.js static export (dashboard/out)
+# ---------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS frontend-builder
 WORKDIR /app/dashboard
+# NEXT_PUBLIC_* values are inlined into the static bundle at build time. They
+# are public by design (anon key, URLs) - never pass server secrets here.
+ARG NEXT_PUBLIC_SUPABASE_URL=""
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=""
+ARG NEXT_PUBLIC_BACKEND_URL=""
+ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} \
+    NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} \
+    NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL} \
+    NEXT_TELEMETRY_DISABLED=1
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 COPY dashboard/ ./
 RUN npm run build
 
-# Stage 2: Build the Python backend and serve everything
-FROM python:3.11-slim
-WORKDIR /app
+# ---------------------------------------------------------------------------
+# Stage 2: install the Node CLI tools used by the agents (gitnexus).
+# Uses the official Node image instead of `curl | bash` NodeSource setup.
+# gitnexus 1.6.x requires Node ^22.18.0 || >=24.11.0.
+# Compilers are only present in this stage, for packages that build native
+# addons with node-gyp when no prebuilt binary matches.
+# ---------------------------------------------------------------------------
+FROM ${NODE_IMAGE} AS node-tools
+ARG GITNEXUS_VERSION=1.6.12
+ARG TREE_SITTER_KOTLIN_VERSION=0.3.8
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --omit=dev \
+        "gitnexus@${GITNEXUS_VERSION}" \
+        "tree-sitter-kotlin@${TREE_SITTER_KOTLIN_VERSION}" \
+    && npm cache clean --force
 
-# Install Node.js v22, git, and globally install gitnexus
-RUN apt-get update && apt-get install -y curl git build-essential \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g gitnexus@latest tree-sitter-kotlin \
+# ---------------------------------------------------------------------------
+# Stage 3: build the Python virtualenv (build-essential stays in this stage)
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS python-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 4: runtime
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS runtime
+
+# git: cloning/committing target repos. bash: terminal PTY and the
+# api+worker launcher below. No compilers, no curl.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git bash ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy python backend requirements
-COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+# Node runtime + globally installed CLI tools from the node-tools stage.
+# The npm/npx/gitnexus entries in /usr/local/bin are symlinks, which COPY
+# would dereference, so they are recreated explicitly.
+COPY --from=node-tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-tools /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s ../lib/node_modules/gitnexus/dist/cli/index.js /usr/local/bin/gitnexus \
+    && node --version && gitnexus --help >/dev/null
 
-# Copy python backend source
+COPY --from=python-builder /opt/venv /opt/venv
+
+# Unprivileged runtime user. Application code stays root-owned (read-only for
+# the process); only HOME and the workspace directory are writable.
+ARG APP_UID=10001
+RUN groupadd --system --gid ${APP_UID} app \
+    && useradd --system --uid ${APP_UID} --gid app --create-home --home-dir /home/app --shell /bin/bash app \
+    && mkdir -p /var/lib/automaintainer/workspaces \
+    && chown -R app:app /var/lib/automaintainer
+
+WORKDIR /app
 COPY backend/ ./backend/
-
-# Copy built frontend from Stage 1
 COPY --from=frontend-builder /app/dashboard/out ./dashboard/out
 
-# Set environment variables for Hugging Face
-ENV HOST=0.0.0.0
-ENV PORT=7860
+# Launcher for single-container platforms (Render web service, Hugging Face
+# Spaces) where the API and the agent_runs worker must share one filesystem:
+# the worker clones repos into AUTOMAINTAINER_WORKSPACE_DIR and the API's IDE
+# routes read them from there. If either process exits, the other is stopped
+# and the container exits non-zero so the platform restarts it. SIGTERM is
+# forwarded so Celery can finish/requeue (acks_late) on deploys.
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    'set -u' \
+    'trap "kill -TERM \$(jobs -p) 2>/dev/null" TERM INT' \
+    'celery -A celery_app worker -Q "${CELERY_QUEUES:-agent_runs}" -l info --concurrency="${CELERY_CONCURRENCY:-2}" &' \
+    'uvicorn main:app --host 0.0.0.0 --port "${PORT:-7860}" &' \
+    'wait -n' \
+    'rc=$?' \
+    'kill -TERM $(jobs -p) 2>/dev/null' \
+    'wait' \
+    'exit $(( rc == 0 ? 1 : rc ))' \
+    > /usr/local/bin/automaintainer-api-and-worker \
+    && chmod 0755 /usr/local/bin/automaintainer-api-and-worker
 
-# Hugging Face Spaces expose port 7860
+# ENVIRONMENT=production is the safe default: it keeps production-only gates
+# (e.g. the interactive terminal stays disabled unless ENABLE_TERMINAL=true)
+# closed. Override to "development" only for local work.
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ENVIRONMENT=production \
+    AUTOMAINTAINER_WORKSPACE_DIR=/var/lib/automaintainer/workspaces \
+    HOST=0.0.0.0 \
+    PORT=7860
+
+# Hugging Face Spaces expects 7860; Render injects its own PORT.
 EXPOSE 7860
 
+USER app
 WORKDIR /app/backend
 
-# Run FastAPI backend (which also serves the static Next.js frontend)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Liveness only (/healthz does not touch Supabase or Redis). Uses Python
+# because curl is not installed. Worker/beat containers reuse this image and
+# must override or disable the healthcheck (see docker-compose.yml).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('PORT', '7860'), timeout=4)"]
+
+# Run the FastAPI backend (which also serves the static dashboard). Shell form
+# via `sh -c` so $PORT from the platform is honoured; `exec` keeps uvicorn as
+# PID 1 so it receives SIGTERM directly.
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port \"${PORT:-7860}\""]
