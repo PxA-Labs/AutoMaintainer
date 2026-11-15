@@ -1,6 +1,7 @@
 """Tests for verification.py: test detection, the restricted local runner,
 the sandbox/production policy, PR reporting and the MERGE_POLICY=ci gate."""
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -263,6 +264,31 @@ async def test_broken_sandbox_setting_never_falls_back_to_local(tmp_path, monkey
     assert result.status == "error"
     assert "SANDBOX_BACKEND" in result.summary
     assert not marker.exists()
+
+
+class HangingSandbox:
+    def __init__(self, repo_path):
+        pass
+
+    async def exec_command(self, cmd, timeout=60):
+        await asyncio.sleep(60)  # a backend that ignores its timeout
+        return 0, "", ""
+
+
+def hanging_sandbox_factory(repo_path):
+    return HangingSandbox(repo_path)
+
+
+@pytest.mark.asyncio
+async def test_hung_sandbox_backend_is_bounded_on_the_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_BACKEND", "test_verification:hanging_sandbox_factory")
+    monkeypatch.setattr(verification, "SANDBOX_GRACE_SECONDS", 0.2)
+    _config(tmp_path, [PY, "-m", "pytest"], timeout=1)
+    started = time.monotonic()
+    result = await verification.verify_working_copy(tmp_path)
+    assert time.monotonic() - started < 10
+    assert result.status == "error" and result.runner == "sandbox"
+    assert "timed out" in result.summary
 
 
 # --- verify_pr_branch -------------------------------------------------------------
@@ -531,3 +557,67 @@ async def test_ci_policy_merges_when_ci_and_verification_passed(monkeypatch):
     result = await agents.maintainer_node(dict(_STATE))
     pr.merge.assert_called_once()
     assert result["merge_status"] == "merged"
+
+
+@pytest.mark.asyncio
+async def test_ci_policy_does_not_merge_without_a_verification_status(monkeypatch):
+    """Green CI without any automaintainer/verification status (a crashed or
+    skipped verification) must not merge under MERGE_POLICY=ci."""
+    monkeypatch.setenv("MERGE_POLICY", "ci")
+    pr = _maintainer_setup(monkeypatch, [("ci/build", "success")])
+    result = await agents.maintainer_node(dict(_STATE))
+    pr.merge.assert_not_called()
+    assert result["merge_status"] == "awaiting_human_review"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_head_aborts_under_ci_instead_of_skipping_the_status(
+    monkeypatch,
+):
+    repo, _, commit = _gh_repo()
+    repo.get_branch.side_effect = RuntimeError("502")
+    verify = AsyncMock(
+        return_value=VerificationResult("error", "head unknown", head_sha=None)
+    )
+    monkeypatch.setattr(verification, "verify_pr_branch", verify)
+    monkeypatch.setattr(agents, "_run_github_token", lambda: None)
+
+    log = await agents._verify_and_report(repo, 7, "fix-branch", "calc.py")
+    assert "error" in log["msg"]
+    commit.create_status.assert_not_called()
+
+    monkeypatch.setenv("MERGE_POLICY", "ci")
+    with pytest.raises(agents.PipelineAbortError) as exc:
+        await agents._verify_and_report(repo, 7, "fix-branch", "calc.py")
+    assert exc.value.error_code == "VERIFICATION_STATUS_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_resumed_implementer_verifies_the_pushed_head_again(monkeypatch):
+    """A redelivered run whose iteration was already pushed must not reach the
+    Maintainer without verifying that push."""
+    repo = MagicMock()
+    repo.get_contents.return_value = SimpleNamespace(decoded_content=b"x = 2")
+    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+    monkeypatch.setattr(agents, "emit_event", AsyncMock())
+    monkeypatch.setattr(
+        agents,
+        "_load_checkpoint",
+        AsyncMock(
+            return_value={
+                "implemented_iteration": 0,
+                "pr_number": 7,
+                "branch_name": "automaintainer/run-1",
+                "target_file_path": "calc.py",
+            }
+        ),
+    )
+    verify_log = {"agent": "System", "msg": "Verification passed on PR #7: ok"}
+    verify = AsyncMock(return_value=verify_log)
+    monkeypatch.setattr(agents, "_verify_and_report", verify)
+
+    result = await agents.implementer_node(dict(_STATE))
+
+    verify.assert_awaited_once_with(repo, 7, "automaintainer/run-1", "calc.py")
+    assert result["pr_number"] == 7 and result["code"] == "x = 2"
+    assert verify_log in result["log_messages"]

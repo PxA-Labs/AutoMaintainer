@@ -46,7 +46,14 @@ CONFIG_FILE = ".automaintainer.yml"
 PASSED, FAILED, ERROR, SKIPPED = "passed", "failed", "error", "skipped"
 
 DEFAULT_TIMEOUT_SECONDS = 300
-MAX_TIMEOUT_SECONDS = 1800
+# Operator ceiling for timeout_seconds. Verification runs inside the agent
+# Celery task (soft_time_limit 1800s in tasks.py) together with the clone and
+# the LLM calls, so the ceiling stays well below that budget: a suite that
+# outlived the task would end the run before its result could be posted.
+MAX_TIMEOUT_SECONDS = 900
+# Extra seconds a sandbox backend gets beyond the test timeout before the
+# host stops waiting for it (it should enforce the timeout itself).
+SANDBOX_GRACE_SECONDS = 30
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
 CLONE_TIMEOUT_SECONDS = 300
 # Characters of output tail shown in the PR body.
@@ -366,9 +373,17 @@ async def _run_plan(
 ) -> tuple[int, str, bool, str]:
     if sandbox_factory is not None:
         runner = SandboxRunner(repo_path=repo_dir, backend=sandbox_factory(repo_dir))
-        code, out, err = await runner.exec_command(
-            list(plan.command), timeout=plan.timeout_seconds
-        )
+        try:
+            # A hung backend must not hold the worker until the Celery limit.
+            code, out, err = await asyncio.wait_for(
+                runner.exec_command(list(plan.command), timeout=plan.timeout_seconds),
+                plan.timeout_seconds + SANDBOX_GRACE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise CommandTimeoutError(
+                f"sandbox did not return within {plan.timeout_seconds}s "
+                f"(+{SANDBOX_GRACE_SECONDS}s grace)"
+            ) from None
         output, truncated = _cap_output(out + err, max_output_bytes)
         return code, output, truncated, "sandbox"
     code, output, truncated = await run_local(
