@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **agents**: Verify each agent change with the repository's tests and gate MERGE_POLICY=ci on it ([#460](https://github.com/PxA-Labs/AutoMaintainer/pull/460)) - @purvanshjoshi
 - **dashboard**: Comprehensive professional UI/UX redesign & architecture decomposition ([#245](https://github.com/PxA-Labs/AutoMaintainer/pull/245)) - @purvanshjoshi
 - Web-first SaaS architecture with multi-tenancy, Celery queue, GitHub App auth, and observability ([#167](https://github.com/PxA-Labs/AutoMaintainer/pull/167)) - @purvanshjoshi
 - **ci**: Implement industry-standard changelog sync, PR title linter, and release automation ([#176](https://github.com/PxA-Labs/AutoMaintainer/pull/176)) (closes [#158](https://github.com/PxA-Labs/AutoMaintainer/issues/158)) - @purvanshjoshi
