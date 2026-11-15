@@ -1,9 +1,11 @@
 import os
 import shutil
 import uuid
+from unittest.mock import MagicMock
+
 import pytest
 from fastapi.testclient import TestClient
-from main import app, get_safe_repo_dir
+from main import app, get_safe_repo_dir, require_repo_access
 
 client = TestClient(app)
 
@@ -31,7 +33,63 @@ def setup_dummy_repo():
         shutil.rmtree(repo_dir, ignore_errors=True)
 
 
-def test_tree_endpoint(setup_dummy_repo):
+@pytest.fixture
+def authorized():
+    """Stand in for a caller who is authenticated and owns the repo."""
+    app.dependency_overrides[require_repo_access] = lambda: "test-org-id"
+    yield
+    app.dependency_overrides.pop(require_repo_access, None)
+
+
+@pytest.fixture
+def anonymous(monkeypatch):
+    """Supabase is configured, but the caller presents no credentials.
+
+    Without this the auth backend short-circuits to 503 ("not configured"),
+    which would hide whether authorization is actually enforced.
+    """
+    import agents
+
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    monkeypatch.setattr(agents, "supabase", MagicMock(), raising=False)
+    yield
+
+
+# --- Authorization: these endpoints read and mutate repository contents and
+# must never serve an unauthenticated caller. ---
+
+
+@pytest.mark.parametrize(
+    "method,path,kwargs",
+    [
+        ("get", "/repo/{repo}/tree", {}),
+        ("get", "/repo/{repo}/file?file_path=README.md", {}),
+        ("get", "/repo/{repo}/search?q=hello", {}),
+        ("post", "/repo/{repo}/file", {"json": {"file_path": "a.py", "content": "x"}}),
+        (
+            "post",
+            "/repo/{repo}/file/create",
+            {"json": {"file_path": "b.py", "content": "x"}},
+        ),
+        ("delete", "/repo/{repo}/file?file_path=README.md", {}),
+    ],
+)
+def test_repo_endpoints_reject_anonymous(
+    setup_dummy_repo, anonymous, method, path, kwargs
+):
+    url = path.format(repo=setup_dummy_repo)
+    response = getattr(client, method)(url, **kwargs)
+
+    assert response.status_code == 401, (
+        f"{method.upper()} {url} returned {response.status_code}; "
+        "unauthenticated callers must be rejected"
+    )
+
+
+# --- Functional behaviour, exercised as an authorized caller. ---
+
+
+def test_tree_endpoint(setup_dummy_repo, authorized):
     repo_name = setup_dummy_repo
     response = client.get(f"/repo/{repo_name}/tree")
     assert response.status_code == 200
@@ -40,7 +98,7 @@ def test_tree_endpoint(setup_dummy_repo):
     assert "children" in data
 
 
-def test_file_endpoint_valid(setup_dummy_repo):
+def test_file_endpoint_valid(setup_dummy_repo, authorized):
     repo_name = setup_dummy_repo
     url = f"/repo/{repo_name}/file?file_path=src/index.py"
     response = client.get(url)
@@ -48,8 +106,58 @@ def test_file_endpoint_valid(setup_dummy_repo):
     assert response.json() == {"content": "print('hello world')"}
 
 
-def test_file_endpoint_path_traversal(setup_dummy_repo):
+def test_file_endpoint_path_traversal(setup_dummy_repo, authorized):
     repo_name = setup_dummy_repo
     url = f"/repo/{repo_name}/file?file_path=../../../../etc/passwd"
     response = client.get(url)
     assert response.status_code in [400, 403, 404]
+
+
+@pytest.mark.parametrize(
+    "denied",
+    [".git/config", ".git/HEAD", ".GIT/config", ".git/refs/heads/main"],
+)
+def test_file_endpoint_blocks_git_metadata(setup_dummy_repo, authorized, denied):
+    """.git/config can contain the credentials used to clone the repo."""
+    repo_name = setup_dummy_repo
+    response = client.get(f"/repo/{repo_name}/file?file_path={denied}")
+    assert response.status_code == 403, (
+        f"{denied} returned {response.status_code}; repository metadata "
+        "must not be readable through the filesystem API"
+    )
+
+
+def _can_symlink(tmp_target, tmp_link):
+    """Windows needs Developer Mode or elevation to create symlinks."""
+    try:
+        os.symlink(tmp_target, tmp_link)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_symlink_cannot_escape_git_denylist(setup_dummy_repo, authorized):
+    """A symlink committed to the repo must not reach .git.
+
+    The denylist is checked before symlink resolution, so a tenant-controlled
+    link (leak -> .git/config) would otherwise resolve inside .git while still
+    passing the containment check, leaking the clone credentials.
+    """
+    repo_name = setup_dummy_repo
+    repo_dir = get_safe_repo_dir(repo_name)
+
+    config = os.path.join(repo_dir, ".git", "config")
+    with open(config, "w") as f:
+        f.write("[remote]\n\turl = https://x-access-token:SECRET@github.com/o/r\n")
+
+    link = os.path.join(repo_dir, "leak")
+    if not _can_symlink(config, link):
+        pytest.skip("symlink creation not permitted on this host")
+
+    response = client.get(f"/repo/{repo_name}/file?file_path=leak")
+
+    assert response.status_code == 403, (
+        f"symlink into .git returned {response.status_code}; "
+        "resolved path must be re-checked against the denylist"
+    )
+    assert "SECRET" not in response.text

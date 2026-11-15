@@ -1,1 +1,8 @@
 *.png filter=lfs diff=lfs merge=lfs -text
+
+# Keep these LF so the file reads identically on every checkout and inside
+# the image. Docker's ignorefile parser does trim a trailing CR, so CRLF
+# would not actually break the patterns -- this is consistency, not a fix.
+.dockerignore text eol=lf
+Dockerfile text eol=lf
+*.sh text eol=lf

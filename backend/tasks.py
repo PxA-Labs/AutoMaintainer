@@ -11,15 +11,19 @@ exist yet, add it in a migration before deploying this.
 
 import os
 import asyncio
+import inspect
 import threading
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
 
+import redis
+
 from redis_locks import (
     acquire_repo_lock,
     release_repo_lock,
+    is_heartbeat_alive,
     is_redis_available,
     write_heartbeat,
 )
@@ -177,18 +181,74 @@ async def record_usage_event(
         logger.error(f"Failed to record usage event: {e}")
 
 
+# Errors meaning "infrastructure was briefly unreachable", not "this run is
+# broken". Only these are retried, and only before the run has produced
+# any side effect (see _execute_agent_run).
+TRANSIENT_INFRA_ERRORS: tuple = (
+    redis.exceptions.ConnectionError,
+    redis.exceptions.TimeoutError,
+    ConnectionError,
+)
+try:  # Supabase talks HTTP through httpx; its transport errors are transient too.
+    import httpx
+
+    TRANSIENT_INFRA_ERRORS += (httpx.TransportError,)
+except ImportError:  # pragma: no cover - httpx ships with supabase
+    pass
+
+# Run states after which a (re)delivered task must do nothing.
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+TRANSIENT_MAX_RETRIES = 3
+
+# Waiting for a busy repository lock: retry every LOCK_WAIT_COUNTDOWN s,
+# at most LOCK_WAIT_MAX_RETRIES times (~30 min, the lock's own TTL).
+LOCK_WAIT_COUNTDOWN = 30
+LOCK_WAIT_MAX_RETRIES = 60
+# Heartbeat TTL written while waiting for the lock, so cleanup_stale_runs
+# doesn't reap a run that is merely queued behind another one. Generous
+# to absorb broker/ETA delays between retries.
+LOCK_WAIT_HEARTBEAT_TTL = 300
+
+
+def _fetch_run_status(run_id: str) -> Optional[str]:
+    """Return the run's current DB status, or None if the row doesn't exist."""
+    result = get_supabase().table("runs").select("status").eq("id", run_id).execute()
+    rows = result.data or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    return rows[0].get("status") if rows else None
+
+
+def _agent_loop_kwargs(**kwargs) -> dict:
+    """
+    Drop keyword arguments run_agent_loop doesn't accept (yet).
+
+    github_installation_id is passed through so runs can act with the
+    installation's credentials; older run_agent_loop signatures don't take
+    it, so filter by signature rather than risk a TypeError mid-task.
+    """
+    try:
+        params = inspect.signature(run_agent_loop).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 @shared_task(
     bind=True,
     name="tasks.run_agent_loop_task",
     queue="agent_runs",
     soft_time_limit=1800,  # 30 minutes soft limit
     time_limit=1920,  # 32 minutes hard limit
-    max_retries=2,
-    default_retry_delay=60,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_backoff_max=300,
-    retry_jitter=True,
+    # Deliberately no autoretry_for: a blanket retry re-ran the whole agent
+    # graph (duplicate issues, branches and PRs) and even retried 30-minute
+    # timeouts. _execute_agent_run retries explicitly, and only for
+    # transient infrastructure errors raised before any side effect.
+    max_retries=TRANSIENT_MAX_RETRIES,
+    default_retry_delay=30,
 )
 def run_agent_loop_task(
     self,
@@ -205,26 +265,90 @@ def run_agent_loop_task(
     Celery task to run the agent loop.
     This replaces the in-memory asyncio.Task approach.
     """
-    # Distributed lock: refuse to run if another run already owns this
-    # repository. self.retry() here (instead of just failing) means a
-    # queued run waits its turn rather than erroring out.
-    if not acquire_repo_lock(repository_id, run_id):
+    return _execute_agent_run(
+        self,
+        run_id=run_id,
+        repo_name=repo_name,
+        org_id=org_id,
+        user_id=user_id,
+        repository_id=repository_id,
+        github_installation_id=github_installation_id,
+        target_issue_number=target_issue_number,
+        mode=mode,
+    )
+
+
+def _execute_agent_run(
+    task,
+    run_id: str,
+    repo_name: str,
+    org_id: str,
+    user_id: str,
+    repository_id: int,
+    github_installation_id: int,
+    target_issue_number: Optional[int] = None,
+    mode: str = "autonomous",
+):
+    """
+    Body of run_agent_loop_task. Takes the bound Celery task explicitly so
+    it can be unit-tested with or without Celery installed.
+
+    Delivery is at-least-once (task_acks_late + task_reject_on_worker_lost),
+    so this must be safe to execute more than once for the same run_id:
+    - a run already in a terminal state is skipped;
+    - the repo lock is re-entrant for the same run_id;
+    - nothing after the first side effect is ever retried.
+    """
+    # --- Phase 1: preconditions. No side effects yet, so transient
+    # infrastructure errors here can be retried safely.
+    try:
+        status = _fetch_run_status(run_id)
+        if status is None or status in TERMINAL_RUN_STATUSES:
+            logger.info(f"Run {run_id} is {status or 'missing'}; skipping delivery")
+            return {"status": status or "missing", "skipped": True}
+
+        # Distributed lock: refuse to run if another run already owns this
+        # repository. Retrying (instead of failing) means a queued run waits
+        # its turn rather than erroring out.
+        lock_acquired = acquire_repo_lock(repository_id, run_id)
+    except TRANSIENT_INFRA_ERRORS as e:
+        logger.warning(f"Transient error before run {run_id} started: {e!r}")
+        raise task.retry(
+            exc=e,
+            countdown=min(30 * 2**task.request.retries, 300),
+            max_retries=TRANSIENT_MAX_RETRIES,
+        )
+
+    if not lock_acquired:
+        if task.request.retries >= LOCK_WAIT_MAX_RETRIES:
+            # Out of patience: record a terminal state instead of leaving
+            # the row 'queued' forever.
+            msg = "Repository is busy with another run; gave up waiting"
+            asyncio.run(update_run_status(run_id, "failed", error_message=msg))
+            return {"status": "failed", "error": msg}
         logger.info(
             f"Repo {repo_name} (id={repository_id}) is locked by another run; "
             f"retrying run {run_id} later"
         )
-        raise self.retry(countdown=30, max_retries=60)
+        # Keep the waiting run visibly alive for cleanup_stale_runs.
+        write_heartbeat(run_id, ttl_seconds=LOCK_WAIT_HEARTBEAT_TTL)
+        raise task.retry(
+            countdown=LOCK_WAIT_COUNTDOWN, max_retries=LOCK_WAIT_MAX_RETRIES
+        )
+
+    # --- Phase 2: from here on the run has side effects (DB rows, GitHub
+    # issues/branches/PRs). Every failure is terminal; never retry.
 
     # Heartbeat thread: proves this specific task is alive in near-real-time,
     # independent of how often the agent loop itself writes to the DB.
-    # cleanup_stale_runs (or any external monitor) can check this Redis key
-    # instead of relying solely on infrequent DB timestamp updates.
+    # cleanup_stale_runs checks this Redis key before reaping a run.
     heartbeat_stop = threading.Event()
 
     def _heartbeat_loop():
         while not heartbeat_stop.wait(20):
             write_heartbeat(run_id)
 
+    write_heartbeat(run_id)
     heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
     heartbeat_thread.start()
 
@@ -239,7 +363,7 @@ def run_agent_loop_task(
         # cancel_agent_task() can later call control.revoke() on the
         # exact task, not just flip a DB flag.
         loop.run_until_complete(
-            update_run_status(run_id, "running", celery_task_id=self.request.id)
+            update_run_status(run_id, "running", celery_task_id=task.request.id)
         )
 
         # Record usage event
@@ -268,7 +392,12 @@ def run_agent_loop_task(
         # The run_agent_loop function from agents.py handles the LangGraph execution
         result = loop.run_until_complete(
             run_agent_loop(
-                repo_name=repo_name, target_issue=target_issue_number, run_id=run_id
+                **_agent_loop_kwargs(
+                    repo_name=repo_name,
+                    target_issue=target_issue_number,
+                    run_id=run_id,
+                    github_installation_id=github_installation_id,
+                )
             )
         )
 
@@ -356,6 +485,7 @@ def run_agent_loop_task(
                 color="text-red-500",
             )
         )
+        # Terminal: re-raised for visibility only; nothing retries it.
         raise
 
     except Exception as e:
@@ -390,7 +520,12 @@ def run_agent_loop_task(
 def cleanup_stale_runs(self):
     """
     Periodic task to clean up runs stuck in 'running' or 'queued' state.
-    Runs that haven't been updated in 10+ minutes are marked as failed.
+
+    A run is stale only if BOTH its DB row hasn't been updated in 10+
+    minutes AND its Redis heartbeat has expired. The agent loop doesn't
+    touch updated_at mid-run, so the timestamp alone would kill healthy
+    long runs; the heartbeat is the real liveness signal. Reaped runs are
+    marked failed, their Celery task is revoked and their repo lock freed.
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -399,18 +534,20 @@ def cleanup_stale_runs(self):
         sb = get_supabase()
         cutoff = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
 
-        # Find stale runs
+        # Candidates: old by DB timestamp...
         result = loop.run_until_complete(
             asyncio.to_thread(
                 lambda: sb.table("runs")
-                .select("id, org_id, repo_name")
+                .select("id, org_id, repo_name, repository_id, celery_task_id")
                 .in_("status", ["running", "queued"])
                 .lt("updated_at", cutoff)
                 .execute()
             )
         )
 
-        stale_runs = result.data or []
+        # ...and with no live heartbeat. is_heartbeat_alive() returns True
+        # when Redis is unreachable, so an outage never reaps runs.
+        stale_runs = [r for r in (result.data or []) if not is_heartbeat_alive(r["id"])]
         cleaned = 0
 
         for run in stale_runs:
@@ -419,6 +556,19 @@ def cleanup_stale_runs(self):
             repo_name = run.get("repo_name", "unknown")
 
             logger.info(f"Cleaning up stale run {run_id} for {repo_name}")
+
+            # Stop the task if a worker is somehow still executing it, so a
+            # zombie can't keep producing side effects for a 'failed' run.
+            celery_task_id = run.get("celery_task_id")
+            if celery_task_id:
+                try:
+                    from celery_app import celery_app  # avoid circular import
+
+                    celery_app.control.revoke(
+                        celery_task_id, terminate=True, signal="SIGTERM"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to revoke task for run {run_id}: {e}")
 
             loop.run_until_complete(
                 update_run_status(
@@ -437,6 +587,14 @@ def cleanup_stale_runs(self):
                     color="text-amber-500",
                 )
             )
+
+            # Free the repo lock so queued runs for this repo can proceed.
+            # Owner-checked: a no-op unless this run still holds it.
+            if run.get("repository_id") is not None:
+                try:
+                    release_repo_lock(run["repository_id"], run_id)
+                except Exception as e:
+                    logger.warning(f"Failed to release lock for run {run_id}: {e}")
 
             cleaned += 1
 

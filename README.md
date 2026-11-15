@@ -10,13 +10,6 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
-[![Vercel](https://img.shields.io/badge/Vercel-Deployed-black?logo=vercel)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPxA-Labs%2FAutoMaintainer&root-directory=dashboard)
-
-<p align="center">
-  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FPxA-Labs%2FAutoMaintainer&root-directory=dashboard">
-    <img src="https://vercel.com/button" alt="Deploy with Vercel"/>
-  </a>
-</p>
 
 </div>
 
@@ -32,6 +25,7 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 >
 > During this major migration phase:
 > * **The platform is currently unstable and active workflows may be temporarily non-operational or experience breaking changes.**
+> * **Do not expose a deployment to the public internet yet.** Several API routes are still unauthenticated while the multi-tenant control plane lands, including an interactive terminal endpoint. Run AutoMaintainer locally or on a trusted network until the authentication migration is complete. The one-click deploy button was removed for this reason.
 > * Core systems being actively overhauled include:
 >   - **Multi-Tenant SaaS Control Plane:** Migrating from single-user local state to organization-scoped data isolation and Row Level Security (RLS).
 >   - **Durable Task Queue:** Replacing in-memory asyncio task execution with Celery + Redis distributed workers and retry mechanisms.
@@ -70,7 +64,7 @@ Built with **LangGraph**, **FastAPI**, **Next.js**, and powered by **Llama 3 (vi
 ## Development & Local Setup
 
 ### 1. Prerequisites
-- [Node.js](https://nodejs.org/en/) (v20+)
+- [Node.js](https://nodejs.org/en/) (v22.18+; the gitnexus CLI requires `^22.18 || >=24.11`)
 - [Python](https://www.python.org/) (3.11+)
 - A [Groq API Key](https://console.groq.com/keys)
 - A [GitHub Token](https://github.com/settings/tokens) or GitHub App credentials
@@ -96,7 +90,11 @@ GITHUB_TOKEN="your_github_token_here"
 SUPABASE_URL="https://your-project.supabase.co"
 SUPABASE_SERVICE_KEY="your_supabase_service_role_key"
 REDIS_URL="redis://localhost:6379/0"
+# Local development only - never set in a deployment:
+# ENVIRONMENT="development"
+# AUTH_DEV_BYPASS="true"
 ```
+See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md#environment-variables) for the full list of variables.
 
 **Frontend Environment (`dashboard/.env.local`):**
 ```bash
@@ -112,6 +110,17 @@ pip install -r requirements.txt
 fastapi dev main.py
 ```
 
+Agent runs are executed by a Celery worker. Without one, runs stay `queued`:
+```bash
+cd backend
+celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
+```
+
+Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docker:
+```bash
+docker compose up --build   # http://localhost:8000
+```
+
 ### 4. Run Frontend (Next.js)
 ```bash
 cd dashboard
@@ -124,14 +133,17 @@ Open `http://localhost:3000` in your browser.
 
 ## Deployment (Production SaaS)
 
-AutoMaintainer is configured for distributed cloud deployment:
+Read [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) before deploying. It covers the topology, every environment variable, and the security checklist. The API and the agent worker **must share the repository workspace directory**.
 
-* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with root directory set to `dashboard/`. Uses [`dashboard/vercel.json`](./dashboard/vercel.json) for static export and security headers.
-* **Backend & Workers (Render):** Deploy using the included [`render.yaml`](./render.yaml) blueprint to launch the FastAPI control plane, Redis broker, and Celery background workers.
-* **Containerized Deployment (Docker / GHCR):** Pull the pre-built multi-arch image:
+* **Frontend (Vercel):** Connect the repository to [Vercel](https://vercel.com) with the root directory set to `dashboard/`. It uses [`dashboard/vercel.json`](./dashboard/vercel.json) for the static export and security headers.
+* **Backend and workers (Render):** The [`render.yaml`](./render.yaml) blueprint builds the Docker image. It runs the API and the `agent_runs` worker together in one single-instance web service, plus a maintenance/beat worker and Redis. Render disks cannot be shared between services, so splitting them would break the IDE routes.
+* **Docker Compose:** `docker compose up --build` starts the API, worker, beat and Redis, with a shared workspace volume.
+* **Container image (GHCR):** Published from `main` and release tags (linux/amd64). It runs as a non-root user with `ENVIRONMENT=production`:
   ```bash
   docker pull ghcr.io/pxa-labs/automaintainer:latest
   ```
+
+Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unless you have read the terminal section of the deployment guide.
 
 ---
 

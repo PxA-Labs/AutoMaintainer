@@ -99,3 +99,59 @@ async def test_missing_delivery_headers_are_rejected():
     with patch.object(github_app, "GITHUB_WEBHOOK_SECRET", SECRET):
         with pytest.raises(ValueError, match="Missing required GitHub webhook headers"):
             await github_app.handle_github_webhook(body, headers, _supabase()[0])
+
+
+@pytest.mark.asyncio
+async def test_lowercase_header_names_are_accepted():
+    """ASGI servers lower-case header names; main.py passes them on as a dict."""
+    body = json.dumps({"action": "opened", "installation": {"id": 7}}).encode()
+    supabase, events = _supabase()
+    headers = {
+        "x-github-event": "issues",
+        "x-github-delivery": "delivery-4",
+        "x-hub-signature-256": _signature(body),
+    }
+
+    with patch.object(github_app, "GITHUB_WEBHOOK_SECRET", SECRET):
+        result = await github_app.handle_github_webhook(body, headers, supabase)
+
+    assert result["status"] == "queued"
+    events.insert.assert_called_once()
+
+
+def test_webhook_endpoint_accepts_real_github_delivery(monkeypatch):
+    """End to end through the HTTP stack, with headers as GitHub sends them.
+
+    Regression guard: every real delivery was rejected with 400 "Invalid
+    webhook signature" because the handler looked up mixed-case keys in the
+    lower-cased dict(request.headers).
+    """
+    from fastapi.testclient import TestClient
+
+    import agents
+    import main
+
+    body = json.dumps({"action": "opened", "installation": {"id": 7}}).encode()
+    supabase, events = _supabase()
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setattr(github_app, "GITHUB_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setattr(agents, "supabase", supabase, raising=False)
+
+    response = TestClient(main.app).post(
+        "/webhooks/github",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-GitHub-Event": "pull_request",
+            "X-GitHub-Delivery": "delivery-http-1",
+            "X-Hub-Signature-256": _signature(body),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "status": "queued",
+        "event_type": "pull_request",
+        "delivery_id": "delivery-http-1",
+    }
+    assert events.insert.call_args.args[0]["github_delivery_id"] == "delivery-http-1"

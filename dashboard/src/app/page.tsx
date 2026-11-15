@@ -2,14 +2,12 @@
 
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import ErrorBoundary from "@/components/ErrorBoundary";
-import { AuthProvider } from "@/lib/auth";
 
 export default function Home() {
   return (
     <ErrorBoundary title="Dashboard Error">
-      <AuthProvider>
-        <DashboardShell />
-      </AuthProvider>
+      {/* AuthProvider is mounted once, in the root layout. */}
+      <DashboardShell />
     </ErrorBoundary>
   );
 }

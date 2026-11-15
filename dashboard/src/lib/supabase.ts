@@ -30,14 +30,24 @@ const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placehold
 // which otherwise surfaces later as confusing auth and PostgREST errors.
 // Checked lazily inside the factories so importing this module stays safe
 // during build and prerender.
-const getRequiredConfig = () => {
+const SUPABASE_CONFIG_MISSING =
+  'Supabase configuration is missing. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.';
+
+/**
+ * Returns a human-readable error when the Supabase env vars are absent, or
+ * null when they are set. Lets the UI render a configuration error screen
+ * instead of throwing from an effect (which blanks the whole app).
+ */
+export function getSupabaseConfigError(): string | null {
   const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim().replace(/^['"]+|['"]+$/g, '');
   const rawKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim().replace(/^['"]+|['"]+$/g, '');
+  return rawUrl && rawKey ? null : SUPABASE_CONFIG_MISSING;
+}
 
-  if (!rawUrl || !rawKey) {
-    throw new Error(
-      'Supabase configuration is missing. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'
-    );
+const getRequiredConfig = () => {
+  const configError = getSupabaseConfigError();
+  if (configError) {
+    throw new Error(configError);
   }
 
   return { supabaseUrl, supabaseAnonKey };
