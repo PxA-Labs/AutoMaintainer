@@ -123,6 +123,9 @@ DASHBOARD_CALLS = {
         },
         reads=frozenset({"branch_name", "pr_number", "pr_url"}),
     ),
+    # lib/github-app.ts requestInstallUrl() (no body; the GitHub user token
+    # goes in the X-GitHub-User-Token header, which this table does not model)
+    ("POST", "/github/app/install-url"): Call(reads=frozenset({"install_url"})),
     # lib/terminal.ts buildTerminalWsUrl() (WebSockets are not in OpenAPI)
     ("WEBSOCKET", "/api/terminal/ws"): Call(query=frozenset({"repo_url"})),
 }
