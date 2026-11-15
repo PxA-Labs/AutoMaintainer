@@ -33,7 +33,7 @@ export function SupabaseConfigError({ message }: { message: string }) {
       <div className="max-w-md text-center">
         <h1 className="text-xl font-semibold text-zinc-100 mb-2">Dashboard is not configured</h1>
         <p className="text-sm text-zinc-400 mb-4">{message}</p>
-        <p className="text-xs text-zinc-500">
+        <p className="text-xs text-muted">
           These variables are read when the dashboard is built. Rebuild it with them set.
         </p>
       </div>

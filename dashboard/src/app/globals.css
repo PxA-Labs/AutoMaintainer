@@ -10,6 +10,13 @@
   --text-primary: #fafafa;
   --text-secondary: #a1a1aa;
   --text-tertiary: #71717a;
+  /*
+   * Secondary/caption text. zinc-500 (#71717a) is only 4.1:1 on the page
+   * background and 3.7:1 on zinc-900 cards, below WCAG AA (4.5:1). This
+   * grey keeps it visually below zinc-400 while passing AA on every surface
+   * it is used on: 6.1:1 on zinc-950, 5.5:1 on zinc-900, 4.6:1 on zinc-800.
+   */
+  --text-muted: #8e8e97;
   --accent: #6366f1;
   --accent-subtle: rgba(99, 102, 241, 0.15);
   --success: #22c55e;
@@ -24,6 +31,7 @@
   --color-surface-2: var(--surface-2);
   --color-accent: var(--accent);
   --color-accent-subtle: var(--accent-subtle);
+  --color-muted: var(--text-muted);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

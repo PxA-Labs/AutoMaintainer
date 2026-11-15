@@ -23,11 +23,11 @@ export function AgentCard({ name, role, icon, status }: AgentCardProps) {
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-zinc-200 truncate">{name}</p>
-        <p className="text-[11px] text-zinc-500 truncate">{role}</p>
+        <p className="text-[11px] text-muted truncate">{role}</p>
       </div>
       <div className="flex items-center gap-1.5">
         <StatusDot status={status} size="sm" />
-        <span className="text-[11px] text-zinc-500 capitalize">{status}</span>
+        <span className="text-[11px] text-muted capitalize">{status}</span>
       </div>
     </div>
   );
