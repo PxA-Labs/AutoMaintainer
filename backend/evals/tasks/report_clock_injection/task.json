@@ -1,0 +1,10 @@
+{
+  "id": "report_clock_injection",
+  "title": "Let render_report take the current time as a parameter",
+  "body": "`render_report(title, rows)` in `reports/summary.py` calls `datetime.now()` itself, so its output cannot be tested. Please add an optional keyword argument `now` (a `datetime`). When it is given, the `Generated` line uses it; when it is omitted or `None`, the function uses the current time exactly as it does today. Nothing else about the output may change.",
+  "target_file": "reports/summary.py",
+  "kind": "refactor",
+  "category": "api-change",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

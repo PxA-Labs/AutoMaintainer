@@ -1,0 +1,10 @@
+{
+  "id": "transpose_ragged",
+  "title": "transpose returns tuples and silently truncates ragged rows",
+  "body": "`transpose(rows)` in `grid/matrix.py` is built on `zip(*rows)`. It returns a list of tuples although callers expect a list of lists, and when rows have different lengths it silently drops values. It should return a new list of lists (the input must not be modified), raise `ValueError` if the rows do not all have the same length, and return `[]` for no rows.",
+  "target_file": "grid/matrix.py",
+  "kind": "bugfix",
+  "category": "input-validation",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

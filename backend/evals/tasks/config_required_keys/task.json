@@ -1,0 +1,10 @@
+{
+  "id": "config_required_keys",
+  "title": "Report missing required keys when parsing a config file",
+  "body": "`parse_config` in `iniconf/parser.py` parses `key = value` lines. Please add a keyword-only parameter `required` (an iterable of key names, default empty). If any required key is absent from the parsed result, raise the module's existing `ConfigError` and set its `missing` attribute to the sorted list of every missing key, not just the first one. When nothing is missing, the result is the same as today. Errors for malformed lines keep their current behaviour.",
+  "target_file": "iniconf/parser.py",
+  "kind": "feature",
+  "category": "input-validation",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

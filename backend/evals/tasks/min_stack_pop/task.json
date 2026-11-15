@@ -1,0 +1,10 @@
+{
+  "id": "min_stack_pop",
+  "title": "MinStack.min is wrong after pop",
+  "body": "`MinStack` in `structures/minstack.py` should report the smallest value currently on the stack in O(1). It only remembers one minimum, so after popping the current minimum `min()` keeps returning the value that is no longer on the stack. Duplicate values must be handled too: pushing 3 twice and popping once leaves 3 as the minimum. `pop()` and `min()` on an empty stack must raise `IndexError` (today `min()` returns `None`). `push`, `pop` and `len()` must otherwise keep working as now.",
+  "target_file": "structures/minstack.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

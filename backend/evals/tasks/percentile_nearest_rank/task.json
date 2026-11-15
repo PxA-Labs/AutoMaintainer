@@ -1,0 +1,10 @@
+{
+  "id": "percentile_nearest_rank",
+  "title": "percentile is off by one and crashes at p=100",
+  "body": "`percentile` in `metrics/percentiles.py` is documented to use the nearest-rank method: sort the values, then take rank `ceil(p / 100 * n)` (at least 1), counting from 1. It does not sort its input, it picks the wrong element whenever `p / 100 * n` is a whole number, and `p=100` raises `IndexError`. Please fix it. It must not modify the list it is given. An empty list, or a `p` outside 0 to 100, should raise `ValueError`.",
+  "target_file": "metrics/percentiles.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

@@ -86,8 +86,30 @@ def test_replay_exercises_every_outcome(replay_results):
     # Chat-style fenced replies are unwrapped by normalize_generated_code.
     assert by_id["slug_hyphens"]["resolved"]
     assert by_id["env_bool_override"]["resolved"]
+    assert by_id["percentile_nearest_rank"]["resolved"]  # one-line lead-in
+    assert by_id["unique_keep_first"]["resolved"]  # chat explanation, py fence
+    assert by_id["config_required_keys"]["resolved"]  # untagged fence only
+    # Rejections the production Implementer must also refuse to commit.
+    assert "empty" in by_id["batched_tail"]["rejection_reason"]
+    assert "ambiguous" in by_id["transpose_ragged"]["rejection_reason"]
+    assert "language" in by_id["report_clock_injection"]["rejection_reason"]
+    # A bare file with a syntax error is applied, then breaks every test.
+    assert by_id["carrier_registry"]["applied"]
+    assert by_id["carrier_registry"]["regression"] is True
+    # Dropping a public name existing callers use is a regression.
+    assert by_id["deprecated_alias"]["regression"] is True
+    # Plausible but wrong fixes: hidden tests fail, nothing else breaks.
+    for task_id in (
+        "sliding_window_limiter",
+        "event_bus_unsubscribe",
+        "port_validation",
+    ):
+        assert by_id[task_id]["hidden_tests_passed"] is False, task_id
+        assert by_id[task_id]["regression"] is False, task_id
     summary = aggregate(replay_results)
-    assert (summary["resolved"], summary["n"]) == (6, 10)
+    # CI's replay gate (--min-resolve-rate 0.6 in evals.yml) relies on this.
+    assert (summary["resolved"], summary["n"]) == (18, 30)
+    assert summary["output_rejected"] == 5 and summary["regressions"] == 3
     assert summary["stale_cassettes"] == 0
     assert all(r["synthetic"] for r in replay_results)
 

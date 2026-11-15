@@ -4,6 +4,7 @@
   "body": "`total_by_category` in `ledger.py` always leaves out the first transaction. It skips `rows[0]` as if it were a CSV header, but the rows come from `parse_rows`, which uses `csv.DictReader` and has already consumed the header. Every transaction should be counted.",
   "target_file": "ledger.py",
   "kind": "bugfix",
+  "category": "edge-case",
   "difficulty": "easy",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

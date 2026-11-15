@@ -31,11 +31,11 @@ export function Header({
 
       <div className="flex items-center gap-3">
         {tokensUsed > 0 && (
-          <div className="flex items-center gap-3 text-xs font-mono text-zinc-500 bg-zinc-900/60 px-3 py-1.5 rounded-md border border-zinc-800/60">
+          <div className="flex items-center gap-3 text-xs font-mono text-muted bg-zinc-900/60 px-3 py-1.5 rounded-md border border-zinc-800/60">
             <span className="tabular-nums">
               {tokensUsed.toLocaleString()} tokens
             </span>
-            <span className="text-zinc-700">|</span>
+            <span className="text-zinc-700" aria-hidden="true">|</span>
             <span className="tabular-nums">{latency}ms</span>
           </div>
         )}

@@ -55,7 +55,7 @@ export function LogConsole({
               Scroll to bottom
             </button>
           )}
-          <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
+          <span className="text-[11px] font-mono text-muted tabular-nums">
             {logs.length} {logs.length === 1 ? "entry" : "entries"}
           </span>
         </div>
@@ -72,7 +72,7 @@ export function LogConsole({
             key={i}
             className="flex items-start gap-2.5 py-0.5 leading-relaxed hover:bg-zinc-900/30 px-1 rounded transition-colors"
           >
-            <span className="text-zinc-600 shrink-0 text-[11px] tabular-nums select-none">
+            <span className="text-muted shrink-0 text-[11px] tabular-nums select-none">
               {log.time}
             </span>
             <span className="text-zinc-400 font-medium shrink-0 select-none">

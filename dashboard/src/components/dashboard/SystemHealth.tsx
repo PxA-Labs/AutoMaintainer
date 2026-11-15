@@ -23,7 +23,7 @@ export function SystemHealth({ latency, tokensUsed }: SystemHealthProps) {
           <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
           System Health
         </h3>
-        <span className="text-[11px] font-mono text-zinc-500">Selected run</span>
+        <span className="text-[11px] font-mono text-muted">Selected run</span>
       </div>
 
       <div className="flex-1 flex flex-col justify-center space-y-4">

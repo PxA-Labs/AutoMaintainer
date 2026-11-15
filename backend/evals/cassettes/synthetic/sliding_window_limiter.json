@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: partial fix: drops every expired timestamp but still records rejected calls (hidden tests fail, existing tests pass)",
+  "prompt_sha256": "b1ce8860dbca0eefc78dc09a2a8200285f8dca72b0da1daf5ac392e9a67b00cd",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Sliding-window rate limiting for the public API.\"\"\"\n\nfrom collections import deque\n\n\nclass RateLimiter:\n    \"\"\"Allow at most ``limit`` calls in any ``window``-second interval.\"\"\"\n\n    def __init__(self, limit: int, window: float):\n        self.limit = limit\n        self.window = window\n        self._calls: deque[float] = deque()\n\n    def allow(self, now: float) -> bool:\n        while self._calls and self._calls[0] <= now - self.window:\n            self._calls.popleft()\n        allowed = len(self._calls) < self.limit\n        self._calls.append(now)\n        return allowed\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "sliding_window_limiter",
+  "temperature": null,
+  "usage": null
+}

@@ -1,0 +1,10 @@
+{
+  "id": "event_bus_unsubscribe",
+  "title": "EventBus has no way to unsubscribe a handler",
+  "body": "`EventBus` in `signals/bus.py` lets handlers subscribe to an event name but never lets them leave. Please make `subscribe(event, handler)` return an unsubscribe function. Calling it removes that subscription, so the handler is not called by later `publish` calls; calling it again does nothing. If the same handler was subscribed twice, each returned function removes only its own subscription. A handler may unsubscribe itself, or another handler, while `publish` is running: every handler that was subscribed when that `publish` call started is still called exactly once, in subscription order. `publish` keeps returning the number of handlers it called.",
+  "target_file": "signals/bus.py",
+  "kind": "feature",
+  "category": "data-structure",
+  "difficulty": "hard",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

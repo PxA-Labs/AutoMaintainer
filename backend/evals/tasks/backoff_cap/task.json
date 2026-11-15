@@ -4,6 +4,7 @@
   "body": "`backoff_delays` in `netutil/backoff.py` doubles the delay on every attempt with no upper bound, so long retry loops end up waiting for minutes. Please add an optional keyword argument `max_delay` (default `None`, meaning no limit) that clamps every delay to at most `max_delay`. A `max_delay` that is zero or negative is a programming error and should raise `ValueError`. Existing callers must keep working unchanged.",
   "target_file": "netutil/backoff.py",
   "kind": "feature",
+  "category": "api-change",
   "difficulty": "medium",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

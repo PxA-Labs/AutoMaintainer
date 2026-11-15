@@ -135,7 +135,7 @@ export function Sidebar({
             AutoMaintainer
           </span>
         </div>
-        <span className="text-[10px] font-mono text-zinc-500 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded">
+        <span className="text-[10px] font-mono text-muted bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded">
           v2.0
         </span>
       </div>
@@ -172,7 +172,7 @@ export function Sidebar({
 
         {/* Configuration Section */}
         <div className="space-y-3 pt-3 border-t border-zinc-800/40">
-          <h2 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider px-2">
+          <h2 className="text-[11px] font-semibold text-muted uppercase tracking-wider px-2">
             Target Repository
           </h2>
 
@@ -183,7 +183,7 @@ export function Sidebar({
                   the edit button, so clicking it still starts editing. */}
               <label
                 htmlFor={isEditingRepo ? "target-repo-input" : "target-repo-edit"}
-                className="text-[10px] font-medium text-zinc-500 flex items-center gap-1.5 mb-1 cursor-pointer"
+                className="text-[10px] font-medium text-muted flex items-center gap-1.5 mb-1 cursor-pointer"
               >
                 <GitBranch className="w-3 h-3 text-zinc-400" />
                 Repository Identifier
@@ -215,7 +215,7 @@ export function Sidebar({
             <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-lg p-2">
               <label
                 htmlFor="target-issue-input"
-                className="text-[10px] font-medium text-zinc-500 flex items-center gap-1.5 mb-1"
+                className="text-[10px] font-medium text-muted flex items-center gap-1.5 mb-1"
               >
                 <Search className="w-3 h-3 text-zinc-400" />
                 Issue Number (Optional)
@@ -225,7 +225,7 @@ export function Sidebar({
                 type="text"
                 value={targetIssue}
                 onChange={(e) => onTargetIssueChange(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800/80 rounded px-2 py-1 text-xs text-zinc-100 font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                className="w-full bg-zinc-950 border border-zinc-800/80 rounded px-2 py-1 text-xs text-zinc-100 font-mono placeholder:text-muted focus:outline-none focus:border-indigo-500"
                 placeholder="#123 or blank"
               />
             </div>
@@ -234,7 +234,7 @@ export function Sidebar({
 
         {/* Crew Roster Status */}
         <div className="space-y-2 pt-3 border-t border-zinc-800/40">
-          <h2 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider px-2">
+          <h2 className="text-[11px] font-semibold text-muted uppercase tracking-wider px-2">
             Engineering Crew
           </h2>
           <div className="space-y-1">
@@ -249,13 +249,13 @@ export function Sidebar({
                     <p className="font-medium text-zinc-300 truncate">
                       {agent.name}
                     </p>
-                    <p className="text-[10px] text-zinc-500 truncate">
+                    <p className="text-[10px] text-muted truncate">
                       {agent.role}
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <StatusDot status={status} size="sm" />
-                    <span className="text-[10px] text-zinc-500 capitalize">
+                    <span className="text-[10px] text-muted capitalize">
                       {status}
                     </span>
                   </div>

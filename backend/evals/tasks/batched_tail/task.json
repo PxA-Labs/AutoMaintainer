@@ -1,0 +1,10 @@
+{
+  "id": "batched_tail",
+  "title": "batched drops the last partial batch",
+  "body": "`batched(iterable, size)` in `streams/chunks.py` yields lists of `size` consecutive items, but silently drops the final batch when it has fewer than `size` items, so records get lost. The last batch must be yielded even if it is shorter (but never an empty batch). `size` smaller than 1 must raise `ValueError` (it is fine if the error only appears when iteration starts). It must keep working on any iterable, including one-shot iterators.",
+  "target_file": "streams/chunks.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "easy",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

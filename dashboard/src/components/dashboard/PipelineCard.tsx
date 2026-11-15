@@ -22,7 +22,7 @@ export function PipelineCard({ pipeline }: PipelineCardProps) {
           <GitPullRequest className="w-3.5 h-3.5 text-indigo-400" aria-hidden="true" />
           Active Pipeline
         </h3>
-        <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
+        <span className="text-[11px] font-mono text-muted tabular-nums">
           {pipeline.length} items
         </span>
       </div>
@@ -40,7 +40,7 @@ export function PipelineCard({ pipeline }: PipelineCardProps) {
                 key={p.id}
                 className="flex items-center gap-2.5 p-2 bg-zinc-900/80 border border-zinc-800/40 rounded-lg text-xs"
               >
-                <span className="font-mono text-zinc-500 text-[11px] shrink-0">
+                <span className="font-mono text-muted text-[11px] shrink-0">
                   #{p.id}
                 </span>
                 <span className="text-zinc-200 truncate flex-1 font-medium">
@@ -55,9 +55,9 @@ export function PipelineCard({ pipeline }: PipelineCardProps) {
             );
           })
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center py-6 text-zinc-500 text-xs">
+          <div className="flex flex-col items-center justify-center h-full text-center py-6 text-muted text-xs">
             <p>No active pipeline tasks</p>
-            <p className="text-[11px] text-zinc-600 mt-1">Start a run to trigger orchestration</p>
+            <p className="text-[11px] text-muted mt-1">Start a run to trigger orchestration</p>
           </div>
         )}
       </div>

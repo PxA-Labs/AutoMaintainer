@@ -1,0 +1,10 @@
+{
+  "id": "wrap_long_words",
+  "title": "wrap emits empty lines for long words and repeated spaces",
+  "body": "`wrap(text, width)` in `textutil/wrapping.py` greedily packs words into lines of at most `width` characters. It has edge-case bugs: a word that is exactly `width` long, or longer than `width`, at the start of the text produces an empty first line; and runs of several spaces produce empty words. Expected behaviour: words are separated by any run of whitespace (as `str.split()` with no argument does); lines never contain empty strings; a word longer than `width` is put on a line of its own without being broken; a word fits on a line if the line, including single spaces between words, is at most `width` characters. Empty or all-whitespace text gives `[]`. A `width` smaller than 1 raises `ValueError`.",
+  "target_file": "textutil/wrapping.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

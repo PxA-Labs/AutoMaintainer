@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "d27883b3710db75925c767c3f56002c7da2de292300eb946b1288ff8761fcf7e",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Parsing of exported payment records.\"\"\"\n\n\ndef read_records(lines):\n    \"\"\"Lazily parse ``name,amount`` lines into ``(name, amount)`` tuples.\"\"\"\n    for number, line in enumerate(lines, start=1):\n        line = line.strip()\n        if not line:\n            continue\n        parts = line.split(\",\")\n        if len(parts) != 2:\n            raise ValueError(f\"line {number}: expected 'name,amount'\")\n        name, amount = parts[0].strip(), parts[1].strip()\n        try:\n            value = int(amount)\n        except ValueError:\n            raise ValueError(f\"line {number}: bad amount {amount!r}\") from None\n        yield name, value\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "lazy_record_reader",
+  "temperature": null,
+  "usage": null
+}

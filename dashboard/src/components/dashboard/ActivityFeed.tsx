@@ -14,7 +14,7 @@ export function ActivityFeed({ activity }: ActivityFeedProps) {
           <Activity className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
           Recent Activity
         </h3>
-        <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
+        <span className="text-[11px] font-mono text-muted tabular-nums">
           {activity.length} events
         </span>
       </div>
@@ -26,7 +26,7 @@ export function ActivityFeed({ activity }: ActivityFeedProps) {
               key={i}
               className="flex items-start gap-2.5 p-2 bg-zinc-900/80 border border-zinc-800/40 rounded-lg text-xs"
             >
-              <span className="text-[10px] font-mono text-zinc-500 shrink-0 mt-0.5 tabular-nums">
+              <span className="text-[10px] font-mono text-muted shrink-0 mt-0.5 tabular-nums">
                 {a.time || "now"}
               </span>
               <span className="text-zinc-300 leading-relaxed break-words">
@@ -35,9 +35,9 @@ export function ActivityFeed({ activity }: ActivityFeedProps) {
             </div>
           ))
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-center py-6 text-zinc-500 text-xs">
+          <div className="flex flex-col items-center justify-center h-full text-center py-6 text-muted text-xs">
             <p>No recent activity</p>
-            <p className="text-[11px] text-zinc-600 mt-1">Actions taken by agents appear here</p>
+            <p className="text-[11px] text-muted mt-1">Actions taken by agents appear here</p>
           </div>
         )}
       </div>

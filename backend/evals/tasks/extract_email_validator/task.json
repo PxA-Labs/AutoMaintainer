@@ -1,0 +1,10 @@
+{
+  "id": "extract_email_validator",
+  "title": "Extract the duplicated email check into validate_email",
+  "body": "`accounts/users.py` checks email addresses twice, once in `create_user` and once in `change_email`, with copy-pasted code. Please extract a public function `validate_email(email: str) -> str` that performs exactly the existing check and returns the normalised address (stripped and lower-cased), raising `ValueError` like the current code. Both `create_user` and `change_email` must call it through the module-level name `validate_email`, so that replacing that name (for example with a stricter validator) changes both of them. Behaviour must otherwise stay the same.",
+  "target_file": "accounts/users.py",
+  "kind": "refactor",
+  "category": "input-validation",
+  "difficulty": "medium",
+  "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
+}

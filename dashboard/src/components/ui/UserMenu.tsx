@@ -43,7 +43,9 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
     <div ref={menuRef} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        aria-label="User menu"
+        // The visible name must be part of the accessible name (WCAG 2.5.3
+        // label in name), so voice users can say what they see.
+        aria-label={`${displayName}, account menu`}
         aria-expanded={open}
         className="flex items-center gap-2 w-full p-2 rounded-lg hover:bg-zinc-800/60 transition-colors"
       >
@@ -66,7 +68,7 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
             <p className="text-xs font-medium text-zinc-200 truncate">
               {displayName}
             </p>
-            <p className="text-[10px] text-zinc-500 truncate">{user?.email}</p>
+            <p className="text-[10px] text-muted truncate">{user?.email}</p>
           </div>
           <button
             onClick={() => {

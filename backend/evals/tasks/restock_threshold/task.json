@@ -4,6 +4,7 @@
   "body": "The docstring of `needs_restock` in `shop/stock.py` says an item is reordered once its quantity falls to the threshold or below. In practice an item whose quantity is exactly equal to the threshold is reported as not needing a restock, so it is also missing from `restock_list`. Items at the threshold should be reordered.",
   "target_file": "shop/stock.py",
   "kind": "bugfix",
+  "category": "edge-case",
   "difficulty": "easy",
   "provenance": "original: written for this harness in 2026-11; not derived from any public repository, issue tracker or benchmark"
 }

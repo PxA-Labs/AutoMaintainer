@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix returned as the bare file",
+  "prompt_sha256": "a0f083ae098dc4b42692666bd0c1bb3697c1dfa8508d57796935502dfadc68b5",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Temperature conversions for the weather widget.\"\"\"\n\n\ndef celsius_to_fahrenheit(celsius: float) -> float:\n    \"\"\"Convert degrees Celsius to degrees Fahrenheit.\"\"\"\n    return celsius * 9 / 5 + 32\n\n\ndef fahrenheit_to_celsius(fahrenheit: float) -> float:\n    \"\"\"Convert degrees Fahrenheit to degrees Celsius.\"\"\"\n    return (fahrenheit - 32) * 5 / 9\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "fahrenheit_precedence",
+  "temperature": null,
+  "usage": null
+}

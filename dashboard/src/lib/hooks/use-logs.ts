@@ -27,7 +27,7 @@ const INITIAL_LOG: LogEntry = {
   time: "00:00:00",
   agent: "System",
   msg: "Connecting to backend...",
-  color: "text-zinc-500",
+  color: "text-muted",
 };
 
 export function useLogs(activeRunId: string | null) {
@@ -65,7 +65,7 @@ export function useLogs(activeRunId: string | null) {
         time: new Date().toLocaleTimeString(),
         agent: "System",
         msg: "Connecting...",
-        color: "text-zinc-500",
+        color: "text-muted",
       },
     ]);
     setPipeline([]);

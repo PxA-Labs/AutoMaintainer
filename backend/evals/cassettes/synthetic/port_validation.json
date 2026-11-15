@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: almost correct: forgets that bool is a subclass of int, so True is accepted as port 1 (hidden tests fail)",
+  "prompt_sha256": "1bcc4165c4d72d0abe85d943b589c1223675f7d705e9be9ba245a1f458c345a6",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Validation of network settings.\"\"\"\n\n\ndef parse_port(value) -> int:\n    \"\"\"Return ``value`` as a TCP port number (1-65535).\"\"\"\n    if isinstance(value, int):\n        port = value\n    elif isinstance(value, str):\n        text = value.strip()\n        if not (text.isascii() and text.isdigit()):\n            raise ValueError(f\"not a port number: {value!r}\")\n        port = int(text)\n    else:\n        raise ValueError(f\"not a port number: {value!r}\")\n    if not 1 <= port <= 65535:\n        raise ValueError(f\"port out of range: {port}\")\n    return port\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "port_validation",
+  "temperature": null,
+  "usage": null
+}

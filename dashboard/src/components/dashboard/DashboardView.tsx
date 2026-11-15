@@ -45,7 +45,7 @@ export function DashboardView({
           <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">
             Autonomous Engineering Crew
           </h2>
-          <span className="text-[11px] text-zinc-500 font-mono">
+          <span className="text-[11px] text-muted font-mono">
             {activeAgents} active
           </span>
         </div>
