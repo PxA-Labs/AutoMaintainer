@@ -203,17 +203,22 @@ def test_extract_final_agent_content_rejects_malformed_truthy_messages():
 
 def test_should_implement():
     # PM Decision APPROVED -> implementer
-    state_approved = {"pm_decision": "  VERDICT: APPROVE\nShip it with fixes. "}
+    state_approved = {
+        "pm_decision": '  {"verdict": "approve", "reasons": ["Ship it with fixes."]} '
+    }
     assert should_implement(state_approved) == "implementer"
 
     # PM Decision REJECTED -> END
-    state_rejected = {"pm_decision": "VERDICT: REJECT"}
+    state_rejected = {"pm_decision": '{"verdict": "reject"}'}
     assert should_implement(state_rejected) == "__end__"
 
 
 def test_should_iterate():
     # LGTM -> END
-    state_lgtm = {"review": "VERDICT: APPROVE\nLooks good to me.", "iteration": 0}
+    state_lgtm = {
+        "review": '{"verdict": "approve", "reasons": ["Looks good to me."]}',
+        "iteration": 0,
+    }
     assert should_iterate(state_lgtm) == "__end__"
 
     # No LGTM, iteration < 3 -> implementer

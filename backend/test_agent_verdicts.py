@@ -11,8 +11,8 @@ from agents import END, is_approved_verdict, should_implement, should_iterate
 @pytest.mark.parametrize(
     "text",
     [
-        "VERDICT: APPROVE",
-        "  VERDICT: APPROVE  \nSolid change.",
+        '{"verdict": "approve"}',
+        '  {"verdict": "approve", "reasons": ["Solid change."]}  ',
     ],
 )
 def test_unambiguous_approval(text):
@@ -36,7 +36,9 @@ def test_unambiguous_approval(text):
         "VERDICT: REJECT\nVERDICT: APPROVE",
         "VERDICT: APPROVE\nActually, VERDICT: REJECT",
         "Some preamble\nVERDICT: APPROVE",
-        # The prompt demands the line exactly; variants fail closed.
+        # The legacy line format is not a decision any more (#403).
+        "VERDICT: APPROVE",
+        "  VERDICT: APPROVE  \nSolid change.",
         "verdict: approve\nSolid change.",
         "Verdict: Approve",
         "VERDICT:APPROVE\nok",
@@ -48,16 +50,19 @@ def test_ambiguous_or_negative_is_rejected(text):
 
 
 def test_should_implement_requires_structured_approval():
-    assert should_implement({"pm_decision": "VERDICT: APPROVE\nGood."}) == "implementer"
+    approve = '{"verdict": "approve", "reasons": ["Good."]}'
+    reject = '{"verdict": "reject", "reasons": ["No."]}'
+    assert should_implement({"pm_decision": approve}) == "implementer"
     assert should_implement({"pm_decision": "APPROVED? No. REJECTED."}) == END
-    assert should_implement({"pm_decision": "VERDICT: REJECT\nNo."}) == END
+    assert should_implement({"pm_decision": reject}) == END
+    assert should_implement({"pm_decision": "VERDICT: APPROVE\nGood."}) == END
 
 
 def test_should_iterate_does_not_stop_on_negated_lgtm():
     assert should_iterate({"review": "Not LGTM: SQL injection.", "iteration": 0}) == (
         "implementer"
     )
-    assert should_iterate({"review": "VERDICT: APPROVE", "iteration": 0}) == END
+    assert should_iterate({"review": '{"verdict": "approve"}', "iteration": 0}) == END
 
 
 @pytest.mark.asyncio
@@ -90,7 +95,7 @@ async def test_targeted_mode_runs_pm_review_and_keeps_human_issue_open(monkeypat
 
     async def llm(s, u, estimated_tokens=3000):
         calls.append(s)
-        return "VERDICT: REJECT\nDeletes the auth layer."
+        return '{"verdict": "reject", "reasons": ["Deletes the auth layer."], "blocking_issues": ["Deletes the auth layer."]}'
 
     monkeypatch.setattr(agents, "run_llm_with_tools", llm)
     result = await agents.pm_node(
