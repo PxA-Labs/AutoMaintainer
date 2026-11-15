@@ -36,9 +36,12 @@ so reviews and code may come from the smaller model. See
 > too. They hold no user data, only the compiled UI and its public
 > `NEXT_PUBLIC_*` settings (backend URL, Supabase URL and anon key).
 > Limitations that remain:
-> * **No tests run before review.** Agents do not execute the target
->   repository's tests. The Maintainer reviews the diff with an LLM only.
->   Keep the default `MERGE_POLICY=human`.
+> * **No sandbox ships with the project.** Agent changes are verified with
+>   the target repository's tests only once `SANDBOX_BACKEND` is configured
+>   (or `VERIFY_ALLOW_LOCAL=true` on a machine you trust; see
+>   [docs/VERIFICATION.md](./docs/VERIFICATION.md)). Until then verification
+>   reports an error, `MERGE_POLICY=ci` never merges, and the Maintainer's
+>   review is the LLM's alone. Keep the default `MERGE_POLICY=human`.
 > * **One file per change.** The Implementer rewrites a single file per run.
 > * **Single-host deployment.** The API and the agent worker must share the
 >   clone directory, so the Render blueprint runs both in one instance.

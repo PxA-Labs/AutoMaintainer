@@ -134,7 +134,9 @@ These gaps are tracked in the security and safe-pipeline epics
 ([#420](https://github.com/PxA-Labs/AutoMaintainer/issues/420),
 [#411](https://github.com/PxA-Labs/AutoMaintainer/issues/411)):
 
-- The target repository's tests are not run before review or merge.
+- No sandbox backend ships with the project, so by default the target
+  repository's tests are not run: verification reports an error and
+  `MERGE_POLICY=ci` does not merge (see docs/VERIFICATION.md).
 - The terminal shell, the agent worker and the API share one OS user, so the
   terminal has no isolation between tenants.
 - A webhook row left in `processing` by a crashed worker is not requeued
