@@ -6,9 +6,13 @@ Usage (from backend/)::
     python -m evals.run --mode oracle --min-resolve-rate 1.0
     python -m evals.run --mode noop --max-resolve-rate 0.0
     GROQ_API_KEY=... python -m evals.run --mode live --tasks slug_hyphens,page_count
+    # Keep the API key away from model-written code: record, then score.
+    GROQ_API_KEY=... python -m evals.run --mode live --generate-only --record cas
+    python -m evals.run --mode replay --cassettes cas --fail-on-stale
 
-Exit codes: 0 success, 1 a --min/--max-resolve-rate gate failed,
-2 harness/infra errors (missing API key or cassette, LLM call failed).
+Exit codes: 0 success, 1 a gate failed (--min/--max-resolve-rate, or
+--fail-on-stale with stale cassettes), 2 harness/infra errors (missing API key
+or cassette, LLM call failed).
 """
 
 from __future__ import annotations
@@ -95,7 +99,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, default=Path("results.json"))
     p.add_argument("--min-resolve-rate", type=float, default=None)
     p.add_argument("--max-resolve-rate", type=float, default=None)
-    return p.parse_args(argv)
+    p.add_argument(
+        "--fail-on-stale",
+        action="store_true",
+        help="replay: exit 1 when a cassette was recorded for another prompt",
+    )
+    p.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="live: only record cassettes (needs --record); run no tests",
+    )
+    args = p.parse_args(argv)
+    if args.generate_only and (args.mode != "live" or args.record is None):
+        p.error("--generate-only needs --mode live and --record DIR")
+    return args
 
 
 def main(argv=None, completer=None) -> int:
@@ -133,6 +150,7 @@ def main(argv=None, completer=None) -> int:
         cassettes_dir=args.cassettes,
         timeout=args.timeout,
         on_completion=on_completion,
+        score=not args.generate_only,
     )
     summary = aggregate(results)
 
@@ -148,6 +166,7 @@ def main(argv=None, completer=None) -> int:
         "python": platform.python_version(),
         "platform": platform.platform(),
         "started_at": started.isoformat(timespec="seconds"),
+        "generate_only": args.generate_only,
     }
     if args.mode == "live":
         metadata.update(model=args.model, temperature=args.temperature, seed=args.seed)
@@ -158,6 +177,9 @@ def main(argv=None, completer=None) -> int:
     else:
         metadata["baseline"] = args.mode  # no model involved
 
+    if args.generate_only:
+        # Nothing was scored; an aggregate would read as a 0% resolve rate.
+        summary = None
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(
@@ -166,24 +188,33 @@ def main(argv=None, completer=None) -> int:
         + "\n",
         encoding="utf-8",
     )
+    errored = [r for r in results if r["error"]]
+    for r in errored:
+        print(f"error in {r['task_id']}: {r['error']}", file=sys.stderr)
+    if args.generate_only:
+        recorded = sum(1 for r in results if not (r["error"] or r["target_mismatch"]))
+        print(f"recorded {recorded} cassette(s) in {args.record} -> {args.out}")
+        return 2 if errored else 0
 
     for r in results:
-        status = (
-            "ERROR"
-            if r["error"]
-            else (
-                "RESOLVED"
-                if r["resolved"]
-                else "REJECTED" if r["output_rejected"] else "failed"
-            )
-        )
+        if r["error"]:
+            status = "ERROR"
+        elif r["resolved"]:
+            status = "RESOLVED"
+        elif r["target_mismatch"]:
+            status = f"TARGET-MISMATCH ({r['target_resolved']})"
+        elif r["output_rejected"]:
+            status = "REJECTED"
+        else:
+            status = "failed"
         extra = " regression" if r["regression"] else ""
         extra += " stale-cassette" if r["stale_cassette"] else ""
         print(f"{r['task_id']:<24} {status}{extra}")
-    lo, hi = summary["resolve_rate_ci95"]
+    ci = summary["resolve_rate_ci95"]
+    ci_text = f"[{ci[0]}, {ci[1]}]" if ci else "n/a: run has errors"
     print(
         f"{args.mode}: resolved {summary['resolved']}/{summary['n']} "
-        f"(rate {summary['resolve_rate']}, 95% Wilson CI [{lo}, {hi}]); "
+        f"(rate {summary['resolve_rate']}, 95% Wilson CI {ci_text}); "
         f"rejected {summary['output_rejected']}, regressions "
         f"{summary['regressions']}, errors {summary['errors']} -> {args.out}"
     )
@@ -193,11 +224,16 @@ def main(argv=None, completer=None) -> int:
             "outputs; these numbers measure the harness, not the model."
         )
 
-    if summary["errors"]:
-        for r in results:
-            if r["error"]:
-                print(f"error in {r['task_id']}: {r['error']}", file=sys.stderr)
+    if errored:
         return 2
+    if args.fail_on_stale and summary["stale_cassettes"]:
+        print(
+            f"FAIL: {summary['stale_cassettes']} cassette(s) were recorded for a "
+            "different prompt; re-record them (real models) or run "
+            "`python -m evals.rehash` (synthetic fixtures). See docs/EVALS.md.",
+            file=sys.stderr,
+        )
+        return 1
     rate = summary["resolve_rate"] or 0.0
     if args.min_resolve_rate is not None and rate < args.min_resolve_rate:
         print(f"FAIL: resolve rate {rate} < {args.min_resolve_rate}", file=sys.stderr)

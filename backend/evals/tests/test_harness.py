@@ -5,7 +5,13 @@ import shutil
 
 import pytest
 
-from evals.harness import aggregate, evaluate_task, run_tasks
+from evals.harness import (
+    aggregate,
+    evaluate_task,
+    expected_test_counts,
+    run_pytest,
+    run_tasks,
+)
 from evals.llm import CASSETTES_DIR, Completion, load_cassette
 from evals.prompt import build_implementer_prompt
 from evals.taskset import TASKS_DIR, load_task, load_tasks
@@ -107,6 +113,7 @@ def test_missing_cassette_is_a_harness_error_not_a_failure(tmp_path):
     result = evaluate_task(task, "replay", cassettes_dir=tmp_path)
     assert result["error"].startswith("FileNotFoundError")
     assert aggregate([result])["errors"] == 1
+    assert aggregate([result])["resolve_rate"] is None
 
 
 def test_live_mode_sends_the_implementer_prompt_and_records_usage():
@@ -185,3 +192,117 @@ def test_aggregate_of_nothing():
     summary = aggregate([])
     assert summary["n"] == 0 and summary["resolve_rate"] is None
     assert summary["resolve_rate_ci95"] == [0.0, 1.0]
+
+
+# --- reward hacking: a pass must be a verified pass --------------------------
+
+_LEDGER = load_task(TASKS_DIR / "ledger_first_row")
+
+
+def _live(task, text):
+    return evaluate_task(
+        task, "live", completer=lambda *_: Completion(text=text, finish_reason="stop")
+    )
+
+
+def test_interpreter_exit_zero_is_not_resolved():
+    # Reviewer repro: os._exit(0) at import makes pytest exit 0 without
+    # running a test. Before the JUnit check this scored resolved=True.
+    original = _LEDGER.read_target()
+    result = _live(_LEDGER, "import os\nos._exit(0)\n" + original)
+    assert result["applied"] and not result["output_rejected"]
+    assert result["hidden_tests_passed"] is False
+    assert result["regression"] is True
+    assert not result["resolved"]
+    assert "no JUnit report" in result["test_output"]
+
+
+def test_module_level_skip_is_not_resolved():
+    original = _LEDGER.read_target()
+    text = "import pytest\npytest.skip(allow_module_level=True)\n" + original
+    result = _live(_LEDGER, text)
+    assert not result["resolved"]
+    assert result["hidden_tests_passed"] is False
+
+
+def test_candidate_cannot_rewrite_hidden_tests_from_the_repo_test_run():
+    # On import (first during the repo-test run) the candidate replaces every
+    # hidden test with three trivially passing ones. The hidden tests used to
+    # sit next to the repo copy at that point, so this scored as resolved.
+    fake = "".join(f"def test_{c}():\n    pass\n\n\n" for c in "abc")
+    tamper = (
+        "from pathlib import Path as _P\n"
+        "_h = _P(__file__).resolve().parent.parent / 'hidden_tests'\n"
+        "for _f in (_h.glob('test_*.py') if _h.is_dir() else []):\n"
+        f"    _f.write_text({fake!r})\n"
+    )
+    result = _live(_LEDGER, _LEDGER.read_target() + tamper)
+    assert result["regression"] is False
+    assert result["hidden_tests_passed"] is False
+    assert not result["resolved"]
+
+
+def test_expected_counts_come_from_the_reference_solution():
+    repo_tests, hidden_tests = expected_test_counts(_LEDGER)
+    assert hidden_tests == 3  # test_hidden_ledger.py defines three tests
+    assert repo_tests > 0
+
+
+def test_fewer_passing_tests_than_expected_is_a_failure(tmp_path):
+    task = _scratch_task(tmp_path, "def test_one():\n    pass\n")
+    work = tmp_path / "w"
+    shutil.copytree(task.hidden_tests_dir, work)
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n", encoding="utf-8")
+    assert run_pytest(work, work, ini, 60, expected=1).passed
+    short = run_pytest(work, work, ini, 60, expected=2)
+    assert not short.passed and "1 of 2 expected" in short.output
+
+
+# --- target resolution and incomplete runs -----------------------------------
+
+
+def test_unresolvable_target_is_a_task_outcome_not_an_error(tmp_path):
+    dest = tmp_path / "page_count"
+    shutil.copytree(TASKS_DIR / "page_count", dest)
+    meta = json.loads((dest / "task.json").read_text(encoding="utf-8"))
+    meta["title"] = "Paging rounds the wrong way"
+    meta["body"] = "The page count drops the last partial page."
+    (dest / "task.json").write_text(json.dumps(meta), encoding="utf-8")
+    task = load_task(dest)
+
+    def never_called(*_):
+        raise AssertionError("the pipeline would stop before the model call")
+
+    result = evaluate_task(task, "live", completer=never_called)
+    assert result["target_mismatch"] is True
+    assert result["target_resolved"] is None
+    assert not result["resolved"] and result["error"] is None
+    summary = aggregate([result])
+    assert summary["target_mismatches"] == 1 and summary["resolve_rate"] == 0.0
+
+
+def test_errors_make_the_rate_unavailable(tmp_path):
+    task = load_task(TASKS_DIR / "page_count")
+    ok = evaluate_task(task, "oracle")
+    missing = evaluate_task(task, "replay", cassettes_dir=tmp_path)
+    summary = aggregate([ok, missing])
+    assert summary["errors"] == 1 and summary["resolved"] == 1
+    assert summary["resolve_rate"] is None
+    assert summary["resolve_rate_ci95"] is None
+
+
+def test_generate_only_never_executes_the_candidate(tmp_path):
+    sentinel = tmp_path / "ran.txt"
+    text = f"open({str(sentinel)!r}, 'w').close()\n" + _LEDGER.read_target()
+    seen = []
+    result = evaluate_task(
+        _LEDGER,
+        "live",
+        completer=lambda *_: Completion(text=text, finish_reason="stop"),
+        on_completion=lambda *a: seen.append(a[0].id),
+        score=False,
+    )
+    assert seen == ["ledger_first_row"]
+    assert not sentinel.exists()
+    assert result["hidden_tests_passed"] is None and not result["applied"]

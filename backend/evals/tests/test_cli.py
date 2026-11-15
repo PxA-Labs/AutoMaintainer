@@ -1,4 +1,5 @@
 import json
+import shutil
 
 import pytest
 
@@ -119,3 +120,78 @@ def test_comparison_refuses_different_task_sets(tmp_path):
         compare.compare(a, b)
     out_a, out_b = tmp_path / "a.json", tmp_path / "b.json"
     assert compare.main([str(out_a), str(out_b)]) == 2
+
+
+def _stale_copy(tmp_path, task_id="page_count"):
+    from evals.llm import CASSETTES_DIR
+
+    cassettes = tmp_path / "stale"
+    cassettes.mkdir()
+    record = load_cassette(CASSETTES_DIR, task_id)
+    record["prompt_sha256"] = "0" * 64
+    (cassettes / f"{task_id}.json").write_text(json.dumps(record), encoding="utf-8")
+    return cassettes
+
+
+def test_fail_on_stale_turns_stale_cassettes_into_a_gate_failure(tmp_path):
+    cassettes = _stale_copy(tmp_path)
+    args = ("--mode", "replay", "--tasks", "page_count", "--cassettes", str(cassettes))
+    code, data = _run(tmp_path, "warn", *args)
+    assert code == 0 and data["aggregate"]["stale_cassettes"] == 1
+    code, _ = _run(tmp_path, "gate", *args, "--fail-on-stale")
+    assert code == 1
+
+
+def test_generate_only_records_without_scoring(tmp_path):
+    def fake_model(system_prompt, user_prompt):
+        return Completion(text="def page_count(a, b):\n    return 0\n")
+
+    cassettes = tmp_path / "cassettes"
+    code, data = _run(
+        tmp_path, "gen", "--mode", "live", "--tasks", "page_count",
+        "--generate-only", "--record", str(cassettes), completer=fake_model,
+    )  # fmt: skip
+    assert code == 0
+    assert data["aggregate"] is None and data["metadata"]["generate_only"] is True
+    assert data["tasks"][0]["hidden_tests_passed"] is None
+    assert load_cassette(cassettes, "page_count")["response"].startswith("def ")
+
+
+@pytest.mark.parametrize(
+    "args", [("--mode", "replay"), ("--mode", "live")]  # wrong mode / no --record
+)
+def test_generate_only_needs_live_mode_and_record(tmp_path, args):
+    with pytest.raises(SystemExit):
+        run.parse_args([*args, "--generate-only"])
+
+
+def test_rehash_rebinds_synthetic_and_refuses_real_cassettes(tmp_path):
+    from evals import rehash
+
+    cassettes = _stale_copy(tmp_path)
+    code, data = _run(
+        tmp_path, "r", "--mode", "replay", "--tasks", "page_count",
+        "--cassettes", str(cassettes), "--fail-on-stale",
+    )  # fmt: skip
+    assert code == 1
+    assert rehash.main(["--cassettes", str(cassettes)]) == 0
+    code, data = _run(
+        tmp_path, "r", "--mode", "replay", "--tasks", "page_count",
+        "--cassettes", str(cassettes), "--fail-on-stale",
+    )  # fmt: skip
+    assert code == 0 and data["aggregate"]["stale_cassettes"] == 0
+
+    record = json.loads((cassettes / "page_count.json").read_text("utf-8"))
+    record.update(synthetic=False, prompt_sha256="0" * 64)
+    (cassettes / "page_count.json").write_text(json.dumps(record), "utf-8")
+    assert rehash.main(["--cassettes", str(cassettes)]) == 1
+    assert load_cassette(cassettes, "page_count")["prompt_sha256"] == "0" * 64
+
+
+def test_committed_synthetic_cassettes_match_the_current_prompt(tmp_path):
+    # Nothing to re-hash means CI's `replay --fail-on-stale` step passes.
+    from evals import rehash
+    from evals.llm import CASSETTES_DIR
+
+    copy = shutil.copytree(CASSETTES_DIR, tmp_path / "c")
+    assert rehash.rehash(copy) == ([], [])
