@@ -20,6 +20,11 @@ PUBLIC_PATHS = {
     # HMAC instead: it rejects the request when GITHUB_WEBHOOK_SECRET is unset
     # and verifies X-Hub-Signature-256 over the raw body with compare_digest.
     "/webhooks/github",
+    # GitHub App setup URL: a browser redirect from GitHub, which carries no
+    # Supabase token. It writes nothing and only redirects to the configured
+    # dashboard, which links the installation through the authenticated,
+    # GitHub-verified POST /github/installations/claim.
+    "/github/app/setup",
     # FastAPI's generated documentation.
     "/openapi.json",
     "/docs",

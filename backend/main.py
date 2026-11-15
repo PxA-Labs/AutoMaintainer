@@ -1411,6 +1411,88 @@ async def claim_github_installation(
     }
 
 
+# --- GitHub App setup URL (install callback) ---
+#
+# GitHub sends the installer's browser here after an install or a permission
+# update, with ?installation_id=N&setup_action=install|update. Anyone can
+# craft that URL, and a top-level browser navigation carries neither the
+# Supabase access token (the dashboard keeps it in localStorage) nor the
+# GitHub user token, so this route cannot verify anything. It therefore
+# trusts nothing: it writes nothing, calls nothing, and only forwards a
+# validated installation id to the dashboard, which links it through the
+# verified POST /github/installations/claim (caller's org role + GitHub user
+# token proving they administer the installation's account). A spoofed id is
+# rejected there like any other claim.
+#
+# The redirect target is server configuration only (DASHBOARD_URL, or the
+# dashboard this API serves at "/"); no request parameter or header
+# influences it, so the route cannot be used as an open redirect.
+
+from fastapi.responses import RedirectResponse  # noqa: E402
+from urllib.parse import urlencode  # noqa: E402
+
+GITHUB_SETUP_ACTIONS = frozenset({"install", "update", "request"})
+# GitHub ids are positive 64-bit integers; ASCII digits only (str.isdigit
+# would also accept other Unicode digits).
+_INSTALLATION_ID_RE = re.compile(r"[0-9]{1,19}")
+
+
+def _dashboard_base_url() -> str:
+    """DASHBOARD_URL as a bare http(s) origin, or "" for the API's own "/"."""
+    configured = (os.getenv("DASHBOARD_URL") or "").strip()
+    if not configured:
+        return ""
+    parsed = urlsplit(configured)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or "@" in parsed.netloc
+    ):
+        logger.error(
+            "DASHBOARD_URL must be an http(s) origin without a path; "
+            "redirecting GitHub App setup callbacks to / instead"
+        )
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _setup_callback_params(
+    installation_id: Optional[str], setup_action: Optional[str]
+) -> dict:
+    if setup_action not in GITHUB_SETUP_ACTIONS:
+        return {"github_setup": "invalid"}
+    if setup_action == "request" and not installation_id:
+        # An org member asked an owner to install the App; nothing to link.
+        return {"github_setup": "requested"}
+    if not installation_id or not _INSTALLATION_ID_RE.fullmatch(installation_id):
+        return {"github_setup": "invalid"}
+    iid = int(installation_id)
+    if not 0 < iid < 2**63:
+        return {"github_setup": "invalid"}
+    return {
+        "github_setup": "claim",
+        "github_installation_id": str(iid),
+        "github_setup_action": setup_action,
+    }
+
+
+@app.get("/github/app/setup", include_in_schema=False)
+async def github_app_setup_callback(
+    installation_id: Optional[str] = None, setup_action: Optional[str] = None
+):
+    """GitHub App setup URL: hand the (unverified) installation id to the
+    dashboard, which claims it through the verified claim endpoint."""
+    params = _setup_callback_params(installation_id, setup_action)
+    location = f"{_dashboard_base_url()}/?{urlencode(params)}"
+    response = RedirectResponse(location, status_code=303)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 # --- Terminal WebSocket ---
 #
 # Policy: disabled unless ENABLE_TERMINAL=true (in every environment), and even

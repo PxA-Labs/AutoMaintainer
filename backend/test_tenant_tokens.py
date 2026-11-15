@@ -656,6 +656,138 @@ def test_reclaim_by_same_org_updates_in_place(claim):
     assert writes(store, "github_installations", "insert") == []
 
 
+# --- GitHub App setup URL (install callback) --------------------------------
+
+
+def setup_callback(query, **headers):
+    return client.get(
+        f"/github/app/setup{query}", headers=headers, follow_redirects=False
+    )
+
+
+def redirect_params(response):
+    from urllib.parse import parse_qs, urlsplit
+
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    return location, {k: v[0] for k, v in parse_qs(location.query).items()}
+
+
+def test_setup_callback_forwards_the_installation_to_the_dashboard(monkeypatch, claim):
+    monkeypatch.setenv("DASHBOARD_URL", "https://app.example.com")
+    store = claim.setup()
+    seen = claim.api([installation()])
+
+    r = setup_callback("?installation_id=555&setup_action=install")
+
+    location, params = redirect_params(r)
+    assert (location.scheme, location.netloc, location.path) == (
+        "https",
+        "app.example.com",
+        "/",
+    )
+    assert params == {
+        "github_setup": "claim",
+        "github_installation_id": "555",
+        "github_setup_action": "install",
+    }
+    assert r.headers["cache-control"] == "no-store"
+    # The id is not trusted: nothing is written and GitHub is not asked.
+    assert writes(store, "github_installations") == []
+    assert seen == []
+
+
+def test_spoofed_installation_id_from_the_callback_cannot_be_claimed(
+    monkeypatch, claim
+):
+    """An attacker crafts the setup URL with someone else's installation id.
+    The callback links nothing; the dashboard's follow-up claim is verified
+    with GitHub and rejected because the user cannot access that id."""
+    store = claim.setup()
+    claim.api([installation(iid=111)])  # the user's own installation
+
+    _, params = redirect_params(
+        setup_callback("?installation_id=999&setup_action=install")
+    )
+    r = post_claim(int(params["github_installation_id"]))
+
+    assert r.status_code == 403
+    assert writes(store, "github_installations") == []
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?installation_id=abc&setup_action=install",
+        "?installation_id=-5&setup_action=install",
+        "?installation_id=0&setup_action=install",
+        "?installation_id=99999999999999999999&setup_action=install",
+        "?installation_id=%EF%BC%95&setup_action=install",  # fullwidth digit
+        "?installation_id=5%0d%0aSet-Cookie:x=1&setup_action=install",
+        "?installation_id=5&setup_action=delete",
+        "?installation_id=5",
+        "",
+    ],
+)
+def test_setup_callback_rejects_malformed_input_without_echoing_it(claim, query):
+    store = claim.setup()
+    r = setup_callback(query)
+    location, params = redirect_params(r)
+    assert params == {"github_setup": "invalid"}
+    assert location.path == "/"
+    assert "set-cookie" not in r.headers
+    assert writes(store, "github_installations") == []
+
+
+def test_setup_callback_for_an_install_request_has_nothing_to_link(claim):
+    claim.setup()
+    _, params = redirect_params(setup_callback("?setup_action=request"))
+    assert params == {"github_setup": "requested"}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "&redirect_uri=https://evil.example",
+        "&next=//evil.example",
+        "&return_to=https%3A%2F%2Fevil.example",
+        "&state=https://evil.example",
+        "&code=oauth-code",
+    ],
+)
+def test_setup_callback_is_not_an_open_redirect(monkeypatch, claim, query):
+    monkeypatch.setenv("DASHBOARD_URL", "https://app.example.com")
+    claim.setup()
+    r = setup_callback(
+        f"?installation_id=555&setup_action=install{query}",
+        host="evil.example",
+        **{"x-forwarded-host": "evil.example", "referer": "https://evil.example/"},
+    )
+    location, params = redirect_params(r)
+    assert location.netloc == "app.example.com"
+    assert "evil" not in r.headers["location"]
+    # Extra parameters (including an OAuth code) are never forwarded.
+    assert set(params) == {
+        "github_setup",
+        "github_installation_id",
+        "github_setup_action",
+    }
+
+
+@pytest.mark.parametrize(
+    "dashboard_url",
+    ["", "javascript:alert(1)", "https://app.example.com/path", "//evil.example"],
+)
+def test_setup_callback_without_a_valid_dashboard_url_stays_on_this_origin(
+    monkeypatch, claim, dashboard_url
+):
+    monkeypatch.setenv("DASHBOARD_URL", dashboard_url)
+    claim.setup()
+    r = setup_callback("?installation_id=555&setup_action=install", host="evil.example")
+    assert r.headers["location"].startswith("/?")
+    assert not r.headers["location"].startswith("//")
+
+
 # --- repository sync ---------------------------------------------------------
 
 
