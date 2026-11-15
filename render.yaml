@@ -76,6 +76,19 @@ services:
         sync: false
       - key: GITHUB_WEBHOOK_SECRET
         sync: false
+      # GitHub App install flow (POST /github/app/install-url and
+      # GET /github/app/setup; docs/DEPLOYMENT.md "Install flow"). Only the
+      # API reads these, so the maintenance worker does not declare them.
+      # None has a safe default: all are set per deployment in the dashboard.
+      - key: GITHUB_APP_SLUG
+        sync: false
+      - key: GITHUB_APP_CLIENT_ID
+        sync: false
+      - key: GITHUB_APP_CLIENT_SECRET
+        sync: false
+      # Bare origin (https://host, no path) the setup callback redirects to.
+      - key: DASHBOARD_URL
+        sync: false
       - key: REDIS_URL
         fromService:
           type: redis
