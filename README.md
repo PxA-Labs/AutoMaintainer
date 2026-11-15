@@ -19,7 +19,9 @@ open a pull request and review it. By default the agents never merge their
 own pull requests; a human does.
 
 It is built with **LangGraph**, **FastAPI**, **Celery + Redis**, **Supabase**
-and **Next.js**. The model is **Llama 3.3 70B on Groq**. See
+and **Next.js**. The model is **Llama 3.3 70B on Groq**; on the main
+(GitNexus tool) path a failed 70B call silently falls back to **Llama 3.1 8B**,
+so reviews and code may come from the smaller model. See
 [ARCHITECTURE.md](./ARCHITECTURE.md) for how the pieces fit together.
 
 ---
@@ -28,9 +30,12 @@ and **Next.js**. The model is **Llama 3.3 70B on Groq**. See
 > ### Project status: beta (pre-1.0)
 > The multi-tenant migration has landed: Celery workers, Supabase Auth with
 > organization-scoped data and Row Level Security, and GitHub App installation
-> tokens. Every API route except the health probes and the signed GitHub
-> webhook requires a Supabase login, and a test enforces this. Limitations
-> that remain:
+> tokens. Every API route except the health probes, the OpenAPI docs and the
+> signed GitHub webhook requires a Supabase login, and a test enforces this.
+> When the API serves the static dashboard build at `/`, those files are public
+> too. They hold no user data, only the compiled UI and its public
+> `NEXT_PUBLIC_*` settings (backend URL, Supabase URL and anon key).
+> Limitations that remain:
 > * **No tests run before review.** Agents do not execute the target
 >   repository's tests. The Maintainer reviews the diff with an LLM only.
 >   Keep the default `MERGE_POLICY=human`.

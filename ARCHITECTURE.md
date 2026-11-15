@@ -23,7 +23,7 @@ flowchart LR
         gitnexus["GitNexus CLI / MCP<br/>(local subprocess)"]
     end
 
-    redis[("Redis<br/>broker + results,<br/>repo locks, heartbeats,<br/>assist quotas, LLM rate limits")]
+    redis[("Redis<br/>broker + results,<br/>repo locks, heartbeats,<br/>assist quotas")]
     supabase[("Supabase<br/>Postgres + RLS, Auth, Realtime")]
     github["GitHub<br/>App installations, REST API"]
     groq["Groq LLM API"]
@@ -55,7 +55,7 @@ flowchart LR
 | API (control plane) | `backend/main.py` | Authenticates requests, authorizes them against the caller's organization, creates `runs` rows and enqueues Celery tasks, serves the IDE file routes, inline assist, webhooks and the opt-in terminal. It does not run the agent graph. |
 | Agent worker | `backend/tasks.py`, `backend/agents.py` | Consumes the `agent_runs` queue and runs the LangGraph pipeline for one run at a time per process (`worker_prefetch_multiplier=1`). |
 | Maintenance worker and beat | `backend/tasks.py`, `backend/webhook_processor.py`, `backend/celery_app.py` | Periodic jobs: `cleanup_stale_runs` (every 5 min), `process_webhook_events` (every 5 min), `sync_repositories` (every 6 h). |
-| Redis | `backend/celery_app.py`, `backend/redis_locks.py`, `backend/quotas.py`, `backend/rate_limiter.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
+| Redis | `backend/celery_app.py`, `backend/redis_locks.py`, `backend/quotas.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
 | Supabase | `supabase_schema.sql` | Postgres with Row Level Security, Auth (GitHub OAuth), and Realtime for live logs. |
 | Dashboard | `dashboard/` | Next.js 16 static export: run control, live logs, run history, admin page, Monaco-based Web IDE, terminal client. |
 | GitNexus | `backend/agents.py`, `backend/main.py` | The worker indexes each clone with `gitnexus analyze` / `gitnexus index` and gives the LLM GitNexus tools over MCP (stdio). The API also starts `gitnexus serve` at startup. Every GitNexus step is best-effort; on failure the agents use a plain completion. |
@@ -157,7 +157,7 @@ Maintainer approves a PR:
 | Value | Behaviour |
 | --- | --- |
 | `human` (default; also used for unknown values) | Never merges. Leaves the PR open with `merge_status=awaiting_human_review` and requests a review from the issue's assignees, or from the repository owner if it is a user account. |
-| `ci` | Merges only if every commit status and check run on the PR head passed, and at least one reported `success`. The check runs once, right after the review, so pending checks block the merge. |
+| `ci` | Merges only if every commit status and check run on the PR head is in a passing state (`success`, `neutral` or `skipped`, see `_PASSING_CHECK_STATES`) and at least one reported `success`. The check runs once, right after the review, so pending checks block the merge. |
 | `auto` | Merges on the Maintainer's approval alone. Not recommended. |
 
 Under `ci` and `auto`, the merge is also skipped in two cases: the review
@@ -177,13 +177,32 @@ The guarantee against an unreviewed merge is `MERGE_POLICY=human`.
 
 ### LLM access
 
-Model: `llama-3.3-70b-versatile` on Groq. `run_llm_with_tools` runs a
-LangGraph ReAct agent with the GitNexus MCP tools. If that fails, it falls
-back to a plain completion. All calls go through `rate_limiter.py`, which
-rotates `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_9` and enforces
-client-side request and token budgets. If no LLM path answers, the node raises
-`PipelineAbortError`, so error text never ends up in issues, commits or
-reviews.
+Models: `llama-3.3-70b-versatile` on Groq, with `llama-3.1-8b-instant` as a
+silent fallback on the tool path. Source: `backend/agents.py`,
+`backend/rate_limiter.py`.
+
+- **Tool path first.** `run_llm_with_tools` runs a LangGraph ReAct agent with
+  the GitNexus MCP tools. Its model is
+  `ChatGroq("llama-3.3-70b-versatile").with_fallbacks([ChatGroq("llama-3.1-8b-instant")])`,
+  so if a 70B call raises, the 8B model answers instead. Nothing marks a result
+  as coming from the 8B model, and the telemetry event still records
+  `model_name="llama-3.3-70b-versatile"`. Implementer code and PM or Maintainer
+  verdicts can therefore come from the smaller model without any visible
+  signal. This is one more reason to keep the default `MERGE_POLICY=human`.
+- **Plain completion second.** If the tool path fails as a whole (for example
+  GitNexus is not installed), the node falls back to a plain completion with
+  `llama-3.3-70b-versatile` only (`run_llm_with_rate_limit`). Inline assist in
+  the Web IDE also uses the 70B model only.
+- **Key rotation and budgets.** All calls go through `rate_limiter.py`, which
+  rotates `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_9` and enforces
+  client-side request and token budgets per key (`GROQ_REQUESTS_PER_MINUTE`,
+  default 30; `GROQ_TOKENS_PER_MINUTE`, default 6000). The manager is an
+  in-memory singleton guarded by a `threading.Lock`. It does not use Redis, so
+  **each API and worker process keeps its own budget for each key**. Several
+  processes sharing a key can together exceed Groq's real limit, and then rely
+  on the 429 retry path.
+- If no LLM path answers, the node raises `PipelineAbortError`, so error text
+  never ends up in issues, commits or reviews.
 
 ### Errors
 
@@ -244,7 +263,10 @@ Realtime subscription on `logs`. Policies are defined with the helpers
 Source: `backend/main.py`.
 
 - **Users.** Every route except the health probes, `/webhooks/github` and the
-  OpenAPI docs depends on `get_current_user`. That dependency validates the
+  OpenAPI docs (`/openapi.json`, `/docs`, `/redoc`) depends on
+  `get_current_user`. When `dashboard/out` exists, the API also mounts the
+  static dashboard build at `/`; those files are public and hold no user data,
+  only the compiled UI and its public `NEXT_PUBLIC_*` settings. That dependency validates the
   Supabase access token from `Authorization: Bearer ...` and resolves the
   caller's earliest accepted organization membership.
   `backend/test_route_auth.py` fails if a new route is added without this

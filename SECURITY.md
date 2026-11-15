@@ -23,9 +23,16 @@ Report it privately through GitHub:
    that only you and the maintainers can see.
 
 If the **Report a vulnerability** button is not shown, private vulnerability
-reporting is not enabled for the repository. In that case, open a public issue
+reporting is not enabled for the repository, and the "Security Vulnerability
+Reporting" link in the issue chooser will not work either. In that case, start
+a [GitHub Discussion](https://github.com/PxA-Labs/AutoMaintainer/discussions)
 titled "Request for a private security contact" **with no details about the
-vulnerability**, and a maintainer will set up a private advisory with you.
+vulnerability**, and a maintainer will open a private advisory and invite you
+to it. (Blank issues are disabled, so do not misuse the bug or feature
+templates for this.)
+
+Maintainers: enable private vulnerability reporting under **Settings > Code
+security** so the main path above works.
 
 Please include:
 
@@ -64,7 +71,9 @@ has the details.
 **Authentication and tenancy**
 - Every API route except the health probes, the OpenAPI docs and the signed
   GitHub webhook requires a Supabase access token
-  (`backend/test_route_auth.py` enforces this).
+  (`backend/test_route_auth.py` enforces this). The static dashboard build,
+  when the API serves it at `/`, is public; it holds no user data, only the
+  compiled UI and its public `NEXT_PUBLIC_*` settings.
 - Data is scoped to the caller's organization. Pending invites grant no access.
   Write routes require the `owner`, `admin` or `member` role, and org-wide
   actions require an admin.
