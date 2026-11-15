@@ -82,8 +82,12 @@ def test_taskset_hash_ignores_line_endings_but_not_content(tmp_path):
     dest = _copy_task(tmp_path)
     before = taskset_hash([load_task(dest)])
     target = dest / "repo" / "listing" / "paging.py"
-    text = target.read_bytes()
-    target.write_bytes(text.replace(b"\n", b"\r\n"))
+    # Start from an explicit LF file: a checkout with core.autocrlf=true is
+    # already CRLF, and blindly replacing "\n" would produce "\r\r\n".
+    lf = target.read_bytes().replace(b"\r\n", b"\n")
+    target.write_bytes(lf)
     assert taskset_hash([load_task(dest)]) == before
-    target.write_bytes(text + b"# changed\n")
+    target.write_bytes(lf.replace(b"\n", b"\r\n"))
+    assert taskset_hash([load_task(dest)]) == before
+    target.write_bytes(lf + b"# changed\n")
     assert taskset_hash([load_task(dest)]) != before
