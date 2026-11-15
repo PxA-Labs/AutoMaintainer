@@ -98,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- Correct stale statements about verification and fix a changelog heading ([#463](https://github.com/PxA-Labs/AutoMaintainer/pull/463)) - @purvanshjoshi
 - Describe the system as implemented, retire ISSUES.md, refresh README and SECURITY ([#462](https://github.com/PxA-Labs/AutoMaintainer/pull/462)) (closes [#408](https://github.com/PxA-Labs/AutoMaintainer/issues/408)) - @purvanshjoshi
 - **readme**: Add release and changelog section ([#177](https://github.com/PxA-Labs/AutoMaintainer/pull/177)) - @purvanshjoshi
 - docs(changelog): update CHANGELOG.md for PR #172 ([#173](https://github.com/PxA-Labs/AutoMaintainer/pull/173)) - @github-actions[bot]
