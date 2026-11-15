@@ -154,24 +154,51 @@ class NullEmitter(EventEmitter):
         pass
 
 
+DEFAULT_STREAM_QUEUE_MAXSIZE = 1000
+
+
 class StreamingEmitter(EventEmitter):
     """
     EventEmitter for SSE / WebSocket streaming sinks.
     Pushes structured domain events to an asyncio.Queue or an async callback
     without embedding any presentation-specific HTML/CSS.
+
+    The default queue is bounded (``maxsize``). When a slow or disconnected
+    consumer lets it fill up, the oldest event is dropped so the agent run is
+    never blocked and memory stays bounded; ``dropped_count`` records how many.
     """
 
     def __init__(
         self,
         queue: Optional[asyncio.Queue] = None,
         callback: Optional[Callable[[BaseEvent], Awaitable[None]]] = None,
+        maxsize: int = DEFAULT_STREAM_QUEUE_MAXSIZE,
     ):
-        self.queue = queue if queue is not None else asyncio.Queue()
+        self.queue = queue if queue is not None else asyncio.Queue(maxsize=maxsize)
         self.callback = callback
+        self.dropped_count = 0
+
+    def _put_drop_oldest(self, event: BaseEvent) -> None:
+        while True:
+            try:
+                self.queue.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()  # keep join() accounting consistent
+                except asyncio.QueueEmpty:
+                    continue
+                self.dropped_count += 1
+                if self.dropped_count == 1 or self.dropped_count % 100 == 0:
+                    logger.warning(
+                        "StreamingEmitter queue full; dropped %d oldest event(s).",
+                        self.dropped_count,
+                    )
 
     async def emit(self, event: BaseEvent) -> None:
         try:
-            await self.queue.put(event)
+            self._put_drop_oldest(event)
             if self.callback is not None:
                 await self.callback(event)
         except Exception as e:
