@@ -24,7 +24,7 @@
   },
   "overrides": {
     "monaco-editor": {
-      "dompurify": "3.4.14"
+      "dompurify": "3.4.18"
     },
     "@emnapi/core": "^1.11.3",
     "@emnapi/runtime": "^1.11.3",
