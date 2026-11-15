@@ -23,6 +23,5 @@ SECURITY.md @purvanshjoshi @archittmittal
 # Dependencies
 backend/pyproject.toml @purvanshjoshi @archittmittal
 backend/uv.lock @purvanshjoshi @archittmittal
-backend/requirements.txt @purvanshjoshi @archittmittal
 dashboard/package.json @purvanshjoshi @archittmittal
 dashboard/package-lock.json @purvanshjoshi @archittmittal

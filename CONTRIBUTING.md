@@ -97,9 +97,8 @@ git checkout -b feat/183-pydantic-config-schema
 ### Managing backend dependencies
 The backend's dependencies are declared in `backend/pyproject.toml` and pinned
 for every platform and Python version in `backend/uv.lock`. Commit both files
-together. `backend/requirements.txt` is a **generated** export of the lock
-(runtime dependencies only) for tools that need a pip requirements file. Never
-edit it by hand: CI fails if it does not match `uv.lock`.
+together; CI runs `uv lock --check` and fails if the lock does not match
+`pyproject.toml`. No `requirements.txt` is committed.
 
 Run these from `backend/`:
 ```bash
@@ -110,13 +109,13 @@ uv lock --upgrade-package <package>  # upgrade one package within its constraint
 uv lock --upgrade                    # upgrade everything (review the diff carefully)
 uv sync                              # apply the lock to backend/.venv
 ```
-Then regenerate the export from the repository root and commit it:
+If a tool needs a pip requirements file, export one on demand from the
+repository root (it is not committed):
 ```bash
-bash scripts/export-backend-requirements.sh          # rewrite backend/requirements.txt
-bash scripts/export-backend-requirements.sh --check  # what CI runs
+bash scripts/export-backend-requirements.sh requirements.txt
 ```
-Dependabot opens `uv` update PRs that change `pyproject.toml`/`uv.lock`; run
-the export script on those branches before merging.
+Dependabot opens `uv` update PRs that change `pyproject.toml`/`uv.lock`
+directly; they need no extra steps.
 
 ---
 

@@ -117,7 +117,7 @@ cd backend
 uv run celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
 ```
 
-`backend/requirements.txt` is generated from `uv.lock` for tools that need a pip requirements file; do not edit it by hand. See [CONTRIBUTING.md](./CONTRIBUTING.md#managing-backend-dependencies) for adding or upgrading dependencies.
+No `requirements.txt` is committed; run `bash scripts/export-backend-requirements.sh` if a tool needs one. See [CONTRIBUTING.md](./CONTRIBUTING.md#managing-backend-dependencies) for adding or upgrading dependencies.
 
 Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docker:
 ```bash

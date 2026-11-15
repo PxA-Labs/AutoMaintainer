@@ -138,8 +138,8 @@ example as a second Space.
   from `ghcr.io/astral-sh/uv` (the `UV_IMAGE` build arg) and is only present in
   the builder stage. To change backend dependencies, update the lock with uv
   (see CONTRIBUTING.md, "Managing backend dependencies") and rebuild.
-  `backend/requirements.txt` is a generated export of the same lock for
-  platforms that need a pip requirements file; it is not used by the image.
+  No `requirements.txt` is committed; `scripts/export-backend-requirements.sh`
+  exports one from the lock for platforms that need a pip requirements file.
 - Base images are pinned to `node:22.23.5-bookworm-slim` and
   `python:3.11.18-slim-bookworm`. gitnexus is pinned to `1.6.12` (it needs Node
   `^22.18 || >=24.11`). Bump these through the `ARG`s at the top of the

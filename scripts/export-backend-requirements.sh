@@ -1,46 +1,22 @@
 #!/usr/bin/env bash
-# Regenerate backend/requirements.txt from backend/uv.lock, or verify it.
+# Export backend runtime dependencies from backend/uv.lock as a pip
+# requirements file, for tools or platforms that only understand pip.
 #
-#   bash scripts/export-backend-requirements.sh          # rewrite the file
-#   bash scripts/export-backend-requirements.sh --check  # exit 1 if stale
+#   bash scripts/export-backend-requirements.sh                 # print to stdout
+#   bash scripts/export-backend-requirements.sh requirements.txt  # write a file
 #
-# backend/pyproject.toml + backend/uv.lock are the source of truth. The
-# requirements.txt export (runtime dependencies only, universal markers) exists
-# for tools and platforms that only understand pip requirements files.
+# backend/pyproject.toml + backend/uv.lock are the source of truth; no
+# requirements file is committed (it would go stale on every Dependabot PR).
 # Requires uv on PATH.
 set -euo pipefail
 
 cd "$(dirname "$0")/../backend"
 
-render() {
-  cat <<'EOF'
-# GENERATED FILE - DO NOT EDIT BY HAND.
-# Exported from backend/uv.lock (runtime dependencies only). Change
-# dependencies in backend/pyproject.toml with `uv add` / `uv lock`, then run:
-#    bash scripts/export-backend-requirements.sh
-# CI fails if this file is out of sync with uv.lock.
-EOF
-  uv export --frozen --no-dev --no-emit-project --no-hashes --no-header \
-    --format requirements-txt
-}
-
-case "${1:-}" in
-  --check)
-    # The lock must match pyproject.toml, and the export must match the lock.
-    uv lock --check
-    if ! diff -u requirements.txt <(render); then
-      echo "backend/requirements.txt is out of sync with backend/uv.lock." >&2
-      echo "Run: bash scripts/export-backend-requirements.sh" >&2
-      exit 1
-    fi
-    echo "backend/requirements.txt is in sync with backend/uv.lock."
-    ;;
-  "")
-    render > requirements.txt
-    echo "Wrote backend/requirements.txt"
-    ;;
-  *)
-    echo "usage: $0 [--check]" >&2
-    exit 2
-    ;;
-esac
+args=(export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt)
+if [[ $# -gt 0 ]]; then
+  # Redirect instead of -o: uv -o also echoes to stdout and embeds the path.
+  uv "${args[@]}" > "$1"
+  echo "Wrote $1" >&2
+else
+  uv "${args[@]}"
+fi

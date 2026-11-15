@@ -1,13 +1,12 @@
 # Backend dependency manifest. uv.lock (next to this file) pins the full
-# cross-platform resolution; requirements.txt is a generated export of it.
+# cross-platform resolution. No requirements.txt is committed; export one on
+# demand with scripts/export-backend-requirements.sh if a tool needs it.
 # See CONTRIBUTING.md ("Managing backend dependencies").
 #
 #   uv sync                              # create/update .venv incl. dev group
 #   uv add <pkg>                         # add a runtime dependency
 #   uv add --group dev <pkg>             # add a dev/test dependency
 #   uv lock --upgrade-package <pkg>      # upgrade one dependency
-#   uv export --frozen --no-dev --no-emit-project --no-hashes \
-#       --format requirements-txt -o requirements.txt   # refresh the export
 [project]
 name = "automaintainer-backend"
 version = "0.0.0"

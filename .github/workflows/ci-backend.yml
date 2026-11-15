@@ -17,8 +17,8 @@ on:
 permissions: read-all
 
 # Backend dependencies are managed with uv: backend/pyproject.toml declares
-# them, backend/uv.lock pins them, backend/requirements.txt is a generated
-# export. Keep UV_VERSION in step with the uv version in the Dockerfile.
+# them and backend/uv.lock pins them (no requirements.txt is committed).
+# Keep UV_VERSION in step with the uv version in the Dockerfile.
 env:
   UV_VERSION: "0.13.8"
 
@@ -52,9 +52,9 @@ jobs:
         enable-cache: true
         cache-dependency-glob: "backend/uv.lock"
 
-    - name: Check uv.lock and requirements.txt are in sync
+    - name: Check uv.lock matches pyproject.toml
       run: |
-        bash ../scripts/export-backend-requirements.sh --check
+        uv lock --check
 
     - name: Install lint tools
       run: |
