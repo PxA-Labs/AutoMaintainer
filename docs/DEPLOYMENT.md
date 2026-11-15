@@ -169,9 +169,10 @@ example as a second Space.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ENVIRONMENT` | `production` in the image, `development` in the code | Must be `production` in any deployment. It closes production-only gates such as the terminal. |
-| `ENABLE_TERMINAL` | unset (off) | When `ENVIRONMENT=production`, the interactive terminal WebSocket (`/api/terminal/ws`) is refused unless this is `true`. The terminal is a shell with the server's privileges and environment. Leave it unset. |
-| `TERMINAL_ADMIN_USER_IDS` | unset (nobody) | Comma-separated Supabase user IDs allowed to open the terminal, even with `ENABLE_TERMINAL=true`. It fails closed: empty means nobody. This allowlist is added by the terminal-hardening work (see the terminal security issue). If your backend version does not read it yet, org membership is the only check, so keep `ENABLE_TERMINAL` unset. |
-| `MERGE_POLICY` | unset (open PRs only, no auto-merge) | Controls whether the agent may merge its own PRs. Leave it unset for the safe default, where the agent only opens PRs and branch protection or reviewers decide. It is introduced by the auto-merge gating work. Check that work for the accepted values before you set it. |
+| `ENABLE_TERMINAL` | unset (off) | The interactive terminal WebSocket (`/api/terminal/ws`) is refused in **every** environment unless this is `true`. Even when enabled, the shell runs as the server's OS user; its environment is scrubbed of secrets, but it is not a sandbox (it can still read files the server can). Leave it unset. |
+| `TERMINAL_ADMIN_USER_IDS` | unset (nobody) | Comma-separated Supabase user IDs allowed to open the terminal when `ENABLE_TERMINAL=true`. It fails closed: empty means nobody. The check also applies under `AUTH_DEV_BYPASS`, so the dev user ID must be listed for local terminal use. |
+| `MERGE_POLICY` | `human` | Whether the agent may merge its own PRs. `human` (default): never auto-merge; the agent opens the PR, posts its review and requests a human reviewer. `ci`: merge only if the Maintainer approves **and** every status/check on the PR head has passed, with at least one check present (evaluated once after the PR opens, so it usually fails closed). `auto`: merge on Maintainer approval alone; not recommended. Unknown values fall back to `human` with a warning. |
+| `GIT_TIMEOUT_SECONDS` | `300` | Timeout for each `git clone`/`fetch` the worker runs; the git process is killed and a partial clone removed when it expires. |
 | `AUTOMAINTAINER_WORKSPACE_DIR` | image: `/var/lib/automaintainer/workspaces`, code: `<tmp>/automaintainer` | Where repos are cloned. It must be the same path on the API and the `agent_runs` workers. |
 | `AUTH_DEV_BYPASS` | unset | **Never set this in a deployment.** When `true`, every request is trusted as `AUTH_DEV_USER_ID` / `AUTH_DEV_ORG_ID`, with no authentication. It is only for local development. |
 | `AUTH_DEV_USER_ID`, `AUTH_DEV_ORG_ID` | fixed UUIDs | Identity used by `AUTH_DEV_BYPASS`. Local only. |
@@ -200,7 +201,7 @@ never the service key), and `NEXT_PUBLIC_BACKEND_URL`.
 - [ ] `ENVIRONMENT=production` on every service.
 - [ ] `AUTH_DEV_BYPASS` is absent everywhere. Check the platform dashboard, not only the repo files.
 - [ ] `ENABLE_TERMINAL` is unset unless you need it. If it is set, `TERMINAL_ADMIN_USER_IDS` lists only operators.
-- [ ] `MERGE_POLICY` is unset (PR-only), and branch protection with required checks is on for maintained repos.
+- [ ] `MERGE_POLICY` is unset or `human`, and branch protection with required checks is on for maintained repos.
 - [ ] `ALLOWED_ORIGINS` lists only your dashboard origins.
 - [ ] Use the GitHub App (short-lived installation tokens) rather than a long-lived PAT in `GITHUB_TOKEN`.
 - [ ] Redis is not exposed publicly. Compose does not publish it, and on Render `ipAllowList: []` allows internal access only.
@@ -216,3 +217,9 @@ toolchain in the runtime stage, the shared workspace volume, and that no
 dangerous flags are set. The `docker-publish` workflow also builds the image
 on PRs that touch it. A full `docker compose up` end-to-end run, from `queued`
 to `completed`, has not yet been automated.
+
+## Upgrade notes
+
+- **Supabase redirect URL:** add `<your-origin>/auth/callback/` to the Supabase Auth allowed redirect URLs before deploying the dashboard. GitHub sign-in now returns to that page.
+- **Workspace directory names changed** to `owner_repo-<hash>` so different repositories can never share a clone. Existing clones under the old names are not reused; each repository is cloned again on its next run. Old directories can be deleted once the new ones exist.
+- **Clone credentials:** the worker no longer writes the GitHub token into `.git/config`, and it scrubs `http.extraheader` from existing clones on first use. If a token was ever stored there, rotate it.
