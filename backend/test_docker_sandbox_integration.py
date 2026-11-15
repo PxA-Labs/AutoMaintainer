@@ -5,7 +5,9 @@ Skipped unless Docker can run Linux containers here AND
 ``DOCKER_SANDBOX_TESTS=1`` is set. The opt-in keeps the general backend CI
 (which also runs on Windows runners, whose Docker cannot run the Linux image)
 and developer machines from pulling images; .github/workflows/sandbox.yml
-sets it on ubuntu-latest.
+sets it on ubuntu-latest, and runs this file twice: against the runner's
+daemon and against a Docker-in-Docker daemon reached through ``DOCKER_HOST``
+that cannot see the worker's filesystem.
 """
 
 import os
@@ -151,6 +153,25 @@ async def test_writes_do_not_reach_the_host_clone(tmp_path):
     assert result.status == "passed", result.output_tail
     assert not (repo / "planted.txt").exists()
     assert (repo / "tests" / "test_it.py").read_text(encoding="utf-8") == original
+
+
+async def test_workspace_is_a_complete_writable_copy(tmp_path):
+    repo = _repo(
+        tmp_path,
+        """
+        def test_copy(self):
+            self.assertEqual(os.getcwd(), "/workspace")
+            with open("data/nested/value.txt") as f:
+                self.assertEqual(f.read(), "42")
+            with open("data/nested/new.txt", "w") as f:
+                f.write("tests may write to their copy")
+        """,
+    )
+    (repo / "data" / "nested").mkdir(parents=True)
+    (repo / "data" / "nested" / "value.txt").write_text("42", encoding="utf-8")
+    result = await verification.verify_working_copy(repo)
+    assert result.status == "passed", result.output_tail
+    assert not (repo / "data" / "nested" / "new.txt").exists()
 
 
 def test_config_defaults_used_in_ci_are_hardened():
