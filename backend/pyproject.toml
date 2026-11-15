@@ -23,7 +23,9 @@ dependencies = [
     "python-dotenv",
     "websockets",
     "pydantic",
-    "mcp",
+    # Capped below 2.0 to match langchain-mcp-adapters (0.3.2 requires
+    # mcp<2.0.0). Lift the cap once an adapters release supports mcp 2.x.
+    "mcp>=1.24,<2",
     "langchain-mcp-adapters",
     "langchain-groq",
     "tree-sitter",
