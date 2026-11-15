@@ -163,6 +163,20 @@ def _fetch_membership(supabase_client, user_id: str):
     )
 
 
+def _row_or_none(result) -> Optional[dict]:
+    """The row from a ``.limit(1).maybe_single().execute()`` query, or None.
+
+    ``.single()`` makes PostgREST answer 406 when no row matches, which
+    postgrest-py raises as APIError, so a missing repo/run/membership surfaced
+    as a 500. ``.maybe_single()`` instead returns ``None`` (not a response
+    object) for zero rows; ``.limit(1)`` keeps it from raising if a filter
+    unexpectedly matches several rows.
+    """
+    if result is None:
+        return None
+    return getattr(result, "data", None) or None
+
+
 # Org roles allowed to change repository contents or start/stop runs.
 # 'viewer' is read-only. Unknown or missing roles fail closed.
 WRITE_ROLES = frozenset({"owner", "admin", "member"})
@@ -267,17 +281,19 @@ async def validate_repo_access(
         .select("id, github_installation_id")
         .eq("org_id", org_id)
         .eq("full_name", repo_name)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
+    repo = _row_or_none(result)
 
-    if not result.data:
+    if not repo:
         raise HTTPException(
             status_code=404,
             detail=f"Repository {repo_name} not found in organization. Please sync repositories first.",
         )
 
-    return result.data["id"], result.data["github_installation_id"]
+    return repo["id"], repo["github_installation_id"]
 
 
 async def authenticate_websocket(websocket: WebSocket) -> Optional[dict]:
@@ -682,14 +698,14 @@ async def get_run_status(run_id: str, org_id: str = Depends(get_org_id)):
         .select("*")
         .eq("id", run_id)
         .eq("org_id", org_id)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
+    run = _row_or_none(result)
 
-    if not result.data:
+    if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-
-    run = result.data
 
     # If still queued/running, check Celery task status
     celery_task_id = run.get("celery_task_id")
@@ -763,18 +779,20 @@ async def stop_agents(
             .select("id, status, org_id")
             .eq("id", run_id)
             .eq("org_id", org_id)
-            .single()
+            .limit(1)
+            .maybe_single()
             .execute()
         )
+        run = _row_or_none(result)
 
-        if not result.data:
+        if not run:
             raise HTTPException(status_code=404, detail="Run not found")
 
-        if result.data["status"] not in ("queued", "running"):
+        if run["status"] not in ("queued", "running"):
             return {
                 "status": "not_running",
                 "run_id": run_id,
-                "current_status": result.data["status"],
+                "current_status": run["status"],
             }
 
         # Delegate to cancel_run_task -- it revokes the Celery task,
@@ -1380,7 +1398,7 @@ async def _authorize_terminal_cwd(
             repo_name, user.get("org_id"), user.get("user_id"), agents_supabase
         )
     except Exception:
-        # HTTPException(404), or PostgREST raising on .single() with no row.
+        # HTTPException(404) for an unknown repo, or a database error.
         return False, None
 
     try:
@@ -1721,10 +1739,12 @@ async def get_admin_metrics(
             .select("role")
             .eq("org_id", org_id)
             .eq("user_id", user_id)
-            .single()
+            .limit(1)
+            .maybe_single()
             .execute()
         )
-        if not result.data or result.data["role"] not in ("owner", "admin"):
+        member = _row_or_none(result)
+        if not member or member.get("role") not in ADMIN_ROLES:
             raise HTTPException(status_code=403, detail="Admin privileges required")
 
     # Fetch metrics from database views
@@ -1870,10 +1890,12 @@ async def get_admin_runs(
         .select("role")
         .eq("org_id", org_id)
         .eq("user_id", user_id)
-        .single()
+        .limit(1)
+        .maybe_single()
         .execute()
     )
-    if not result.data or result.data["role"] not in ("owner", "admin"):
+    member = _row_or_none(result)
+    if not member or member.get("role") not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin privileges required")
 
     query = (

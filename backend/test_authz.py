@@ -322,8 +322,8 @@ def test_repo_not_found_detail_is_generic(monkeypatch, tmp_path):
 def test_start_queue_failure_detail_is_generic(monkeypatch):
     sb = MagicMock()
     repo_q = sb.table.return_value.select.return_value.eq.return_value.eq.return_value
-    repo_q.single.return_value.execute.return_value = SimpleNamespace(
-        data={"id": 1, "github_installation_id": 2}
+    repo_q.limit.return_value.maybe_single.return_value.execute.return_value = (
+        SimpleNamespace(data={"id": 1, "github_installation_id": 2})
     )
     monkeypatch.setattr(agents, "supabase", sb)
 
@@ -385,8 +385,8 @@ def test_runs_accept_in_range_pagination(monkeypatch, path):
     )
     runs_q.range.return_value.execute.return_value = SimpleNamespace(data=[])
     admin_q = sb.table.return_value.select.return_value.eq.return_value.eq.return_value
-    admin_q.single.return_value.execute.return_value = SimpleNamespace(
-        data={"role": "admin"}
+    admin_q.limit.return_value.maybe_single.return_value.execute.return_value = (
+        SimpleNamespace(data={"role": "admin"})
     )
     monkeypatch.setattr(agents, "supabase", sb)
     as_role("admin")
