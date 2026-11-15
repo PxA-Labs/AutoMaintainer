@@ -1181,6 +1181,9 @@ class AgentState(TypedDict):
     # VerificationResult.to_dict() of the current iteration's push, or None
     # when verification did not run; shown to the Maintainer.
     verification: Optional[dict]
+    # Change limits the run's change exceeded (change_limits.py). Sticky: once
+    # set, the PR stays a draft and is never auto-merged.
+    change_limit_violations: list[str]
     log_messages: Annotated[list, operator.add]
 
 
@@ -2317,6 +2320,108 @@ def _verification_state(verify_log) -> Optional[dict]:
     return result.to_dict() if result is not None else None
 
 
+def _read_base_file(gh_repo, path: str, ref: str) -> Optional[str]:
+    """Text of ``path`` on ``ref``, or None when it does not exist there."""
+    try:
+        found = gh_repo.get_contents(path, ref=ref)
+    except GithubException as e:
+        if e.status == 404:
+            return None
+        raise
+    if isinstance(found, list):
+        raise ValueError(f"{path} is a directory")
+    return found.decoded_content.decode("utf-8")
+
+
+def _change_limit_violations(
+    gh_repo, base_branch: str, path: str, code: str, base_content=None
+) -> list[str]:
+    """Limits (change_limits.py) that writing ``code`` to ``path`` exceeds,
+    measured against the base branch.
+
+    The limits are read from ``.automaintainer.yml`` on the BASE branch, so a
+    change cannot relax its own limits. Anything that prevents evaluating
+    them fails closed: it is reported as a violation.
+    """
+    import change_limits
+
+    try:
+        limits = change_limits.limits_from_config(
+            _read_base_file(gh_repo, change_limits.CONFIG_FILE, base_branch)
+        )
+        if base_content is None:
+            base_content = _read_base_file(gh_repo, path, base_branch) or ""
+    except change_limits.ChangeLimitsConfigError as e:
+        return [f"Invalid change limits on the base branch: {e}."]
+    except Exception as e:
+        logger.warning("Could not evaluate change limits for %s: %s", path, e)
+        return [
+            f"The change limits could not be evaluated ({type(e).__name__}); "
+            "treating the change as exceeding them."
+        ]
+    added, removed = change_limits.count_line_changes(base_content, code)
+    return change_limits.find_violations(
+        [change_limits.FileChange(path, added, removed)], limits
+    )
+
+
+async def _check_change_limits(
+    gh_repo, state, checkpoint, base_branch, path, code, base_content=None
+) -> list[str]:
+    """Current violations, or the ones an earlier iteration or attempt of
+    the run recorded: a run that once exceeded a limit stays held."""
+    found = await asyncio.to_thread(
+        _change_limit_violations, gh_repo, base_branch, path, code, base_content
+    )
+    violations = (
+        found
+        or list(state.get("change_limit_violations") or [])
+        or list(checkpoint.get("change_limit_violations") or [])
+    )
+    if found:
+        await _save_checkpoint(
+            current_run_id.get(None), change_limit_violations=violations
+        )
+    return violations
+
+
+def _hold_pr_for_human(pr, violations: list[str]) -> None:
+    """Mark ``pr`` as needing a human: needs-human label, a PR-body section
+    listing ``violations`` and draft state. Idempotent, and it never marks a
+    PR ready for review. Failures are logged: the no-merge guarantee rests on
+    the run state, not on these markers."""
+    import change_limits
+
+    labels = {getattr(l, "name", l) for l in (getattr(pr, "labels", None) or [])}
+    if change_limits.NEEDS_HUMAN_LABEL not in labels:
+        try:
+            pr.add_to_labels(change_limits.NEEDS_HUMAN_LABEL)
+        except Exception as e:
+            logger.warning("Could not label PR #%s: %s", pr.number, e)
+    body = getattr(pr, "body", "")
+    new_body = change_limits.upsert_pr_section(
+        body, change_limits.render_pr_section(violations)
+    )
+    if new_body != body:
+        try:
+            pr.edit(body=new_body)
+        except Exception as e:
+            logger.warning("Could not list change limits on PR #%s: %s", pr.number, e)
+    if getattr(pr, "draft", None) is False:
+        try:
+            pr.convert_to_draft()
+        except Exception as e:
+            logger.warning("Could not convert PR #%s to a draft: %s", pr.number, e)
+
+
+def _change_limits_log(pr_number, violations: list[str]) -> dict:
+    return {
+        "agent": "System",
+        "msg": f"PR #{pr_number} exceeds the change limits and needs a human "
+        "(draft, needs-human, never auto-merged): " + " ".join(violations),
+    }
+
+
 async def implementer_node(state: AgentState):
     new_logs = []
     idea = state["idea"]
@@ -2375,6 +2480,12 @@ async def implementer_node(state: AgentState):
         # pushed head; verify again so the PR still carries a fresh result.
         code = pushed.decoded_content.decode("utf-8")
         logs = [resume_log]
+        violations = await _check_change_limits(
+            gh_repo, state, checkpoint, gh_repo.default_branch, path, code
+        )
+        if violations:
+            _hold_pr_for_human(gh_repo.get_pull(checkpoint["pr_number"]), violations)
+            logs.append(_change_limits_log(checkpoint["pr_number"], violations))
         verify_log = await _verify_and_report(
             gh_repo, checkpoint["pr_number"], branch_name, path
         )
@@ -2385,6 +2496,7 @@ async def implementer_node(state: AgentState):
             "target_file_path": path,
             "pr_number": checkpoint["pr_number"],
             "verification": _verification_state(verify_log),
+            "change_limit_violations": violations,
             "log_messages": logs,
         }
 
@@ -2497,17 +2609,40 @@ async def implementer_node(state: AgentState):
             f"Implement fix for Issue #{issue_number}",
             branch_name,
         )
+        # Before the PR is opened: a change over the limits becomes a draft PR
+        # for a human instead of a merge candidate.
+        violations = await _check_change_limits(
+            gh_repo,
+            state,
+            checkpoint,
+            default_branch,
+            path,
+            code,
+            base_content=original_content if target_file_exists else "",
+        )
         pr = _find_pr_for_branch(gh_repo, branch_name)
         verb = "Reusing"
         if pr is None:
+            body = f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}"
+            extra = {}
+            if violations:
+                import change_limits
+
+                body = change_limits.upsert_pr_section(
+                    body, change_limits.render_pr_section(violations)
+                )
+                extra["draft"] = True
             pr = gh_repo.create_pull(
                 title=f"Implement Issue #{issue_number}",
-                body=f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}",
+                body=body,
                 head=branch_name,
                 base=default_branch,
+                **extra,
             )
             verb = "Created"
         pr_number = pr.number
+        if violations:
+            _hold_pr_for_human(pr, violations)
         await _save_checkpoint(
             run_id, pr_number=pr_number, implemented_iteration=iteration
         )
@@ -2531,6 +2666,11 @@ async def implementer_node(state: AgentState):
             gh_repo.get_pull(pr_number).create_issue_comment(
                 f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
             )
+        violations = await _check_change_limits(
+            gh_repo, state, checkpoint, default_branch, path, code
+        )
+        if violations:
+            _hold_pr_for_human(gh_repo.get_pull(pr_number), violations)
         await _save_checkpoint(run_id, implemented_iteration=iteration)
         new_logs.append(
             {
@@ -2543,6 +2683,8 @@ async def implementer_node(state: AgentState):
             }
         )
 
+    if violations:
+        new_logs.append(_change_limits_log(pr_number, violations))
     verify_log = await _verify_and_report(gh_repo, pr_number, branch_name, path)
     new_logs.append(verify_log)
 
@@ -2561,6 +2703,7 @@ async def implementer_node(state: AgentState):
         "target_file_path": path,
         "pr_number": pr_number,
         "verification": _verification_state(verify_log),
+        "change_limit_violations": violations,
         "log_messages": new_logs,
     }
 
@@ -2886,6 +3029,12 @@ async def maintainer_node(state: AgentState):
             if should_merge and _review_diff_incomplete(diff_text):
                 # The Maintainer approved a change it did not see in full.
                 should_merge, reason = False, "the reviewed diff was incomplete"
+            if should_merge and (
+                state.get("change_limit_violations")
+                or checkpoint.get("change_limit_violations")
+            ):
+                # change_limits.py: over-limit changes are for a human only.
+                should_merge, reason = False, "the change exceeds the change limits"
 
             if should_merge:
                 # An earlier attempt may have merged and crashed before saving

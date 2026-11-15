@@ -138,7 +138,7 @@ attempt plus two revisions.
 | `architect` | **Targeted mode** (`target_issue` set): fetches that issue and uses it as the directive. The run aborts if the issue cannot be fetched, if the number is a pull request, or if the text names no repository file. **Autonomous mode**: reads the root file list and README through the GitHub API, syncs the local clone, indexes it with GitNexus, builds an AST map (`ast_indexer.py`, tree-sitter), and asks the LLM for a directive. The run aborts if the directive names no target file. |
 | `brainstormer` | In autonomous mode, asks the LLM for one feature and opens a GitHub issue for it. The issue carries a hidden run marker. In targeted mode, it reuses the target issue. It is also the resume point after a redelivery (see [Idempotent side effects](#idempotent-side-effects)). |
 | `pm` | Asks the LLM to approve or reject the change. It comments the decision on the issue, and closes the issue on rejection, but only if the agent opened it. A human-filed issue stays open. Targeted runs go through this review too. |
-| `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code` (refusals, truncated output with `finish_reason=length`, ambiguous code fences, empty output) and `validate_generated_code`: a syntax check for Python (`ast`), JSON, TOML and YAML plus a heuristic bracket check for JS/TS, and a shrink guard that refuses a rewrite keeping less than `IMPLEMENTER_MIN_SIZE_RATIO` (default 0.4) of a file larger than `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` (default 2048) unless the directive explicitly asks for removal. The change is committed to a run-scoped branch, the node opens a PR or reuses the existing one, and the change is then verified with the repository's tests (see [Verification](#verification)). |
+| `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code` (refusals, truncated output with `finish_reason=length`, ambiguous code fences, empty output) and `validate_generated_code`: a syntax check for Python (`ast`), JSON, TOML and YAML plus a heuristic bracket check for JS/TS, and a shrink guard that refuses a rewrite keeping less than `IMPLEMENTER_MIN_SIZE_RATIO` (default 0.4) of a file larger than `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` (default 2048) unless the directive explicitly asks for removal. The change is committed to a run-scoped branch and checked against the change limits (see [Change limits](#change-limits)); the node then opens a PR or reuses the existing one, and the change is verified with the repository's tests (see [Verification](#verification)). |
 | `maintainer` | Reviews the PR diff (the prompt includes at most 20 000 characters of it) together with the current iteration's verification result (see [Verification](#verification)), comments the review, and applies the merge policy. |
 
 ### Structured verdicts
@@ -184,6 +184,27 @@ and exit code, plus command and output tail inside an `<untrusted-data>`
 block, or an explicit "not run" note); see "Maintainer input" in
 docs/VERIFICATION.md. Details, settings and the security model are in
 [docs/VERIFICATION.md](./docs/VERIFICATION.md).
+
+### Change limits
+
+After the Implementer commits to the run branch and before it opens the PR
+(and after every later push to it),
+`backend/change_limits.py` measures the change against the base branch:
+changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
+(`CHANGE_LIMIT_MAX_LINES`, default 500) and a path denylist
+(`CHANGE_LIMIT_DENYLIST`, comma-separated globs replacing the default:
+`.github/workflows/**`, `Dockerfile*`, `docker-compose*.yml`, lockfiles such as
+`uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`,
+`.automaintainer.yml`). A repository can override them in the `change_limits`
+section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,
+`allow` exempts globs, never `.automaintainer.yml`); that file is read from the
+**base** branch, so a change cannot relax its own limits. An invalid or
+unreadable configuration counts as a violation. A change over a limit gets a
+draft PR, the `needs-human` label and a "Change limits exceeded" PR-body
+section, and the Maintainer never merges it under any `MERGE_POLICY`. The
+violations are kept in the run state and checkpoint, so they stay in force for
+later iterations and redeliveries; the agent never marks such a PR ready for
+review.
 
 ### Prompt-injection hardening
 
