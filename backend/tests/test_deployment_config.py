@@ -57,7 +57,9 @@ def _final_env(lines: list) -> dict:
 
 
 def _compose() -> dict:
-    return yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    return yaml.safe_load(
+        (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    )
 
 
 def _render() -> dict:
@@ -95,7 +97,9 @@ def test_gitnexus_is_pinned_and_node_not_installed_via_curl_pipe():
     assert "@latest" not in text
     assert not re.search(r"curl[^|\n]*\|\s*(ba)?sh", text), "no curl | bash installers"
     m = re.search(r"ARG GITNEXUS_VERSION=(\S+)", text)
-    assert m and re.fullmatch(r"\d+\.\d+\.\d+", m.group(1)), "gitnexus must be an exact version"
+    assert m and re.fullmatch(
+        r"\d+\.\d+\.\d+", m.group(1)
+    ), "gitnexus must be an exact version"
     assert "gitnexus@${GITNEXUS_VERSION}" in text
 
 
@@ -104,7 +108,9 @@ def test_base_images_are_pinned_to_exact_versions():
     for name in ("NODE_IMAGE", "PYTHON_IMAGE"):
         m = re.search(rf"ARG {name}=\S+:(\S+)", text)
         assert m, name
-        assert re.match(r"\d+\.\d+\.\d+-", m.group(1)), f"{name} must pin a full version"
+        assert re.match(
+            r"\d+\.\d+\.\d+-", m.group(1)
+        ), f"{name} must pin a full version"
     # gitnexus 1.6.x requires Node ^22.18 || >=24.11; Node 20 silently broke it.
     node = re.search(r"ARG NODE_IMAGE=node:(\d+)\.(\d+)", text)
     major, minor = int(node.group(1)), int(node.group(2))
@@ -194,4 +200,6 @@ def test_render_agent_worker_runs_with_api_in_single_instance():
     # unshared filesystem.
     for svc in services:
         if svc is not web:
-            assert "agent_runs" not in svc.get("dockerCommand", "") + svc.get("startCommand", "")
+            assert "agent_runs" not in svc.get("dockerCommand", "") + svc.get(
+                "startCommand", ""
+            )

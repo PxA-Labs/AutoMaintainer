@@ -53,7 +53,8 @@ def get_safe_repo_dir(repo_name: str) -> Path:
     if not REPO_NAME_PATTERN.fullmatch(repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
 
-    slug = repo_name.replace("/", "_")
+    # GitHub repo names are case-insensitive: one clone per repo on every OS.
+    slug = repo_name.lower().replace("/", "_")
     if ".." in slug or slug.strip(".") == "":
         raise HTTPException(status_code=400, detail="Invalid repository name")
     digest = hashlib.sha256(repo_name.lower().encode("utf-8")).hexdigest()[:12]

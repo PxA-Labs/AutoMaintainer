@@ -856,6 +856,14 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
     """
     if not repo_dir.exists():
         return
+    # Defense in depth: callers pass a path from get_safe_target_path, but
+    # re-check containment right at the write so it holds independently.
+    root = os.path.realpath(repo_dir)
+    resolved = os.path.realpath(target_path)
+    if not resolved.startswith(root + os.sep):
+        logger.warning("Refusing local mirror write outside the repository clone")
+        return
+    target_path = Path(resolved)
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(content, encoding="utf-8")
@@ -1136,10 +1144,10 @@ _TERMINAL_ENV_ALLOWLIST_WIN32 = frozenset(
 )
 
 # "owner/repo", or a github.com URL to it (what the dashboard sends).
-_TERMINAL_REPO_RE = re.compile(
-    r"(?:https?://(?:www\.)?github\.com/)?"
-    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?"
-)
+# Matched against an already-normalised "owner/repo" (see _parse_terminal_repo);
+# no optional/lazy parts, so matching is linear in the input length.
+_TERMINAL_REPO_RE = re.compile(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
+_TERMINAL_REPO_MAX_LEN = 256
 
 
 def _terminal_enabled() -> bool:
@@ -1181,7 +1189,24 @@ def _terminal_child_env(windows: bool = False) -> dict:
 
 
 def _parse_terminal_repo(repo_url: str) -> Optional[str]:
-    match = _TERMINAL_REPO_RE.fullmatch(repo_url)
+    """Accept "owner/repo" or a github.com URL (optional .git / trailing slash)."""
+    if len(repo_url) > _TERMINAL_REPO_MAX_LEN:
+        return None
+    slug = repo_url
+    for prefix in (
+        "https://www.github.com/",
+        "http://www.github.com/",
+        "https://github.com/",
+        "http://github.com/",
+    ):
+        if slug.startswith(prefix):
+            slug = slug[len(prefix) :]
+            break
+    if slug.endswith("/"):
+        slug = slug[:-1]
+    if slug.endswith(".git"):
+        slug = slug[: -len(".git")]
+    match = _TERMINAL_REPO_RE.fullmatch(slug)
     if not match or {match.group(1), match.group(2)} & {".", ".."}:
         return None
     return f"{match.group(1)}/{match.group(2)}"
