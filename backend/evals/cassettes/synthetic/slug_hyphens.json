@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix wrapped in a chat-style lead-in and a python fence",
+  "prompt_sha256": "2fe5c1dadf7a2088bba64e4440e4e161837efb8280e2d326a8b08202d82e7c83",
+  "prompt_version": "a2ecc40e0103",
+  "response": "Here is the updated file:\n\n```python\n\"\"\"Helpers for building URL slugs.\"\"\"\n\nimport re\n\n\ndef make_slug(title: str) -> str:\n    \"\"\"Turn a title into a lowercase, URL-friendly slug.\n\n    Letters and digits are kept; every run of other characters becomes a\n    single hyphen, and the slug never starts or ends with a hyphen.\n    \"\"\"\n    lowered = title.lower()\n    return re.sub(r\"[^a-z0-9]+\", \"-\", lowered).strip(\"-\")\n```\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "slug_hyphens",
+  "temperature": null,
+  "usage": null
+}

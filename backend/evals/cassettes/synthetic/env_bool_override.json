@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: correct fix in a fence followed by an explanation",
+  "prompt_sha256": "80937bbd9b5353c2b5019f3dc0af3c47296bb35226f1877a360628908e683437",
+  "prompt_version": "a2ecc40e0103",
+  "response": "```python\n\"\"\"Application settings with environment overrides.\"\"\"\n\nimport os\n\n_TRUE = {\"true\", \"1\", \"yes\", \"on\"}\n_FALSE = {\"false\", \"0\", \"no\", \"off\"}\n\n\ndef _parse_bool(raw: str) -> bool:\n    value = raw.strip().lower()\n    if value in _TRUE:\n        return True\n    if value in _FALSE:\n        return False\n    raise ValueError(f\"not a boolean: {raw!r}\")\n\n\ndef load_settings(defaults: dict, environ=None, prefix: str = \"APP_\") -> dict:\n    \"\"\"Return ``defaults`` updated with overrides from the environment.\n\n    A default named ``port`` is overridden by ``APP_PORT``. The override is\n    converted to the type of the default value.\n    \"\"\"\n    environ = os.environ if environ is None else environ\n    settings = dict(defaults)\n    for name, default in defaults.items():\n        raw = environ.get(prefix + name.upper())\n        if raw is None:\n            continue\n        if isinstance(default, bool):\n            settings[name] = _parse_bool(raw)\n        else:\n            settings[name] = type(default)(raw)\n    return settings\n```\n\nThis parses boolean overrides explicitly instead of calling bool().\n",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "env_bool_override",
+  "temperature": null,
+  "usage": null
+}

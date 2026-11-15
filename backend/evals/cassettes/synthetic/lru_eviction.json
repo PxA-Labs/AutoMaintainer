@@ -1,0 +1,14 @@
+{
+  "finish_reason": "stop",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: refusal (normalize_generated_code rejects it)",
+  "prompt_sha256": "9faadc552c90adaa366bd94736b7d6785b04bd6d0d6be42775e1968570bd70e7",
+  "prompt_version": "a2ecc40e0103",
+  "response": "I'm sorry, but I can't help with modifying this cache implementation.",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "lru_eviction",
+  "temperature": null,
+  "usage": null
+}

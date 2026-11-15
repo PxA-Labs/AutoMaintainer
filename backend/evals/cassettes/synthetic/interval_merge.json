@@ -1,0 +1,14 @@
+{
+  "finish_reason": "length",
+  "latency_ms": null,
+  "model": "synthetic-fixture",
+  "note": "hand-authored to exercise the harness, NOT a model output: output cut off by the token limit (finish_reason=length, rejected)",
+  "prompt_sha256": "9525ae0b0794f96bda178fa0966d58f1b8092e97ee231d60275e43f3a8a1bac4",
+  "prompt_version": "a2ecc40e0103",
+  "response": "\"\"\"Interval arithmetic for booking calendars.\"\"\"\n\n\ndef merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:\n    \"\"\"Merge overlapping closed intervals.\n\n    Takes ``(start, end)`` tuples in any order and returns a sorted list of\n    disjoint intervals. Intervals that touch, such as ``(1, 3)`",
+  "seed": null,
+  "synthetic": true,
+  "task_id": "interval_merge",
+  "temperature": null,
+  "usage": null
+}
