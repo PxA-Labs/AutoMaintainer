@@ -338,7 +338,7 @@ lock.
 
 | Artifact | How a re-run finds it instead of creating it again |
 | --- | --- |
-| Issue | A hidden `<!-- automaintainer-run: <run_id> -->` marker in the body. The node scans the 100 newest issues for it. |
+| Issue | A hidden `<!-- automaintainer-run: <run_id> -->` marker in the body. The node scans the 100 newest issues for it and reuses one only if the run's own account (the App bot, or the PAT user) opened it (#490). |
 | Branch | A deterministic name derived from the run id (`run_branch_name`). |
 | PR | Looked up by head branch. |
 | Commit | Skipped when the file on the branch already has that content. |

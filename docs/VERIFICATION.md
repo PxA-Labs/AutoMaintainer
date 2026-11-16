@@ -81,7 +81,8 @@ permission.
 Green checks are not enough for an automatic merge, because a
 prompt-injected run controls both the change and the tests it adds. Under
 `ci` and `auto` the merge also needs a **trusted trigger** (`backend/trust.py`,
-#487): the caller who started the run (their linked GitHub login) and the
+#487): the caller who started the run (identified by the GitHub user id of
+the identity they signed in with, resolved to the current login, #491) and the
 author of the issue it targets, if any, must each have `write`, `maintain` or
 `admin` permission on the repository. The lookup is deterministic, made once
 per run through the run's installation token, and fails closed: an unknown or
