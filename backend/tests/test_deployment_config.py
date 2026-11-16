@@ -8,7 +8,9 @@ correctness and security:
   pinned gitnexus, no compilers and no `curl | bash`;
 - the API and the Celery worker share the repository workspace directory
   (compose: same named volume at the same path; Render: same container);
-- dangerous flags (ENABLE_TERMINAL, AUTH_DEV_BYPASS) are never set by default.
+- dangerous flags (ENABLE_TERMINAL, AUTH_DEV_BYPASS) are never set by default;
+- the Render API service declares every GitHub App install-flow setting, with
+  the secrets left to the dashboard (sync: false) (#479).
 """
 
 import re
@@ -203,3 +205,85 @@ def test_render_agent_worker_runs_with_api_in_single_instance():
             assert "agent_runs" not in svc.get("dockerCommand", "") + svc.get(
                 "startCommand", ""
             )
+
+
+# Settings the GitHub App install flow reads (#479): App authentication
+# (GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY) and the install URL and setup
+# callback (GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET)
+# in github_app.py, and the setup redirect target (DASHBOARD_URL) in main.py.
+# The list lives here because the backend has no single list of them;
+# test_github_app_install_settings_are_read_by_the_backend keeps it honest.
+GITHUB_APP_INSTALL_SETTINGS = (
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_SLUG",
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
+    "DASHBOARD_URL",
+)
+GITHUB_APP_SECRETS = ("GITHUB_APP_CLIENT_SECRET", "GITHUB_APP_PRIVATE_KEY")
+
+
+def _render_web(render: dict) -> dict:
+    (web,) = [s for s in render["services"] if s["type"] == "web"]
+    return web
+
+
+def _github_app_settings_problems(render: dict) -> list:
+    """Install-flow settings missing from the Render API service, and secrets
+    that are not ``sync: false`` or that carry a value in the blueprint."""
+    env = {e["key"]: e for e in _render_web(render).get("envVars", [])}
+    problems = [
+        f"{key} is not declared"
+        for key in GITHUB_APP_INSTALL_SETTINGS
+        if key not in env
+    ]
+    for key in GITHUB_APP_SECRETS:
+        entry = env.get(key)
+        if entry is None:
+            continue
+        if entry.get("sync") is not False:
+            problems.append(f"{key} must use sync: false")
+        if {"value", "generateValue", "fromService", "fromGroup"} & set(entry):
+            problems.append(f"{key} must not have a value")
+    return problems
+
+
+def test_render_api_declares_every_github_app_install_setting():
+    assert _github_app_settings_problems(_render()) == []
+
+
+def test_github_app_install_settings_are_read_by_the_backend():
+    """A setting dropped or renamed in the backend must leave this list too."""
+    sources = "".join(
+        (REPO_ROOT / "backend" / name).read_text(encoding="utf-8")
+        for name in ("github_app.py", "main.py")
+    )
+    for key in GITHUB_APP_INSTALL_SETTINGS:
+        assert f'os.getenv("{key}"' in sources, key
+
+
+@pytest.mark.parametrize("key", GITHUB_APP_INSTALL_SETTINGS)
+def test_render_check_fails_when_a_setting_is_removed(key):
+    render = _render()
+    web = _render_web(render)
+    web["envVars"] = [e for e in web["envVars"] if e["key"] != key]
+    assert _github_app_settings_problems(render) == [f"{key} is not declared"]
+
+
+@pytest.mark.parametrize("key", GITHUB_APP_SECRETS)
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ({"value": "s3cret"}, ["must use sync: false", "must not have a value"]),
+        ({"sync": False, "value": "s3cret"}, ["must not have a value"]),
+        ({"sync": True}, ["must use sync: false"]),
+    ],
+)
+def test_render_check_fails_for_a_secret_with_a_literal_value(key, entry, expected):
+    render = _render()
+    web = _render_web(render)
+    web["envVars"] = [
+        {"key": key, **entry} if e["key"] == key else e for e in web["envVars"]
+    ]
+    assert _github_app_settings_problems(render) == [f"{key} {m}" for m in expected]
