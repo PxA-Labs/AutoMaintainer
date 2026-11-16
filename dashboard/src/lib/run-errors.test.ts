@@ -6,8 +6,8 @@ import { describeRunError, formatRunErrorLog, KNOWN_RUN_ERROR_CODES } from "@/li
 // The codes are read from the backend source instead of a copied list, so a
 // new backend code fails this test until it has a label. Neither the OpenAPI
 // snapshot nor any shared file lists them (they only appear in ErrorEvents).
-// backend/tests/contract/test_dashboard_error_codes.py makes the same check
-// from the backend side (with the AST), so a backend-only change is caught too.
+// This runs with the dashboard tests only, so a backend-only change adding a
+// code is caught at the next dashboard change.
 const AGENTS_PY = resolve(import.meta.dirname, "../../../backend/agents.py");
 
 function backendErrorCodes(source: string): Set<string> {
