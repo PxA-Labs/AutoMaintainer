@@ -99,6 +99,43 @@ requires the `automaintainer/verification` status to be `success`, whatever
 the Maintainer decides, and `human` never merges. `auto` merges on approval
 alone, as before.
 
+### Audit trail
+
+The PR body and the commit status show only the latest result. Every
+verification also writes one row to the `verification_results` table
+(migration `supabase/migrations/20261116120000_verification_results.sql`,
+hook `verification.record_result`, called by `agents._verify_and_report` on
+both the normal path and the redelivery-resume path):
+
+- The run context: `org_id`, `run_id`, `repository_id` and `repo_name` (read
+  from the `runs` row), `pr_number`, `head_sha` (empty when the head could
+  not be resolved) and `iteration` (the run checkpoint's
+  `implemented_iteration`, which the Implementer saves before verifying).
+- The result: `status` (`passed`, `failed`, `error`, `skipped`), `summary`,
+  `command` (the argv as a JSON array), `exit_code`, `duration_ms`,
+  `output_tail` (the last 4000 characters, `AUDIT_OUTPUT_TAIL_CHARS`, with NUL
+  bytes removed; a `CHECK` enforces the cap), `output_truncated` and
+  `backend` (`local`, or the `SANDBOX_BACKEND` factory for sandboxed runs).
+
+The row is written right after the tests ran, before anything is posted to
+GitHub, so it exists even when posting the status then stops the run. Writing
+it is best effort: a database failure is logged with the run id and changes
+neither the status, the PR section, the Maintainer input nor the merge
+decision. A run without a `runs` row (no database, local scripts) writes
+nothing.
+
+Rows are not deduplicated. A redelivered run that verifies the same
+`head_sha` again ran the tests again, so it writes a second row; two rows
+with the same `run_id` and `head_sha` mean the commit was tested twice.
+
+Org members read their organization's rows through
+`GET /runs/{run_id}/verifications` (newest first, at most 100; same auth and
+tenant check as `GET /status/{run_id}`, so another organization's run is a
+404) or directly under RLS. Only the service role writes them; there is no
+INSERT, UPDATE or DELETE policy for `anon` or `authenticated`. The table is
+not in the `supabase_realtime` publication, because the dashboard does not
+subscribe to it. Rows are deleted with their run or organization.
+
 ### Effect on existing deployments
 
 - With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image
@@ -394,8 +431,10 @@ remote sandbox host setup).
   `_ci_checks_passed` requires at least one successful check; a passed
   verification is one. Repositories that want an independent CI signal as
   well should make their CI job a required check in branch protection.
-- **No audit rows yet.** Verification results are visible in the PR, the
-  commit status and the Maintainer prompt (see [Maintainer input](#maintainer-input)),
-  but are not written to an audit table; that remains a follow-up of #411.
+- **Audit rows are best effort.** A verification whose row could not be
+  written (database unavailable, run without a `runs` row) leaves only a log
+  line; the PR and the commit status still carry the result (see
+  [Audit trail](#audit-trail)). The output kept there is a 4000-character
+  tail, not the full log.
 - **Windows hosts** kill the process tree with `taskkill /T`; POSIX hosts use
   a new session and `killpg`.

@@ -2234,8 +2234,8 @@ class _VerifyLog(dict):
 
 async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: str):
     """Run the repository's tests on the pushed head of ``branch_name`` and
-    publish the outcome: a commit status, a section in the PR body and a
-    TestResultEvent. Returns a log message for the run (a ``_VerifyLog``
+    publish the outcome: an audit row (``verification_results``), a commit
+    status, a section in the PR body and a TestResultEvent. Returns a log message for the run (a ``_VerifyLog``
     whose ``result`` is the VerificationResult).
 
     The commit status (context ``automaintainer/verification``) is what gates
@@ -2257,6 +2257,16 @@ async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: st
     token = await asyncio.to_thread(_run_github_token)
     result = await verification.verify_pr_branch(
         clone_url, branch_name, head_sha, token, changed_paths=[path]
+    )
+    # Audit row first, so it exists even when posting to GitHub fails below.
+    # Best effort: record_result never raises and its outcome changes nothing.
+    await asyncio.to_thread(
+        verification.record_result,
+        supabase,
+        run_id,
+        result,
+        pr_number=pr_number,
+        head_sha=head_sha,
     )
 
     if run_id:

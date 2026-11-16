@@ -679,6 +679,97 @@ def upsert_pr_section(body, section: str) -> str:
     return (body.rstrip() + "\n\n" + section) if body.strip() else section
 
 
+AUDIT_TABLE = "verification_results"
+# Must not exceed the CHECKs in supabase/migrations/*_verification_results.sql.
+AUDIT_OUTPUT_TAIL_CHARS = 4000
+AUDIT_SUMMARY_CHARS = 1000
+
+
+def _audit_text(text: Optional[str], limit: int) -> tuple[str, bool]:
+    """The last ``limit`` characters of ``text`` without NUL bytes, which
+    PostgreSQL text cannot store, and whether anything was cut."""
+    text = (text or "").replace("\x00", "")
+    return text[-limit:], len(text) > limit
+
+
+def audit_row(
+    result: VerificationResult,
+    run: dict,
+    *,
+    pr_number: Optional[int],
+    head_sha: Optional[str] = None,
+) -> dict:
+    """The ``verification_results`` row for ``result`` of ``run`` (a runs row
+    with org_id, repository_id, repo_name and checkpoint)."""
+    tail, cut = _audit_text(result.output_tail, AUDIT_OUTPUT_TAIL_CHARS)
+    summary, _ = _audit_text(result.summary, AUDIT_SUMMARY_CHARS)
+    if result.runner == "sandbox":
+        backend = (os.getenv("SANDBOX_BACKEND") or "").strip() or "sandbox"
+    else:
+        backend = result.runner
+    checkpoint = run.get("checkpoint") or {}
+    return {
+        "org_id": run["org_id"],
+        "run_id": run["id"],
+        "repository_id": run.get("repository_id"),
+        "repo_name": run.get("repo_name"),
+        "pr_number": pr_number,
+        # NOT NULL: '' records a verification whose head could not be resolved.
+        "head_sha": result.head_sha or head_sha or "",
+        # The Implementer checkpoints the iteration it pushed before verifying.
+        "iteration": checkpoint.get("implemented_iteration"),
+        "status": result.status,
+        "summary": summary,
+        "command": list(result.command),
+        "exit_code": result.exit_code,
+        "duration_ms": int(round((result.duration_seconds or 0) * 1000)),
+        "output_tail": tail,
+        "output_truncated": bool(result.truncated or cut),
+        "backend": backend,
+    }
+
+
+def record_result(
+    client,
+    run_id: Optional[str],
+    result: VerificationResult,
+    *,
+    pr_number: Optional[int] = None,
+    head_sha: Optional[str] = None,
+) -> bool:
+    """Write one audit row for ``result`` with the service-role ``client``.
+
+    Best effort and never raises: the row is a record of the verification,
+    not part of it, so a database failure is logged with the run id and the
+    caller's status, PR section and merge decision are unaffected. Every call
+    writes a new row (a redelivered run that verifies the same head again ran
+    the tests again). Returns whether a row was written.
+    """
+    if client is None or not run_id:
+        return False
+    try:
+        found = (
+            client.table("runs")
+            .select("id, org_id, repository_id, repo_name, checkpoint")
+            .eq("id", run_id)
+            .limit(1)
+            .execute()
+        )
+        rows = found.data or []
+        if not rows or not rows[0].get("org_id"):
+            logger.warning(
+                "Not recording verification of run %s: the run has no organization row",
+                run_id,
+            )
+            return False
+        row = audit_row(result, rows[0], pr_number=pr_number, head_sha=head_sha)
+        client.table(AUDIT_TABLE).insert(row).execute()
+        return True
+    except Exception as e:
+        logger.warning("Could not record verification of run %s: %s", run_id, e)
+        return False
+
+
 def commit_status(result: VerificationResult) -> tuple[str, str]:
     """(state, description) for a GitHub commit status on the verified head.
 

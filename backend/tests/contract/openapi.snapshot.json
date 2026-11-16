@@ -1207,6 +1207,61 @@
         "summary": "List Runs"
       }
     },
+    "/runs/{run_id}/verifications": {
+      "get": {
+        "description": "Verification audit rows of a run in the caller's organization, newest\nfirst (docs/VERIFICATION.md, \"Audit trail\").",
+        "operationId": "list_run_verifications_runs__run_id__verifications_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Run Verifications"
+      }
+    },
     "/start": {
       "post": {
         "description": "Start an agent run via Celery task queue.\nReturns immediately with run_id for polling.",

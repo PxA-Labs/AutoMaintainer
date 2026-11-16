@@ -95,6 +95,7 @@ TENANT_TABLES = {
     "usage_events": "org_id",
     "webhook_events": "org_id",
     "ide_sessions": "org_id",
+    "verification_results": "org_id",
 }
 
 # Tables clients may never write: the backend writes them with the service
@@ -106,6 +107,7 @@ SERVICE_WRITTEN_TABLES = [
     "logs",
     "usage_events",
     "webhook_events",
+    "verification_results",
 ]
 
 # webhook_events is internal: no client may read it, even in its own org.
@@ -176,6 +178,16 @@ def _insert_row(table: str, tenant: Tenant, user_id: uuid.UUID):
             "run_id": tenant.run_id,
             "repository_id": tenant.repository_id,
         },
+        "verification_results": {
+            "org_id": tenant.org_id,
+            "run_id": tenant.run_id,
+            "repository_id": tenant.repository_id,
+            "repo_name": f"{tenant.login}/repo",
+            "pr_number": 1,
+            "head_sha": "a" * 40,
+            "status": "passed",
+            "command": '["pytest"]',
+        },
     }
     row = rows[table]
     statement = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -242,7 +254,13 @@ def _seed(conn):
                     tenant.installation_id,
                 ),
             )
-            for table in ("logs", "usage_events", "webhook_events", "ide_sessions"):
+            for table in (
+                "logs",
+                "usage_events",
+                "webhook_events",
+                "ide_sessions",
+                "verification_results",
+            ):
                 cur.execute(*_insert_row(table, tenant, tenant.owner))
         # A pending invite: a membership row that has not been accepted yet.
         cur.execute(
@@ -664,3 +682,83 @@ def test_ide_session_cannot_be_moved_to_another_org(db):
             (str(ORG_B), str(USER_A)),
         )
         assert moved == "denied"
+
+
+# --------------------------------------------------------------------------
+# verification_results (epic #411)
+# --------------------------------------------------------------------------
+
+
+def test_verification_rows_are_read_by_members_only(db):
+    with session(db, "authenticated", USER_A) as cur:
+        cur.execute(
+            "SELECT DISTINCT run_id::text FROM verification_results WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert cur.fetchall() == [(str(TENANT_A.run_id),)]
+    with session(db, "authenticated", USER_B) as cur:
+        cur.execute(
+            "SELECT count(*) FROM verification_results WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert cur.fetchone() == (0,)
+
+
+def test_members_cannot_forge_or_rewrite_verification_rows(db):
+    with session(db, "authenticated", USER_A) as cur:
+        statement, params = _insert_row("verification_results", TENANT_A, USER_A)
+        assert attempt(cur, statement, params) == "denied"
+        rewritten = attempt(
+            cur,
+            "UPDATE verification_results SET status = 'passed' WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert rewritten == 0
+        assert attempt(cur, *_delete("verification_results", TENANT_A)) == 0
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    [
+        ("status", "maybe"),
+        ("output_tail", "x" * 4001),
+        ("summary", "x" * 1001),
+        ("command", '"pytest -q"'),
+    ],
+    ids=["status", "output_tail", "summary", "command"],
+)
+def test_verification_rows_reject_invalid_values(db, column, value):
+    row = {
+        "org_id": str(ORG_A),
+        "run_id": str(TENANT_A.run_id),
+        "head_sha": "a" * 40,
+        "status": "passed",
+        column: value,
+    }
+    statement = sql.SQL("INSERT INTO verification_results ({}) VALUES ({})").format(
+        sql.SQL(", ").join(map(sql.Identifier, row)),
+        sql.SQL(", ").join(sql.Placeholder() * len(row)),
+    )
+    with session(db, "service_role") as cur:
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            cur.execute(statement, list(row.values()))
+
+
+def test_verification_rows_go_with_their_run(db):
+    with session(db, "service_role") as cur:
+        cur.execute("DELETE FROM runs WHERE id = %s", (str(TENANT_A.run_id),))
+        cur.execute(
+            "SELECT count(*) FROM verification_results WHERE run_id = %s",
+            (str(TENANT_A.run_id),),
+        )
+        assert cur.fetchone() == (0,)
+
+
+def test_verification_results_are_not_published_to_realtime(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_publication_tables"
+            " WHERE pubname = 'supabase_realtime' AND tablename = 'verification_results'"
+        )
+        assert cur.fetchone() == (0,)
+    db.rollback()
