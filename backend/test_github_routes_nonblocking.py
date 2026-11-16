@@ -39,6 +39,8 @@ def slow_github(monkeypatch, tmp_path):
     repo = MagicMock()
     repo.default_branch = "main"
     repo.get_contents.return_value = SimpleNamespace(path="a.py", sha="s")
+    # IDE writes go to an unprotected working branch, never "main" (#139).
+    repo.get_branch.return_value = SimpleNamespace(protected=False)
     repo.update_file.side_effect = _slow()
     repo.delete_file.side_effect = _slow()
     repo.create_file.side_effect = _slow()

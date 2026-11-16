@@ -149,6 +149,8 @@ def github(monkeypatch, tmp_path):
     repo = MagicMock()
     repo.get_contents.return_value = SimpleNamespace(path="a.py", sha="s")
     repo.default_branch = "main"
+    # IDE writes target an unprotected working branch, never "main" (#139).
+    repo.get_branch.return_value = SimpleNamespace(protected=False)
     monkeypatch.setattr(main, "Github", lambda *_: MagicMock(get_repo=lambda _: repo))
     return repo
 

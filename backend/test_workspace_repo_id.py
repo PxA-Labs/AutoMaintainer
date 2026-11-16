@@ -140,6 +140,8 @@ def test_file_write_mirrors_into_the_id_keyed_clone(monkeypatch):
     app.dependency_overrides[main.get_current_user] = user
     gh_repo = MagicMock()
     gh_repo.get_contents.return_value = SimpleNamespace(path="app.py", sha="s")
+    gh_repo.default_branch = "main"
+    gh_repo.get_branch.return_value = SimpleNamespace(protected=False)
     monkeypatch.setattr(
         main, "Github", lambda _token: MagicMock(get_repo=lambda _n: gh_repo)
     )

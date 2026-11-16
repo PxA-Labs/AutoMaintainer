@@ -444,8 +444,11 @@ Source: `backend/main.py`, `dashboard/src/components/WebIDE.tsx`.
 
 - **IDE routes**: `/repo/{name}/tree`, `/search` and `GET /file` read the
   local clone. `POST /file`, `POST /file/create` and `DELETE /file` commit
-  **directly to the repository's default branch** through the GitHub API,
-  then update the local mirror. `POST /repo/{name}/propose-changes` creates a
+  through the GitHub API to the request's `branch`, or, when it is omitted,
+  to the caller's working branch `automaintainer/ide-<hash>` (created from
+  the default branch on first use). They **never** commit to the default
+  branch or a protected branch (409), then update the local mirror (#139).
+  `POST /repo/{name}/propose-changes` creates a
   new branch, commits the edited files there and opens a PR. The editor is
   Monaco.
 - **Inline assist**: `POST /assist/inline` streams an LLM completion as

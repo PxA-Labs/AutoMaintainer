@@ -11,13 +11,14 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from github import Github
+from github import Github, GithubException, UnknownObjectException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from typing import Optional, List, Annotated, Literal
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
+import hashlib
 import json
 import uuid
 import httpx
@@ -97,6 +98,10 @@ class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
     commit_message: Optional[str] = None
+    # Branch to commit to. Omitted: the caller's IDE working branch (see
+    # _ide_working_branch). The default branch and protected branches are
+    # always refused (#139).
+    branch: Optional[str] = None
 
 
 class FileCreateRequest(BaseModel):
@@ -104,6 +109,7 @@ class FileCreateRequest(BaseModel):
     content: str = ""
     is_dir: bool = False
     commit_message: Optional[str] = None
+    branch: Optional[str] = None
 
 
 def internal_error(status_code: int, public_message: str, exc: BaseException):
@@ -1354,12 +1360,101 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
         logger.warning(f"Committed upstream but local mirror write failed: {e}")
 
 
+# --- IDE commit target branch (#139) ---
+#
+# The IDE file routes used to commit straight to the repository's default
+# branch, so every Save was an unreviewed commit to main while the UI implied
+# the edit was only staged. They now commit to a working branch instead:
+#
+# - ``branch`` given: that branch, created from the default branch if missing.
+# - ``branch`` omitted (what the dashboard sends today): the caller's IDE
+#   working branch, ``automaintainer/ide-<hash of org and user>``. It is stable
+#   per user, so consecutive saves accumulate on one branch, and the hash keeps
+#   Supabase ids out of the repository's branch list.
+#
+# The default branch and any branch GitHub reports as protected are refused
+# with 409 before anything is written. Getting the edits into the default
+# branch is a pull request: POST /repo/{name}/propose-changes, or a PR opened
+# from the working branch on GitHub.
+
+IDE_BRANCH_PREFIX = "automaintainer/ide-"
+# A conservative subset of git's ref-name rules (git check-ref-format).
+_BRANCH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*")
+_BRANCH_NAME_MAX_LEN = 200
+
+
+def _validate_branch_name(branch: str) -> None:
+    if (
+        len(branch) > _BRANCH_NAME_MAX_LEN
+        or not _BRANCH_NAME_RE.fullmatch(branch)
+        or ".." in branch
+        or "/." in branch
+        or branch.startswith((".", "-"))
+        or branch.endswith((".", ".lock"))
+    ):
+        raise HTTPException(status_code=400, detail="Invalid branch name")
+
+
+def _ide_working_branch(org_id: str, user_id: str) -> str:
+    digest = hashlib.sha256(f"{org_id}:{user_id}".encode("utf-8")).hexdigest()
+    return f"{IDE_BRANCH_PREFIX}{digest[:12]}"
+
+
+def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -> str:
+    """The branch an IDE write targets, validated before any GitHub call."""
+    if requested is None or not requested.strip():
+        return _ide_working_branch(org_id, user_id)
+    branch = requested.strip()
+    _validate_branch_name(branch)
+    return branch
+
+
+def _ensure_writable_branch(repo, branch: str) -> None:
+    """Refuse the default or a protected branch; create ``branch`` if missing.
+
+    Blocking (PyGithub); call from a worker thread.
+    """
+    default_branch = repo.default_branch
+    if branch == default_branch:
+        raise HTTPException(
+            status_code=409,
+            detail="The IDE does not commit to the default branch; "
+            "omit 'branch' to use your IDE working branch, or propose changes "
+            "as a pull request",
+        )
+    try:
+        existing = repo.get_branch(branch)
+    except UnknownObjectException:
+        existing = None
+    except Exception as e:
+        raise internal_error(502, "Could not read the target branch", e)
+
+    if existing is not None:
+        # Anything but an explicit False fails closed.
+        if getattr(existing, "protected", True) is not False:
+            raise HTTPException(
+                status_code=409, detail="The target branch is protected"
+            )
+        return
+
+    try:
+        base = repo.get_git_ref(f"heads/{default_branch}")
+        repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base.object.sha)
+    except GithubException as e:
+        # 422 "Reference already exists": a concurrent save created it.
+        if e.status != 422:
+            raise internal_error(502, "Could not create the target branch", e)
+    except Exception as e:
+        raise internal_error(502, "Could not create the target branch", e)
+
+
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(
     repo_name: str,
     request: Request,
     payload: FileUpdateRequest,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -1368,6 +1463,7 @@ async def update_repo_file(
         or ".." in payload.file_path
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
+    branch = _requested_ide_branch(payload.branch, org_id, user_id)
 
     # Validate the local mirror path BEFORE any GitHub call. Checking it only
     # after the commit meant a path the workspace refuses (.git/..., symlink
@@ -1383,21 +1479,25 @@ async def update_repo_file(
     def _commit() -> None:
         # PyGithub and the mirror write are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, branch)
         try:
-            file = repo.get_contents(payload.file_path)
+            file = repo.get_contents(payload.file_path, ref=branch)
         except Exception as e:
             logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
         try:
-            repo.update_file(file.path, message, payload.content, file.sha)
+            repo.update_file(
+                file.path, message, payload.content, file.sha, branch=branch
+            )
         except Exception as e:
             raise internal_error(500, "Failed to update file", e)
 
-        # Mirror to the local clone so the IDE doesn't show stale reads.
+        # Mirror to the local clone so the IDE doesn't show stale reads. The
+        # clone is reset to the remote on the next agent sync.
         _write_local_mirror(repo_dir, target_path, payload.content)
 
     await asyncio.to_thread(_commit)
-    return {"status": "updated", "message": message}
+    return {"status": "updated", "message": message, "branch": branch}
 
 
 @app.post("/repo/{repo_name:path}/file/create")
@@ -1406,6 +1506,7 @@ async def create_repo_file(
     request: Request,
     payload: FileCreateRequest,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -1414,6 +1515,7 @@ async def create_repo_file(
         or ".." in payload.file_path
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
+    branch = _requested_ide_branch(payload.branch, org_id, user_id)
 
     actual_path = payload.file_path
     actual_content = payload.content
@@ -1434,15 +1536,16 @@ async def create_repo_file(
     def _commit() -> None:
         # PyGithub and the mirror write are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, branch)
         try:
-            repo.create_file(actual_path, message, actual_content)
+            repo.create_file(actual_path, message, actual_content, branch=branch)
         except Exception as e:
             raise internal_error(500, "Failed to create file", e)
 
         _write_local_mirror(repo_dir, target_path, actual_content)
 
     await asyncio.to_thread(_commit)
-    return {"status": "created", "message": message}
+    return {"status": "created", "message": message, "branch": branch}
 
 
 @app.delete("/repo/{repo_name:path}/file")
@@ -1450,12 +1553,15 @@ async def delete_repo_file(
     repo_name: str,
     file_path: str,
     commit_message: Optional[str] = None,
+    branch: Optional[str] = None,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
         raise HTTPException(status_code=400, detail="Invalid file path")
+    target_branch = _requested_ide_branch(branch, org_id, user_id)
 
     gh = await _github_client_for_repo(repo_name, org_id)
     message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
@@ -1463,8 +1569,9 @@ async def delete_repo_file(
     def _delete() -> None:
         # PyGithub calls are blocking HTTP round trips; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, target_branch)
         try:
-            file = repo.get_contents(file_path)
+            file = repo.get_contents(file_path, ref=target_branch)
         except Exception as e:
             logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
@@ -1476,12 +1583,12 @@ async def delete_repo_file(
             )
 
         try:
-            repo.delete_file(file.path, message, file.sha)
+            repo.delete_file(file.path, message, file.sha, branch=target_branch)
         except Exception as e:
             raise internal_error(500, "Failed to delete file", e)
 
     await asyncio.to_thread(_delete)
-    return {"status": "deleted", "message": message}
+    return {"status": "deleted", "message": message, "branch": target_branch}
 
 
 # --- Propose Changes Endpoint ---
