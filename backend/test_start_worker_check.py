@@ -32,6 +32,7 @@ class FakeInspect:
 @pytest.fixture(autouse=True)
 def fresh_probe(monkeypatch):
     monkeypatch.delenv("AGENT_WORKER_CHECK", raising=False)
+    monkeypatch.setattr(main, "_worker_check_off_warned", False)
     monkeypatch.setattr(
         main, "_worker_probe", {"checked_at": float("-inf"), "available": False}
     )
@@ -154,3 +155,23 @@ def test_probe_result_is_cached_for_a_few_seconds(monkeypatch):
     clock.now += 1
     assert main._agent_worker_available_cached() is True
     assert len(inspect.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "environment, warned", [("production", True), ("development", False)]
+)
+def test_disabled_check_warns_once_in_production(
+    monkeypatch, caplog, environment, warned
+):
+    monkeypatch.setenv("AGENT_WORKER_CHECK", "false")
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    supabase_with_repo(monkeypatch)
+    queued_task(monkeypatch)
+    use_inspect(monkeypatch, FakeInspect(replies=None))
+
+    with caplog.at_level("WARNING", logger=main.logger.name):
+        for _ in range(2):
+            assert client.post("/start", json={"repo_name": "o/r"}).status_code == 200
+
+    warnings = [r for r in caplog.records if "AGENT_WORKER_CHECK is off" in r.message]
+    assert len(warnings) == (1 if warned else 0)

@@ -797,8 +797,25 @@ def agent_worker_check_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
+_worker_check_off_warned = False
+
+
+def _warn_if_check_off_in_production() -> None:
+    """Log once per process when production runs with the check disabled."""
+    global _worker_check_off_warned
+    if _worker_check_off_warned:
+        return
+    if os.getenv("ENVIRONMENT", "development").strip().lower() == "production":
+        _worker_check_off_warned = True
+        logger.warning(
+            "AGENT_WORKER_CHECK is off with ENVIRONMENT=production: /start "
+            "queues runs even when no agent worker will consume them"
+        )
+
+
 async def agent_worker_available() -> bool:
     if not agent_worker_check_enabled():
+        _warn_if_check_off_in_production()
         return True
     return await asyncio.to_thread(_agent_worker_available_cached)
 
