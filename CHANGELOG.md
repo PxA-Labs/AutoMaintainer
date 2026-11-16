@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- Start the GitHub App install with the Supabase session only ([#509](https://github.com/PxA-Labs/AutoMaintainer/pull/509)) - @purvanshjoshi
 - **dashboard**: Label every run error code and stop retrying refused terminal sessions ([#508](https://github.com/PxA-Labs/AutoMaintainer/pull/508)) - @purvanshjoshi
 - Keep IDE writes off the default branch and enforce route auth and tenant checks ([#504](https://github.com/PxA-Labs/AutoMaintainer/pull/504)) (closes [#139](https://github.com/PxA-Labs/AutoMaintainer/issues/139), [#210](https://github.com/PxA-Labs/AutoMaintainer/issues/210)) - @purvanshjoshi
 - **agents**: Fail runs on clone failure and report missing target issues as INVALID_TARGET_ISSUE ([#497](https://github.com/PxA-Labs/AutoMaintainer/pull/497)) (closes [#138](https://github.com/PxA-Labs/AutoMaintainer/issues/138), [#142](https://github.com/PxA-Labs/AutoMaintainer/issues/142)) - @purvanshjoshi
