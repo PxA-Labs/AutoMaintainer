@@ -172,7 +172,7 @@ without `runs.repo_name`, for example, every `POST /start` fails.
 ## Option A: Docker Compose (local or a single prod-like host)
 
 ```bash
-# 1. Create backend/.env with the variables below (at least SUPABASE_*, GROQ_API_KEY, GITHUB_*)
+# 1. cp backend/.env.example backend/.env, then fill it in (at least SUPABASE_*, GROQ_API_KEY, GITHUB_*)
 # 2. Optional: export the public dashboard build values
 export NEXT_PUBLIC_SUPABASE_URL=https://<project>.supabase.co
 export NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
@@ -195,7 +195,11 @@ Docker Compose v2.24 or later.
 (`depends_on: condition: service_healthy`). The worker's healthcheck is a
 `celery inspect ping` of its own node. If the worker is down, `POST /start`
 answers `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and creates no run,
-instead of queueing a run nobody consumes (`AGENT_WORKER_CHECK`, below). Redis
+instead of queueing a run nobody consumes (`AGENT_WORKER_CHECK`, below).
+`/start` is the only route that queues agent runs. GitHub webhooks enqueue
+`process_webhook_events_task` on `github_sync`, not agent runs. The helper
+`tasks.start_agent_task` enqueues without this check; nothing in the backend
+calls it, so a future caller must add the check. Redis
 itself keeps queued tasks (`appendonly yes`, `noeviction`) across restarts.
 Only `api` publishes a port; Redis is reachable only inside the Compose
 network.
@@ -283,8 +287,14 @@ correct layout. It has three consequences:
   requeues an interrupted run.
 
 Both services get `REDIS_URL` from the same `automaintainer-redis` instance
-(`fromService ... connectionURL`), so the API enqueues where the workers
-consume. Per-user IDE views (PR #507) do not remove the need to co-locate: the
+(`fromService` with `property: connectionString`, the Key Value instance's
+internal URL), so the API enqueues where the workers consume. That property
+name matters: Render's Blueprint schema allows only `host`, `port`,
+`hostport`, `slug` and `connectionString` here. With any other name `REDIS_URL`
+is not set, both services fall back to `redis://localhost:6379/0`, they never
+share a broker, and every `POST /start` answers `503`. The service keeps
+`type: redis`, Render's deprecated alias for `keyvalue`, because a service's
+type cannot be changed after creation. Per-user IDE views (PR #507) do not remove the need to co-locate: the
 views are worktrees of the clone the agent worker makes (see
 [Topology](#topology)). The long-term fix, which lets workers scale
 independently, is for the API to clone on demand or read files through the
@@ -378,7 +388,7 @@ example as a second Space.
 | `GITHUB_AUTH_MODE` | `app` if App credentials are set, else `pat` | `app`: every run and IDE route acts with the GitHub App **installation token** of the repository's installation (cached, refreshed 5 minutes before expiry); a run or route with no known installation is refused, never silently downgraded to a PAT. `pat`: single-tenant mode using `GITHUB_TOKEN` for everything (a warning is logged at startup). Any other value is a startup error. |
 | `ASSIST_RATE_PER_MINUTE` / `ASSIST_ORG_RATE_PER_MINUTE` / `ASSIST_DAILY_REQUESTS_PER_ORG` | `20` / `60` / `1000` | Quotas for `/assist/inline` (per user per minute, per org per minute, per org per UTC day). Exceeding one returns `429` with `Retry-After`. Counters live in Redis; without Redis they fall back to per-process memory, so limits are then per API process rather than global. |
 | `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | Before creating a run, `/start` asks the Celery workers which queues they consume (`inspect active_queues`) and returns `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and a `Retry-After` header when none consuming `agent_runs` answers within the timeout, or the broker cannot be reached. No run row is created. A maintenance-only worker does not count. The answer, positive or negative, is cached for the given number of seconds. |
-| `AGENT_WORKER_CHECK` | `true` | Set to `false` (or `0`, `no`, `off`) to skip that check, for local development or tests without a broker. Runs are then queued even if no worker will consume them. Any other value keeps the check on. Leave it unset in deployments. |
+| `AGENT_WORKER_CHECK` | `true` | Set to `false` (or `0`, `no`, `off`) to skip that check, for local development or tests without a broker. Runs are then queued even if no worker will consume them. Any other value keeps the check on. Leave it unset in deployments; with `ENVIRONMENT=production` the API logs a warning the first time `/start` skips the check. |
 | `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. Timeouts, output limits and per-repository `.automaintainer.yml` are described in [VERIFICATION.md](./VERIFICATION.md). Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
 | `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, ...) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
 | `CHANGE_LIMIT_MAX_FILES` / `CHANGE_LIMIT_MAX_LINES` / `CHANGE_LIMIT_DENYLIST` | `10` / `500` / built-in list | An agent change over the file or line limit is opened as a **draft** PR with the `needs-human` label and a "Change limits exceeded" section, and the run never merges it under any `MERGE_POLICY`. A change to a **denied path** is refused before it is committed (#488): nothing reaches the run branch, no PR is opened, and the run fails with `PROTECTED_PATH`. That failure is terminal (a redelivery does not retry it), so a human makes the change or reruns by hand; only a run that already has a PR from an earlier iteration also gets that PR held as a draft `needs-human` PR. If the base branch's `.automaintainer.yml` cannot be read (any error but a 404, such as a GitHub 5xx or a rate limit) or parsed, its `deny` entries are unknown and **every** commit is refused the same way (`PROTECTED_PATH`, terminal, manual rerun), so a transient GitHub error ends the run. `CHANGE_LIMIT_DENYLIST` is a comma-separated list of globs that **replaces** the built-in one (workflows, Dockerfiles, compose files, lockfiles, `.env*`, `*.pem`, `*.key`, and test-runner configuration such as `conftest.py`, `pytest.toml`, `pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `package.json`, `jest`/`vitest`/`vite`/`playwright` configs, `.npmrc`, and `pytest.py`/`pytest/`/`_pytest/` modules that would replace pytest; `.automaintainer.yml` is always denied). A deployment that sets `CHANGE_LIMIT_DENYLIST` keeps its own list after upgrading and gets **none** of the new test-runner entries; add them to it, or unset it to use the built-in list. Repositories can tighten or relax them with a `change_limits` mapping in `.automaintainer.yml`, read from the base branch (e.g. `allow: ["pyproject.toml"]`). Existing deployments start seeing draft `needs-human` PRs for large changes after upgrading, and `PROTECTED_PATH` failures once test-runner configuration is denied: every fix that edits `pyproject.toml` or `package.json` (a dependency bump, a tool setting) is now refused and left for a human; see [ARCHITECTURE.md](../ARCHITECTURE.md#change-limits). |

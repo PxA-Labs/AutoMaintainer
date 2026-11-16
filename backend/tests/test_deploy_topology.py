@@ -43,7 +43,8 @@ def test_render_api_and_workers_share_one_redis():
         assert source == {
             "type": redis[0]["type"],
             "name": redis[0]["name"],
-            "property": "connectionURL",
+            # The only Key Value URL property in Render's Blueprint schema.
+            "property": "connectionString",
         }, svc["name"]
 
 

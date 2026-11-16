@@ -7,6 +7,15 @@
 #                                              + embedded beat
 #   automaintainer-redis               redis   broker / result backend / locks
 #
+# REDIS_URL comes from `fromService ... property: connectionString`, the
+# Key Value internal URL (render.com/docs/blueprint-spec; the JSON schema at
+# render.com/schema/render.yaml.json allows host, port, hostport, slug and
+# connectionString for fromService). Any other property leaves REDIS_URL
+# unset, celery_app.py falls back to localhost, the API and workers never
+# share a broker and every /start answers 503. `type: redis` is Render's
+# deprecated alias for `keyvalue`; it is kept because a service's type cannot
+# be changed after creation, and renaming it is not needed for correctness.
+#
 # Why the API and the agent worker share a service: the worker clones target
 # repositories into AUTOMAINTAINER_WORKSPACE_DIR and the API's IDE routes
 # (/repo/.../tree, /file, /search) and terminal read those clones from local
@@ -93,7 +102,7 @@ services:
         fromService:
           type: redis
           name: automaintainer-redis
-          property: connectionURL
+          property: connectionString
       - key: ALLOWED_ORIGINS
         sync: false
       # Observability
@@ -142,7 +151,7 @@ services:
         fromService:
           type: redis
           name: automaintainer-redis
-          property: connectionURL
+          property: connectionString
       # Observability
       - key: OTEL_EXPORTER_OTLP_ENDPOINT
         sync: false
