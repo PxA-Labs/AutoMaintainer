@@ -238,12 +238,12 @@ export default function InlineAssist({
         <div className="flex items-center gap-2 text-xs font-medium text-indigo-400">
           <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
           <span>Inline Assist</span>
-          <span className="text-zinc-500 font-mono text-[11px]">
+          <span className="text-muted font-mono text-[11px]">
             ({filePath}:{selectionContext.startLine}-{selectionContext.endLine})
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] text-zinc-500 font-mono bg-zinc-800/80 px-1.5 py-0.5 rounded">
+          <span className="text-[10px] text-muted font-mono bg-zinc-800/80 px-1.5 py-0.5 rounded">
             Esc to cancel
           </span>
           <button
@@ -292,7 +292,7 @@ export default function InlineAssist({
               placeholder="Ask AI to edit or generate code... (Cmd+K)"
               aria-label="Inline Assist instruction"
               disabled={isLoading}
-              className="w-full bg-[#11111b] border border-zinc-700/80 focus:border-indigo-500 rounded-lg pl-3 pr-10 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none transition-colors"
+              className="w-full bg-[#11111b] border border-zinc-700/80 focus:border-indigo-500 rounded-lg pl-3 pr-10 py-2 text-sm text-white placeholder:text-muted focus:outline-none transition-colors"
             />
             <button
               type="button"
