@@ -63,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **agents**: Require a trusted trigger to auto-merge and check limits before commit ([#489](https://github.com/PxA-Labs/AutoMaintainer/pull/489)) (closes [#488](https://github.com/PxA-Labs/AutoMaintainer/issues/488)) - @purvanshjoshi
 - **verification**: Hold test-runner configuration for a human and stop root modules shadowing pytest ([#484](https://github.com/PxA-Labs/AutoMaintainer/pull/484)) - @purvanshjoshi
 - **db**: Replace the non-re-runnable schema file with versioned migrations ([#475](https://github.com/PxA-Labs/AutoMaintainer/pull/475)) (closes [#473](https://github.com/PxA-Labs/AutoMaintainer/issues/473)) - @purvanshjoshi
 - **workspace**: Key clones by GitHub repository id for agent runs and IDE routes ([#474](https://github.com/PxA-Labs/AutoMaintainer/pull/474)) (closes [#392](https://github.com/PxA-Labs/AutoMaintainer/issues/392)) - @purvanshjoshi
