@@ -135,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump fastapi from 0.162.5 to 0.162.7 in /backend ([#499](https://github.com/PxA-Labs/AutoMaintainer/pull/499)) - @dependabot[bot]
 - **deps-dev**: Bump @playwright/test from 1.64.1 to 1.65.0 in /dashboard ([#498](https://github.com/PxA-Labs/AutoMaintainer/pull/498)) - @dependabot[bot]
 - **deps**: Bump actions/first-interaction from 3.0.0 to 3.1.0 ([#502](https://github.com/PxA-Labs/AutoMaintainer/pull/502)) - @dependabot[bot]
 - **deps**: Keep mcp on 1.x and drop unused server-only ([#456](https://github.com/PxA-Labs/AutoMaintainer/pull/456)) - @purvanshjoshi
