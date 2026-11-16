@@ -50,6 +50,114 @@ the API's IDE routes and terminal read them back from it. If they do not share
 it, the IDE returns `404 Repository not cloned yet` for repos the agent has
 just processed. Maintenance and beat never touch clones.
 
+## Database
+
+The schema is a set of versioned migrations in
+[`supabase/migrations/`](../supabase/migrations), named
+`<UTC timestamp>_<name>.sql` as the Supabase CLI expects. The first one,
+`20261116000000_baseline.sql`, is the whole schema as of #473; every later
+change is a new file. [`supabase_schema.sql`](../supabase_schema.sql) at the
+repository root is generated from them (`python scripts/db-migrate schema`)
+for pasting into the SQL Editor. Do not edit it by hand. CI fails when it is
+out of date.
+
+Every migration can be applied again without harm (`IF NOT EXISTS`,
+`CREATE OR REPLACE`, `DROP ... IF EXISTS` before `CREATE`). The `ci-db`
+workflow applies them twice to PostgreSQL 16, and also on top of an older
+schema. It checks that nothing errors, that the schema is unchanged and that
+no row is lost.
+
+### New deployment
+
+Use one of these:
+
+- **Supabase CLI:** `supabase link --project-ref <ref>`, then
+  `supabase db push`. If the CLI asks for `supabase/config.toml`, run
+  `supabase init` once first. It keeps the existing `supabase/migrations`.
+- **`scripts/db-migrate`** works on a Supabase project through its direct
+  connection string, or on another PostgreSQL that provides the objects
+  Supabase does: the `anon`, `authenticated` and `service_role` roles and the
+  `auth` schema with `auth.uid()` and `auth.users` (the tests use the
+  stand-in `backend/tests/rls/supabase_shim.sql`). The migrations do not
+  create them, so on a plain PostgreSQL server the first `up` fails. It needs
+  only psycopg2, which is a backend dependency:
+
+  ```bash
+  export DATABASE_URL='postgresql://postgres:<password>@<host>:5432/postgres'
+  uv run --project backend python scripts/db-migrate up      # apply pending migrations
+  uv run --project backend python scripts/db-migrate status  # applied / pending
+  ```
+
+  It applies each pending file in its own transaction, together with a row in
+  `automaintainer_migrations.schema_migrations`. That schema is outside
+  `public`, so the API does not expose it. A failing migration is rolled back
+  and stops the run. Connect as the role that owns the schema (`postgres` on
+  Supabase).
+- **SQL Editor:** paste the whole of `supabase_schema.sql` and run it. This
+  method does not record which migrations were applied.
+
+Use one method per database. The CLI records versions in
+`supabase_migrations.schema_migrations` and the runner records them in its own
+table, so each tool would apply everything once more. That is harmless, but
+it is confusing.
+
+### Upgrading
+
+Apply pending migrations before you roll out the new API and worker image:
+`supabase db push` or
+`uv run --project backend python scripts/db-migrate up`. If you use the SQL Editor,
+paste the new `supabase_schema.sql` again.
+
+**A database created from the old single-file `supabase_schema.sql`** (before
+#473) needs no manual steps, provided it is the multi-tenant schema (`runs`
+and `logs` have an `org_id` column). Back it up (Supabase dashboard, Database ->
+Backups, or `pg_dump`), then apply the migrations as above. The baseline adopts
+such a database: it creates only what is missing and redefines policies,
+functions, triggers and views to their current form. That covers
+`runs.checkpoint`, `runs.repo_name`, `repository_in_org`/`run_in_org`, the
+tenant checks in the run and IDE policies, service-role-only
+`github_installations` writes and the `repositories_org_immutable` trigger. It
+keeps every row. These were the statements earlier upgrade notes told you to
+pick out by hand. One behaviour differs from the old file. The old file
+dropped and re-created the `supabase_realtime` publication. The baseline only
+adds `logs`, `runs`, `webhook_events` and `ide_sessions` to it, so any other
+tables you added stay.
+
+Two cases need preparation:
+
+- **Pre-multi-tenant databases** (`runs`/`logs` without `org_id`, from the
+  earliest versions of the file) cannot be adopted: the baseline fails at
+  `runs_org_idx` and rolls back. Existing rows have no organization to assign
+  them to. Export what you need, then create a fresh database from the
+  migrations.
+- **Views of your own that depend on `monthly_usage_summary` or `org_health`**
+  make the baseline's `DROP VIEW` fail (PostgreSQL refuses to drop a view
+  others depend on) and the migration rolls back. Save their definitions
+  (`pg_get_viewdef`), drop them, apply the baseline, then re-create them.
+
+Running the baseline takes short exclusive locks on the tables while it
+replaces their policies and triggers. To record it as applied without running
+it, use `supabase migration repair 20261116000000 --status applied` or
+`uv run --project backend python scripts/db-migrate up --baseline`. Do that only for a database that already
+has the complete current schema. Otherwise the missing pieces stay missing:
+without `runs.repo_name`, for example, every `POST /start` fails.
+
+### Changing the schema
+
+1. Add a file: run `supabase migration new <name>`, or create
+   `supabase/migrations/$(date -u +%Y%m%d%H%M%S)_<name>.sql`. Never edit a
+   migration that has been released. `scripts/db-migrate up` refuses to run
+   when an applied file's checksum has changed.
+2. Write it so that it can run again: `IF NOT EXISTS` / `IF EXISTS`,
+   `CREATE OR REPLACE`, `DROP POLICY|TRIGGER|VIEW IF EXISTS` before `CREATE`,
+   and a `DO` block that checks `pg_constraint` before
+   `ALTER TABLE ... ADD CONSTRAINT`. Do not write `BEGIN`/`COMMIT`.
+3. Run `python scripts/db-migrate schema` and commit the regenerated
+   `supabase_schema.sql`.
+4. Run the database tests against a local PostgreSQL superuser:
+   `DATABASE_URL_RLS_TEST=postgresql://postgres@localhost:5432/postgres uv run pytest tests/rls`
+   from `backend/`. The `ci-db` workflow runs them on every PR.
+
 ## Option A: Docker Compose (local or a single prod-like host)
 
 ```bash
@@ -243,6 +351,7 @@ example as a second Space.
 | `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | `/start` pings the Celery workers first and returns `503` when none answer within the timeout, instead of queueing a run nobody will pick up. The result is cached for the given number of seconds. |
 | `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. Timeouts, output limits and per-repository `.automaintainer.yml` are described in [VERIFICATION.md](./VERIFICATION.md). Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
 | `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, ...) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
+| `CHANGE_LIMIT_MAX_FILES` / `CHANGE_LIMIT_MAX_LINES` / `CHANGE_LIMIT_DENYLIST` | `10` / `500` / built-in list | An agent change over these limits, or touching a denied path, is opened as a **draft** PR with the `needs-human` label and a "Change limits exceeded" section, and the run never merges it under any `MERGE_POLICY`. `CHANGE_LIMIT_DENYLIST` is a comma-separated list of globs that **replaces** the built-in one (workflows, Dockerfiles, compose files, lockfiles, `.env*`, `*.pem`, `*.key`; `.automaintainer.yml` is always denied). Repositories can tighten or relax them with a `change_limits` mapping in `.automaintainer.yml`, read from the base branch. Existing deployments start seeing draft `needs-human` PRs for large changes after upgrading; see [ARCHITECTURE.md](../ARCHITECTURE.md#change-limits). |
 | `MERGE_POLICY` | `human` | Whether the agent may merge its own PRs. `human` (default): never auto-merge; the agent opens the PR, posts its review and requests a human reviewer. `ci`: merge only if the Maintainer approves **and** every status/check on the PR head has passed, with at least one check present (evaluated once after the PR opens, so it usually fails closed). `auto`: merge on Maintainer approval alone; not recommended. Unknown values fall back to `human` with a warning. |
 | `GIT_TIMEOUT_SECONDS` | `300` | Timeout for each `git clone`/`fetch` the worker runs; the git process is killed and a partial clone removed when it expires. |
 | `AUTOMAINTAINER_WORKSPACE_DIR` | image: `/var/lib/automaintainer/workspaces`, code: `<tmp>/automaintainer` | Where repos are cloned. It must be the same path on the API and the `agent_runs` workers. |
@@ -378,10 +487,9 @@ not automated.
 
 ## Upgrade notes
 
-- **Database migration (run state checkpoints):** run the `ALTER TABLE runs ADD COLUMN IF NOT EXISTS checkpoint ...` statement from `supabase_schema.sql`. It is idempotent. Runs record completed steps there (issue, branch, PR, merge state) so a retried or redelivered run resumes instead of creating duplicate GitHub artifacts.
-- **Database migration (runs.repo_name and tenant checks in run and IDE policies):** run, from `supabase_schema.sql`, the `ALTER TABLE runs ADD COLUMN IF NOT EXISTS repo_name TEXT` statement, the `repository_in_org` and `run_in_org` functions, and the `DROP POLICY IF EXISTS` / `CREATE POLICY` pairs for `runs_insert_own`, `runs_update_own`, `ide_insert_own` and `ide_update_own`. All of these can be re-run. A database created from an older schema without `repo_name` rejects every `POST /start` insert. The policies stop a member from attaching another org's repository or installation to a run, or moving an IDE session into another org.
+- **Database: versioned migrations (#473).** The schema is now applied from `supabase/migrations`, and `supabase_schema.sql` is generated from them. For an existing database, apply the migrations once as described in [Database, Upgrading](#upgrading). This replaces the statements that earlier notes asked you to run by hand: `runs.checkpoint` (run state checkpoints, so a redelivered run resumes instead of repeating GitHub side effects), `runs.repo_name` (without it every `POST /start` insert fails), the tenant checks in the run and IDE policies, the `github_installations` policies and the repository org-immutability trigger. All rows are kept.
 - **Webhook processing:** stored `webhook_events` are now processed by a Celery task (installation deleted/suspended, repositories added/removed). These tasks are routed to the `github_sync` queue (`celery_app.py`), so make sure a worker consumes it.
-- **GitHub App installations (multi-tenant):** run the `github_installations` policy block from `supabase_schema.sql` again; it is re-runnable (`DROP POLICY IF EXISTS`). Authenticated users can no longer insert installation rows directly. An org owner/admin links an installation with `POST /github/installations/claim {installation_id}` and an `X-GitHub-User-Token` header (the Supabase GitHub provider token); the backend verifies with GitHub that the user can access the installation and administers its account. The App needs the *Members: read* organisation permission for that check. Repository sync never moves a repository that already belongs to another org.
+- **GitHub App installations (multi-tenant):** the database part is in the baseline migration (see above). Authenticated users can no longer insert installation rows directly. An org owner/admin links an installation with `POST /github/installations/claim {installation_id}` and an `X-GitHub-User-Token` header (the Supabase GitHub provider token); the backend verifies with GitHub that the user can access the installation and administers its account. The App needs the *Members: read* organisation permission for that check. Repository sync never moves a repository that already belongs to another org.
 
 - **Supabase redirect URL:** add `<your-origin>/auth/callback/` to the Supabase Auth allowed redirect URLs before deploying the dashboard. GitHub sign-in now returns to that page.
 - **Workspace directory names changed** to `owner_repo-<hash>` so different repositories can never share a clone. Existing clones under the old names are not reused; each repository is cloned again on its next run. Old directories can be deleted once the new ones exist.

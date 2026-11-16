@@ -59,10 +59,14 @@ so reviews and code may come from the smaller model. See
 > AutoMaintainer stores organizations, runs and logs in **Supabase** (Postgres,
 > Auth and Realtime). Provision your own project:
 > * Create a project at [supabase.com](https://supabase.com).
-> * Run [`supabase_schema.sql`](./supabase_schema.sql) in the **Supabase SQL
->   Editor**. It creates `organizations`, `organization_members`,
->   `github_installations`, `repositories`, `runs`, `logs`, `usage_events`,
->   `webhook_events` and `ide_sessions`, with RLS policies.
+> * Apply the migrations in [`supabase/migrations`](./supabase/migrations)
+>   with `supabase db push` or `uv run --project backend python scripts/db-migrate up`, or paste the
+>   generated [`supabase_schema.sql`](./supabase_schema.sql) into the
+>   **Supabase SQL Editor**. They create `organizations`,
+>   `organization_members`, `github_installations`, `repositories`, `runs`,
+>   `logs`, `usage_events`, `webhook_events` and `ide_sessions`, with RLS
+>   policies. All of them can be re-run, and upgrades keep your data
+>   ([Database setup and upgrades](./docs/DEPLOYMENT.md#database)).
 > * Put your credentials in `backend/.env` and `dashboard/.env.local`.
 >
 > If Supabase is unreachable or paused, the dashboard shows a warning banner,
@@ -116,9 +120,13 @@ git clone https://github.com/PxA-Labs/AutoMaintainer.git
 cd AutoMaintainer
 ```
 
-**Database Migration:**
-1. Open your [Supabase SQL Editor](https://database.new).
-2. Execute the entire contents of [`supabase_schema.sql`](./supabase_schema.sql).
+**Database Migration:** apply [`supabase/migrations`](./supabase/migrations)
+with the Supabase CLI (`supabase link`, then `supabase db push`) or with
+`DATABASE_URL=... uv run --project backend python scripts/db-migrate up`.
+Without either tool, open your [Supabase SQL Editor](https://database.new)
+and run the entire generated [`supabase_schema.sql`](./supabase_schema.sql).
+Use the same method for every upgrade. See
+[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md#database).
 
 **Backend Environment (`backend/.env`):**
 ```bash

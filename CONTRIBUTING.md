@@ -55,6 +55,13 @@ By participating in this project, you agree to abide by our [Code of Conduct](./
    SUPABASE_SERVICE_KEY="your_service_key"
    ```
 
+5. **Set up the database:** apply `supabase/migrations` to your Supabase
+   project (`supabase db push`, or
+   `DATABASE_URL=... uv run --project backend python scripts/db-migrate up`).
+   To change the schema, add a new migration. Do not edit
+   `supabase_schema.sql`, which is generated. See
+   [docs/DEPLOYMENT.md, "Changing the schema"](docs/DEPLOYMENT.md#changing-the-schema).
+
 ---
 
 ## 3. Contribution Workflow

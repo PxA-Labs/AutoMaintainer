@@ -1,4 +1,4 @@
-"""Row level security of supabase_schema.sql against a real PostgreSQL (#419).
+"""Row level security of the database schema against a real PostgreSQL (#419).
 
 Skipped unless DATABASE_URL_RLS_TEST is set, e.g.
 
@@ -11,7 +11,8 @@ never touches the database in the URL: it creates a fresh, uniquely named
 database on the same server, and drops it at the end.
 
 Setup: tests/rls/supabase_shim.sql (Supabase roles, default grants, auth.uid()
-and auth.users), then supabase_schema.sql, then two tenants:
+and auth.users), then supabase/migrations applied by scripts/db-migrate (the
+runner deployments without the Supabase CLI use, #473), then two tenants:
 
     org A: owner USER_A, plus USER_C with a pending (not yet joined) invite
     org B: owner USER_B
@@ -25,6 +26,7 @@ fail today, and the strict marker turns them red once the schema is fixed so
 the marker is removed and the property stays enforced.
 """
 
+import importlib.util
 import os
 import uuid
 from contextlib import contextmanager
@@ -48,8 +50,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_SQL = REPO_ROOT / "supabase_schema.sql"
 SHIM_SQL = Path(__file__).with_name("supabase_shim.sql")
+
+_spec = importlib.util.spec_from_file_location(
+    "db_migrate", REPO_ROOT / "scripts" / "db-migrate" / "db_migrate.py"
+)
+db_migrate = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(db_migrate)
+MIGRATIONS = db_migrate.discover()
 
 USER_A = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
 USER_B = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
@@ -272,8 +280,8 @@ def db():
             )
             assert cur.fetchone()[0] == 0, "expected an empty database"
             cur.execute(SHIM_SQL.read_text(encoding="utf-8"))
-            cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
         conn.commit()
+        db_migrate.up(conn, MIGRATIONS, log=lambda *_: None)
         _seed(conn)
         yield conn
     finally:
@@ -577,29 +585,27 @@ def test_creating_an_org_makes_the_creator_its_owner(db):
 
 
 # --------------------------------------------------------------------------
-# Known defects (strict xfail: remove the marker when the schema is fixed)
+# Migrations (#473; more in test_migrations.py)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=psycopg2.errors.DuplicateTable if psycopg2 else Exception,
-    reason="supabase_schema.sql is not re-runnable: CREATE TABLE/POLICY/TRIGGER/VIEW "
-    "lack IF NOT EXISTS / OR REPLACE guards, and DROP TABLE IF EXISTS runs/logs "
-    "CASCADE would erase run history on a re-run",
-)
 def test_schema_can_be_reapplied_without_losing_data(db):
+    def counts(cur):
+        return {table: row_count(cur, table) for table in sorted(TENANT_TABLES)}
+
+    with db.cursor() as cur:
+        before = counts(cur)
+    db.rollback()
     try:
+        # The runner skips what it recorded ...
+        assert db_migrate.up(db, MIGRATIONS, log=lambda *_: None) == []
+        # ... and every file is re-runnable even when applied again
+        # regardless (a pasted supabase_schema.sql, an untracked database).
         with db.cursor() as cur:
-            cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
-            cur.execute("SELECT count(*) FROM runs")
-            assert (
-                cur.fetchone()[0] >= 2
-            ), "re-applying the schema dropped existing runs"
-            cur.execute("SELECT count(*) FROM logs")
-            assert (
-                cur.fetchone()[0] >= 2
-            ), "re-applying the schema dropped existing logs"
+            for migration in MIGRATIONS:
+                cur.execute(migration.sql)
+            assert counts(cur) == before
+            assert before["runs"] >= 2 and before["logs"] >= 2
     finally:
         db.rollback()
 
