@@ -292,6 +292,7 @@ enabled.
 | `usage_events` | Run started, completed and failed events. |
 | `webhook_events` | Stored GitHub deliveries with a processing state. A redelivery is detected by `github_delivery_id` (lookup before insert, plus a partial unique index). |
 | `ide_sessions` | Defined in the schema; no backend code reads or writes it yet. |
+| `verification_results` | One audit row per verification of an agent change (status, command, exit code, output tail, sandbox backend); written by the backend only, read through `GET /runs/{run_id}/verifications`. Not in the realtime publication. See docs/VERIFICATION.md, "Audit trail". |
 
 The `supabase_realtime` publication includes `logs`, `runs`, `webhook_events`
 and `ide_sessions` (`supabase_schema.sql`, section 11). Rows of these tables
