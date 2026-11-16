@@ -1414,6 +1414,8 @@ async def _refresh_view_after_write(
 #   per user, so consecutive saves accumulate on one branch, and the hash keeps
 #   Supabase ids out of the repository's branch list.
 #
+# An explicit ``branch`` inside the ``automaintainer/ide-`` namespace that is
+# not the caller's own working branch is refused with 403 (#505).
 # The default branch and any branch GitHub reports as protected are refused
 # with 409 before anything is written. Getting the edits into the default
 # branch is a pull request: POST /repo/{name}/propose-changes, or a PR opened
@@ -1466,6 +1468,18 @@ def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -
         return _ide_working_branch(org_id, user_id)
     branch = requested.strip()
     _validate_branch_name(branch)
+    # The IDE working-branch namespace belongs to its owners: every name in it
+    # is derivable (and visible on GitHub), so without this check one user
+    # could commit into another user's working branch and their Propose
+    # would carry that code (#505). Compared case-insensitively, like
+    # _same_branch, so a case variant cannot sidestep it.
+    own = _ide_working_branch(org_id, user_id)
+    if branch.casefold().startswith(IDE_BRANCH_PREFIX.casefold()) and branch != own:
+        raise HTTPException(
+            status_code=403,
+            detail="IDE working branches can only be written by their owner; "
+            "omit 'branch' to use your own",
+        )
     return branch
 
 

@@ -343,6 +343,57 @@ def test_restored_staged_list_proposes_only_the_callers_changes(world):
     ) == [("a.py", "alice\n"), ("new.py", "n\n")]
 
 
+@pytest.mark.parametrize(
+    "method,route,body",
+    [
+        ("post", "file", {"file_path": "a.py", "content": "bob\n"}),
+        ("post", "file/create", {"file_path": "evil.py", "content": "bob\n"}),
+        ("delete", "file", None),
+    ],
+)
+@pytest.mark.parametrize("upper", [False, True])
+def test_users_cannot_write_into_another_users_working_branch(
+    world, method, route, body, upper
+):
+    """The working-branch names are derivable, so naming Alice's branch
+    explicitly must not let Bob put code into Alice's Propose."""
+    save(ALICE, "a.py", "alice\n")
+    alice_branch = main._ide_working_branch(ORG, ALICE)
+    target = alice_branch.upper() if upper else alice_branch
+    before = world.gh.sha(alice_branch)
+    world.gh.proposed.clear()
+
+    as_user(BOB)
+    if method == "post":
+        r = client.post(f"/repo/{REPO}/{route}", json={**body, "branch": target})
+    else:
+        r = client.delete(
+            f"/repo/{REPO}/{route}",
+            params={"file_path": "README.md", "branch": target},
+        )
+
+    assert r.status_code == 403, r.text
+    assert world.gh.proposed == []
+    assert world.gh.sha(alice_branch) == before
+    assert changes(ALICE)["changes"] == [{"path": "a.py", "status": "modified"}]
+    assert read(ALICE, "a.py").json() == {"content": "alice\n"}
+
+
+def test_naming_ones_own_working_branch_explicitly_still_works(world):
+    as_user(ALICE)
+    r = client.post(
+        f"/repo/{REPO}/file",
+        json={
+            "file_path": "a.py",
+            "content": "alice\n",
+            "branch": main._ide_working_branch(ORG, ALICE),
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert read(ALICE, "a.py").json() == {"content": "alice\n"}
+
+
 # --- view lifecycle ----------------------------------------------------------------
 
 
