@@ -1,8 +1,21 @@
 name: Supabase Database Keep-Alive
 
+# Free-tier Supabase projects pause after a period of inactivity. This
+# workflow reads one row through the REST API every 3 days so the project
+# stays active.
+#
+# It fails loudly when it cannot do that: a missing secret, a rejected key,
+# an unreachable or paused project. The error annotation and the job summary
+# name the cause; docs/DEPLOYMENT.md ("CI: Supabase keep-alive") lists the
+# owner action for each. GitHub emails failures of a scheduled run to the
+# user who created the workflow or last changed its cron line.
+#
+# backend/tests/test_workflow_hygiene.py runs the step's script against a
+# stubbed curl, so edits to it are tested by Backend CI.
+
 on:
   schedule:
-    # Run every 3 days at 00:00 UTC to prevent pausing from inactivity
+    # Every 3 days at 00:00 UTC.
     - cron: '0 0 */3 * *'
   workflow_dispatch:
 
@@ -11,33 +24,63 @@ permissions: {}
 jobs:
   ping-supabase:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: Ping Supabase REST API
+        shell: bash
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
-            echo "Error: SUPABASE_URL or SUPABASE_SERVICE_KEY secret is not set."
+          set -euo pipefail
+          DOCS="docs/DEPLOYMENT.md, section 'CI: Supabase keep-alive'"
+
+          fail() {
+            echo "::error title=Supabase keep-alive failed::$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Supabase keep-alive failed"
+                echo
+                echo "$1"
+                echo
+                echo "Owner action: see $DOCS."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
             exit 1
+          }
+
+          missing=""
+          [ -n "${SUPABASE_URL:-}" ] || missing="$missing SUPABASE_URL"
+          [ -n "${SUPABASE_SERVICE_KEY:-}" ] || missing="$missing SUPABASE_SERVICE_KEY"
+          if [ -n "$missing" ]; then
+            fail "Repository secret(s) not set:${missing}. Add them under Settings > Secrets and variables > Actions, or disable this workflow if the project was retired."
           fi
 
-          CLEAN_URL=$(echo "$SUPABASE_URL" | sed 's/\/$//')
-
-          echo "Pinging Supabase REST endpoint..."
-          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          body="$(mktemp)"
+          # curl prints 000 when no HTTP response arrived (DNS, TLS, timeout);
+          # its own error goes to stderr. Classify below instead of letting
+          # set -e stop on curl's exit code.
+          status="$(curl -sS -o "$body" -w '%{http_code}' \
             --connect-timeout 10 \
             --max-time 30 \
             -H "apikey: $SUPABASE_SERVICE_KEY" \
             -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
-            "$CLEAN_URL/rest/v1/runs?select=id&limit=1")
+            "${SUPABASE_URL%/}/rest/v1/runs?select=id&limit=1")" || true
 
-          echo "Response code: $STATUS_CODE"
+          case "$status" in
+            2??)
+              echo "Supabase keep-alive ping succeeded (HTTP $status)."
+              exit 0
+              ;;
+            000) hint="no HTTP response (DNS, TLS or connection failure). SUPABASE_URL is wrong, or the project was deleted or is paused." ;;
+            401|403) hint="the API key was rejected. SUPABASE_SERVICE_KEY is wrong or was rotated; update the secret." ;;
+            404) hint="the runs table was not found. Check that SUPABASE_URL points at the AutoMaintainer project and its migrations are applied." ;;
+            5??) hint="the project is unavailable, most likely paused. Restore it from the Supabase dashboard." ;;
+            *) hint="unexpected response; a redirect or client error means the database was not reached." ;;
+          esac
 
-          if [ "$STATUS_CODE" -ge 200 ] && [ "$STATUS_CODE" -lt 400 ]; then
-            echo "Supabase ping succeeded!"
-          else
-            echo "Supabase ping failed with status code $STATUS_CODE"
-            exit 1
-          fi
+          echo "Response body (first 300 bytes):"
+          head -c 300 "$body" || true
+          echo
+          fail "Supabase ping returned HTTP ${status:-none}: $hint"

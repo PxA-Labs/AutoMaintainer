@@ -494,6 +494,27 @@ stack and drives one run from `queued` to a terminal state (see
 run that reaches `completed` needs real GitHub and LLM credentials, and is
 not automated.
 
+## CI: Supabase keep-alive
+
+Free-tier Supabase projects pause after a period of inactivity.
+`.github/workflows/supabase-keepalive.yml` reads one row from `runs` through
+the REST API every 3 days, using the repository secrets `SUPABASE_URL` and
+`SUPABASE_SERVICE_KEY`. When it cannot, the run fails with an error
+annotation and a job summary that name the cause. Only the repository owner
+can fix these:
+
+| Error | Owner action |
+|---|---|
+| `Repository secret(s) not set: ...` | Add the named secret(s) under Settings > Secrets and variables > Actions. The URL is the project URL (`https://<ref>.supabase.co`); the key is the service-role key. |
+| `HTTP 000` (no response) | The URL is wrong, or the project was deleted or is paused. Check the project in the Supabase dashboard and update `SUPABASE_URL`. |
+| `HTTP 401` / `403` | The key was rotated or is wrong. Update `SUPABASE_SERVICE_KEY`. |
+| `HTTP 404` | The URL points at another project, or the migrations were not applied (see [Database](#database)). |
+| `HTTP 5xx` | The project is unavailable, most likely paused. Restore it from the Supabase dashboard; a paused free project can be restored for a limited time only. |
+
+After fixing, confirm with a manual run: Actions, then "Supabase Database
+Keep-Alive", then "Run workflow". If the project is retired or on a paid plan that
+does not pause, disable the workflow instead of leaving it red.
+
 ## Upgrade notes
 
 - **Database: versioned migrations (#473).** The schema is now applied from `supabase/migrations`, and `supabase_schema.sql` is generated from them. For an existing database, apply the migrations once as described in [Database, Upgrading](#upgrading). This replaces the statements that earlier notes asked you to run by hand: `runs.checkpoint` (run state checkpoints, so a redelivered run resumes instead of repeating GitHub side effects), `runs.repo_name` (without it every `POST /start` insert fails), the tenant checks in the run and IDE policies, the `github_installations` policies and the repository org-immutability trigger. All rows are kept.

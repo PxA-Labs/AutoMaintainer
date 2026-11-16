@@ -13,14 +13,13 @@ updates:
     labels:
       - "dependencies"
       - "python"
-
-  # JavaScript dependencies (dashboard)
     ignore:
       # mcp 2.x is not supported by langchain-mcp-adapters yet (it requires
       # mcp<2.0.0); see backend/pyproject.toml.
       - dependency-name: "mcp"
         update-types: ["version-update:semver-major"]
 
+  # JavaScript dependencies (dashboard)
   - package-ecosystem: "npm"
     directory: "/dashboard"
     schedule:
