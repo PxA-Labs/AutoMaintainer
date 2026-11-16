@@ -301,7 +301,7 @@ async def test_crash_after_a_hold_holds_again_on_redelivery(
     world, monkeypatch  # noqa: F811
 ):
     """Crash after the held row but before the checkpoint: the redelivery
-    reviews again and the gate (looked up afresh) holds again."""
+    reviews again and the gate holds again (the earlier held row is sticky)."""
     monkeypatch.setenv("MERGE_POLICY", "auto")
     world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
     real = agents._request_human_review
@@ -323,6 +323,70 @@ async def test_crash_after_a_hold_holds_again_on_redelivery(
     assert world.repo.merges == 0
     assert [d["decision"] for d in world.db.decisions] == ["held", "held"]
     assert all(d["reasons"][-1] == "untrusted trigger" for d in world.db.decisions)
+
+
+async def test_hold_is_sticky_when_write_access_is_granted_before_redelivery(
+    world, monkeypatch  # noqa: F811
+):
+    """Crash after the held row, an admin then grants the trigger write, and
+    the run is redelivered: the earlier held row keeps the PR held, without
+    a second permission lookup."""
+    monkeypatch.setenv("MERGE_POLICY", "auto")
+    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    real = agents._request_human_review
+    crashes = iter([WorkerCrash("review request")])
+
+    def request(*args):
+        error = next(crashes, None)
+        if error is not None:
+            raise error
+        return real(*args)
+
+    monkeypatch.setattr(agents, "_request_human_review", request)
+
+    with pytest.raises(WorkerCrash):
+        await _run(trigger_login="eve")
+    world.repo.permissions["eve"] = "write"
+    result = await _run(trigger_login="eve")
+
+    assert result["merge_status"] == "awaiting_human_review"
+    assert world.repo.merges == 0
+    assert world.repo.permission_lookups == ["eve"]
+    assert [(d["decision"], d["reasons"][-1]) for d in world.db.decisions] == [
+        ("held", "untrusted trigger"),
+        ("held", "untrusted trigger"),
+    ]
+
+
+async def test_unreadable_earlier_decisions_fall_back_to_the_lookup(
+    world, monkeypatch  # noqa: F811
+):
+    """The sticky check is best effort: when merge_decisions cannot be read,
+    the fresh (fail-closed) permission lookup decides alone."""
+    monkeypatch.setenv("MERGE_POLICY", "auto")
+    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    real_table = world.db.table
+
+    def table(name):
+        if name == "merge_decisions":
+            query = real_table(name)
+            real_execute = query.execute
+
+            def execute():
+                if query.op == "select":
+                    raise RuntimeError("database unavailable")
+                return real_execute()
+
+            query.execute = execute
+            return query
+        return real_table(name)
+
+    monkeypatch.setattr(world.db, "table", table)
+
+    result = await _run()
+
+    assert result["merge_status"] == "merged"
+    assert world.repo.permission_lookups == [WRITER]
 
 
 async def test_writer_triggered_run_merges_under_auto(world, monkeypatch):  # noqa: F811

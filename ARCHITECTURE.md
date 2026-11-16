@@ -179,7 +179,9 @@ issue's author too, because the issue body is the task the models follow.
 There is no webhook-started run. An unknown login (no linked GitHub identity,
 e.g. the dev-auth bypass), a bot account (there is no bot allowlist), a
 non-collaborator or a failed lookup holds the PR with
-`merge_status=awaiting_human_review`, like `human`. The gate vouches for who
+`merge_status=awaiting_human_review`, like `human`. Such a hold is sticky for
+the run: a redelivery that reviews again finds the earlier `held`
+merge_decisions row and holds again. The gate vouches for who
 caused the run, not for repository content it reads (README, code comments),
 which only a writer can change. The merge pins the reviewed head SHA, so
 GitHub refuses it if the branch moved after the review.
@@ -189,8 +191,11 @@ A path on the change-limits denylist is refused **before** it is committed
 run it, no PR is opened, and the run fails with `PROTECTED_PATH`. If a later
 iteration of a run that already has a PR hits a denied path (the base
 branch's `.automaintainer.yml` changed), that PR is held as a draft
-`needs-human` PR. File and line limits are also evaluated before the commit;
-a change over them is still committed and opened as a draft for a human.
+`needs-human` PR. If `.automaintainer.yml` on the base branch cannot be read
+(any error but a 404, such as a 5xx or a rate limit) or parsed, its `deny`
+entries are unknown, so nothing is committed and the run fails the same way.
+File and line limits are also evaluated before the commit; a change over
+them is still committed and opened as a draft for a human.
 
 ### Verification
 

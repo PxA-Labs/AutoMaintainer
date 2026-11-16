@@ -2362,10 +2362,12 @@ def _evaluate_change_limits(
     The limits are read from ``.automaintainer.yml`` on the BASE branch, so a
     change cannot relax its own limits. Anything that prevents evaluating
     them fails closed: it is reported as a violation (a draft PR for a
-    human). The commit decision then falls back to the server's denylist
-    (change_limits.default_limits), so a built-in protected path such as
-    ``.github/workflows/**`` is never committed, while a path only the
-    unreadable repository config denies is held as a draft like before.
+    human). When the configuration itself cannot be read or parsed (a 5xx or
+    rate-limit error from GitHub, invalid YAML), its ``deny`` entries are
+    unknown, so no path may be committed (#488): a transient error must not
+    let a path only the repository's own denylist protects (``scripts/**``)
+    reach the run branch. When only the base copy of ``path`` is unreadable,
+    the denylist is known and decides as usual.
     """
     import change_limits
 
@@ -2387,8 +2389,10 @@ def _evaluate_change_limits(
     else:
         violation = None
     if violation is not None:
-        fallback = limits or change_limits.default_limits()
-        return [violation], change_limits.denied_by(path, fallback) is None
+        may_commit = (
+            limits is not None and change_limits.denied_by(path, limits) is None
+        )
+        return [violation], may_commit
     added, removed = change_limits.count_line_changes(base_content, code)
     violations = change_limits.find_violations(
         [change_limits.FileChange(path, added, removed)], limits
@@ -2941,6 +2945,49 @@ async def _record_merge_decision(
     )
 
 
+def _earlier_trigger_hold(run_id):
+    """A TriggerTrust that keeps an earlier hold, when a merge_decisions row
+    of this run was held by the trigger gate; None otherwise.
+
+    A worker can crash after recording that hold and before saving the
+    checkpoint, so the redelivery reviews again. Without this, a permission
+    granted in between would let the redelivered run merge although the
+    original delivery held it (#487). Any held row of the run counts, not
+    only one for the current head SHA: the trigger is the same for every
+    iteration. Best effort: when the rows cannot be read, the fresh
+    permission lookup (itself fail-closed) decides alone."""
+    import merge_audit
+    import trust
+
+    if supabase is None or not run_id:
+        return None
+    gate_reasons = (
+        merge_audit.REASON_UNTRUSTED_TRIGGER,
+        merge_audit.REASON_TRIGGER_CHECK_FAILED,
+    )
+    try:
+        rows = (
+            supabase.table(merge_audit.AUDIT_TABLE)
+            .select("reasons")
+            .eq("run_id", run_id)
+            .eq("decision", merge_audit.HELD)
+            .execute()
+        ).data or []
+    except Exception as e:
+        logger.warning("Could not read earlier merge decisions of %s: %s", run_id, e)
+        return None
+    for row in rows:
+        reasons = row.get("reasons") or []
+        for reason in gate_reasons:
+            if reason in reasons:
+                return trust.TriggerTrust(
+                    False,
+                    reason,
+                    "an earlier delivery of this run held the PR; the hold is kept",
+                )
+    return None
+
+
 async def _trigger_trust(gh_repo, state):
     """trust.check_trigger for this run, looked up once per run."""
     import trust
@@ -2948,9 +2995,14 @@ async def _trigger_trust(gh_repo, state):
     cache = _run_trigger_trust.get()
     if cache is not None and "result" in cache:
         return cache["result"]
-    result = await asyncio.to_thread(
-        trust.check_trigger, gh_repo, state.get("trigger"), state.get("target_issue")
-    )
+    result = await asyncio.to_thread(_earlier_trigger_hold, current_run_id.get(None))
+    if result is None:
+        result = await asyncio.to_thread(
+            trust.check_trigger,
+            gh_repo,
+            state.get("trigger"),
+            state.get("target_issue"),
+        )
     if cache is not None:
         cache["result"] = result
     return result

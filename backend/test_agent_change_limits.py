@@ -522,16 +522,61 @@ def test_line_limit_alone_still_commits_as_a_draft():
 
 @pytest.mark.parametrize(
     "error",
-    [None, GithubException(500, {"message": "boom"}, None)],
-    ids=["invalid-config", "unreadable-base"],
+    [
+        None,
+        GithubException(500, {"message": "boom"}, None),
+        GithubException(502, {"message": "Bad Gateway"}, None),
+        GithubException(403, {"message": "API rate limit exceeded"}, None),
+    ],
+    ids=["invalid-config", "server-error", "bad-gateway", "rate-limited"],
 )
 @pytest.mark.parametrize(
-    "path, may_commit", [("app.py", True), (".github/workflows/ci.yml", False)]
+    "path", ["app.py", "scripts/test.sh", ".github/workflows/ci.yml"]
 )
-def test_unusable_config_falls_back_to_the_built_in_denylist(error, path, may_commit):
-    """The violation (a draft for a human) stands either way; a built-in
-    protected path is still never committed."""
+def test_unusable_config_refuses_every_commit(error, path):
+    """#488: when the base config cannot be read or parsed, its own ``deny``
+    entries are unknown, so nothing is committed, not even a path the
+    built-in denylist allows."""
     repo = _Contents({("main", ".automaintainer.yml"): "change_limits: 5\n"}, error)
-    violations, found = agents._evaluate_change_limits(repo, "main", path, "x", "")
+    violations, may_commit = agents._evaluate_change_limits(repo, "main", path, "x", "")
     assert len(violations) == 1
+    assert may_commit is False
+
+
+def test_transient_error_does_not_bypass_the_repository_denylist():
+    """The reviewer's reproduction: ``deny: ['scripts/**']`` plus a 502."""
+
+    class _Flaky(_Contents):
+        def get_contents(self, path, ref=None):
+            raise GithubException(502, {"message": "Bad Gateway"}, None)
+
+    repo = _Flaky({("main", ".automaintainer.yml"): _DENY_SCRIPTS})
+    violations, may_commit = agents._evaluate_change_limits(
+        repo, "main", "scripts/test.sh", "x", ""
+    )
+    assert "could not be evaluated" in violations[0]
+    assert may_commit is False
+
+
+_DENY_SCRIPTS = "change_limits:\n  deny: ['scripts/**']\n"
+
+
+class _BaseFileUnreadable(_Contents):
+    """The config reads fine; only the base copy of the target fails."""
+
+    def get_contents(self, path, ref=None):
+        if path != ".automaintainer.yml":
+            raise GithubException(502, {"message": "Bad Gateway"}, None)
+        return super().get_contents(path, ref)
+
+
+@pytest.mark.parametrize(
+    "path, may_commit", [("app.py", True), ("scripts/test.sh", False)]
+)
+def test_unreadable_base_file_with_a_known_denylist(path, may_commit):
+    """The denylist is known, so it decides; the violation keeps the PR a
+    draft for a human."""
+    repo = _BaseFileUnreadable({("main", ".automaintainer.yml"): _DENY_SCRIPTS})
+    violations, found = agents._evaluate_change_limits(repo, "main", path, "x", None)
+    assert len(violations) == 1 and "could not be evaluated" in violations[0]
     assert found is may_commit

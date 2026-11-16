@@ -211,8 +211,9 @@ class _Query:
         self.op, self.payload = "insert", payload
         return self
 
-    def eq(self, _col, value):
+    def eq(self, col, value):
         self.id = value
+        self.filters = {**getattr(self, "filters", {}), col: value}
         return self
 
     def limit(self, _n):
@@ -224,6 +225,15 @@ class _Query:
     def execute(self):
         if self.table == "merge_decisions" and self.op == "insert":
             self.db.decisions.append(self.payload)
+        if self.table == "merge_decisions" and self.op == "select":
+            filters = getattr(self, "filters", {})
+            return SimpleNamespace(
+                data=[
+                    dict(row)
+                    for row in self.db.decisions
+                    if all(row.get(k) == v for k, v in filters.items())
+                ]
+            )
         if self.table != "runs":
             return SimpleNamespace(data=[])
         row = self.db.runs.get(self.id)

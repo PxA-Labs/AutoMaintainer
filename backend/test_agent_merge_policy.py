@@ -297,6 +297,7 @@ async def test_targeted_issue_injection_full_run_leaves_pr_open(monkeypatch, tmp
         assignees=[],
     )
     repo.get_contents.return_value = SimpleNamespace(decoded_content=b"x", sha="s")
+    repo.get_contents.side_effect = _no_repo_config
     repo.create_pull.return_value = pr
     prompts = []
 
@@ -313,3 +314,16 @@ async def test_targeted_issue_injection_full_run_leaves_pr_open(monkeypatch, tmp
     assert result["merge_status"] == "awaiting_human_review"
     assert any("Product Manager" in p for p in prompts)
     pr.merge.assert_not_called()
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

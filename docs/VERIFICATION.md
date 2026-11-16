@@ -81,7 +81,10 @@ per run through the run's installation token, and fails closed: an unknown or
 bot account, a non-collaborator or any API error leaves the PR open for a
 human with a `held` decision (`untrusted trigger` or `trigger permission
 check failed`). A redelivered run replays the held decision from its
-checkpoint; one that reviews again looks the trigger up again.
+checkpoint. One that reviews again (a crash after the held row, before the
+checkpoint) keeps the hold: an earlier `held` row of the run with either
+reason is sticky, so access granted in between does not merge it. That
+check is best effort; if the rows cannot be read, the fresh lookup decides.
 
 ### Maintainer input
 
