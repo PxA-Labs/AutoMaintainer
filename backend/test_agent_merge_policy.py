@@ -13,6 +13,10 @@ VERIFIED = ("automaintainer/verification", "success")
 
 APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 
+# The run's trigger (#487): a repository writer, so the trusted-trigger gate
+# keeps the behaviour these tests pin. test_trust.py covers the gate itself.
+WRITER = "octo-writer"
+
 
 def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()):
     monkeypatch.setattr(agents, "supabase", None)
@@ -29,6 +33,9 @@ def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()
     repo = MagicMock()
     repo.get_pull.return_value = pr
     repo.owner = SimpleNamespace(login="alice", type="User")
+    repo.get_collaborator_permission.side_effect = lambda login: (
+        "write" if login == WRITER else "none"
+    )
     repo.get_issue.return_value = SimpleNamespace(
         assignees=[SimpleNamespace(login=a) for a in assignees]
     )
@@ -60,6 +67,7 @@ def _state():
         "iteration": 0,
         "idea": "Targeted Issue #3: set x to 2 in app.py:1-1",
         "target_file_path": "app.py",
+        "trigger": {"source": "api", "login": WRITER},
     }
 
 
@@ -289,6 +297,7 @@ async def test_targeted_issue_injection_full_run_leaves_pr_open(monkeypatch, tmp
         assignees=[],
     )
     repo.get_contents.return_value = SimpleNamespace(decoded_content=b"x", sha="s")
+    repo.get_contents.side_effect = _no_repo_config
     repo.create_pull.return_value = pr
     prompts = []
 
@@ -305,3 +314,16 @@ async def test_targeted_issue_injection_full_run_leaves_pr_open(monkeypatch, tmp
     assert result["merge_status"] == "awaiting_human_review"
     assert any("Product Manager" in p for p in prompts)
     pr.merge.assert_not_called()
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

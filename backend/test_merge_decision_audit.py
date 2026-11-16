@@ -266,7 +266,7 @@ async def test_auto_merge_records_merged_by_the_policy(monkeypatch, recorded):
     assert recorded.call_args.args[1] == RUN_ID
     assert row["policy"] == "auto" and row["decision"] == "merged"
     assert row["actor"] == "policy" and row["actor_role"] is None
-    assert row["reasons"] == ["maintainer approved", "policy auto"]
+    assert row["reasons"] == ["maintainer approved", "policy auto", "trusted trigger"]
     assert row["head_sha"] == "headsha" and row["pr_number"] == 7
     assert row["iteration"] == 0 and row["pr_url"] == PR_URL
     assert row["verification"] == {"status": "passed", "head_sha": "headsha"}
@@ -289,6 +289,7 @@ async def test_ci_merge_records_the_checks_that_passed(monkeypatch, recorded):
         "maintainer approved",
         "policy ci",
         "ci checks passed: 2 CI checks passed",
+        "trusted trigger",
     ]
 
 

@@ -15,7 +15,6 @@ from github import GithubException
 import agents
 import change_limits
 import verification
-from events import NullEmitter
 from test_agent_idempotency import (
     APPROVE,
     CODE,
@@ -26,6 +25,7 @@ from test_agent_idempotency import (
     WorkerCrash,
     _role,
 )
+from test_agent_idempotency import _run as _writer_run
 from test_agent_merge_policy import VERIFIED, _setup, _state
 from verification import VerificationResult
 
@@ -129,8 +129,7 @@ def world(monkeypatch, tmp_path):
     return SimpleNamespace(repo=repo, db=db, verify=verify, prompts=prompts)
 
 
-async def _run():
-    return await agents.run_agent_loop("o/r", run_id=RUN_ID, emitter=NullEmitter())
+_run = _writer_run  # started by a repository writer (trust.py, #487)
 
 
 def _assert_held(pr):
@@ -180,12 +179,14 @@ async def test_over_limit_change_is_a_draft_for_a_human_under_every_policy(
 
 
 @pytest.mark.parametrize("policy", ["human", "ci", "auto"])
-async def test_conftest_change_is_held_for_a_human_by_default(
+async def test_conftest_change_is_never_committed_by_default(
     world, monkeypatch, policy
 ):
     """#480: a conftest.py hook can short-circuit the tests verification runs,
-    so a change to it is a draft needs-human PR under the default limits,
-    even when verification passes and the merge policy would merge."""
+    so it is on the default denylist. #488: a denied path is refused before
+    the commit, so nothing reaches a run branch (where a push-triggered
+    workflow could run it) and no PR is opened; the run fails with
+    PROTECTED_PATH under every policy."""
     monkeypatch.setenv("MERGE_POLICY", policy)
     world.repo.files[("main", "tests/conftest.py")] = "x = 1\n"
     target = "Make tests/conftest.py:1-1 set x to 2."
@@ -204,13 +205,66 @@ async def test_conftest_change_is_held_for_a_human_by_default(
 
     result = await _run()
 
-    assert world.repo.commits == [(BRANCH, "tests/conftest.py")]
+    assert result["status"] == "failed"
+    assert result["error_code"] == "PROTECTED_PATH"
+    assert "matches the protected path pattern ` conftest.py `" in result["error"]
+    assert world.repo.commits == [] and world.repo.pulls == []
+    assert list(world.repo.branches) == ["main"]
+    assert world.repo.merges == 0
+    assert world.db.decisions == []  # no PR, so no merge decision
+    # Redelivery: the run row is terminal, and a rerun refuses again.
+    again = await _run()
+    assert again["error_code"] == "PROTECTED_PATH"
+    assert world.repo.commits == [] and world.repo.pulls == []
+
+
+async def test_denied_path_in_a_later_iteration_holds_the_pr_uncommitted(
+    world, monkeypatch
+):
+    """#488 for iteration > 0: the run already has a PR. A path the base
+    branch's config now denies is not committed; the existing PR is held
+    for a human and a held merge_decisions row says why."""
+    monkeypatch.setenv("MERGE_POLICY", "auto")
+    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    replies = iter(
+        [
+            '{"verdict": "reject", "reasons": ["Not yet."]}',
+            APPROVE,
+        ]
+    )
+    llm_answers = {
+        "Architect": "Make app.py:1-1 return 2.",
+        "Visionary": "Idea: set x to 2 in app.py:1-1.",
+        "Product Manager": APPROVE,
+        "Implementer": CODE,
+    }
+
+    async def llm(system, user):
+        role = _role(system)
+        if role == "Maintainer":
+            # The repository adds app.py to its denylist after iteration 0.
+            world.repo.files[("main", change_limits.CONFIG_FILE)] = (
+                f"{change_limits.CONFIG_KEY}:\n  deny: ['app.py']\n"
+            )
+            return next(replies)
+        return llm_answers[role] if role != "Implementer" else "x = 3\n"
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", llm)
+
+    result = await _run()
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "PROTECTED_PATH"
+    assert world.repo.commits == [(BRANCH, "app.py")]  # iteration 0 only
     (pr,) = world.repo.pulls
     assert pr.draft is True and pr.merged is False
     assert [label.name for label in pr.labels] == [change_limits.NEEDS_HUMAN_LABEL]
-    assert "matches the protected path pattern ` conftest.py `" in pr.body
-    assert world.repo.merges == 0
-    assert result["merge_status"] == "awaiting_human_review"
+    held = [d for d in world.db.decisions if d["decision"] == "held"]
+    assert [d["iteration"] for d in held] == [1]
+    assert held[0]["reasons"] == [
+        "change limits exceeded",
+        "protected change not committed",
+    ]
 
 
 async def test_limits_come_from_the_base_branch_config(world):
@@ -431,3 +485,98 @@ def test_unreadable_base_fails_closed():
     repo = _Contents({}, error=GithubException(500, {"message": "boom"}, None))
     found = agents._change_limit_violations(repo, "main", "app.py", "x", "")
     assert len(found) == 1 and "could not be evaluated" in found[0]
+
+
+# --- #488: whether the path may be committed at all ------------------------------
+
+
+@pytest.mark.parametrize(
+    "path, may_commit",
+    [("app.py", True), ("conftest.py", False), (".github/workflows/ci.yml", False)],
+)
+def test_may_commit_follows_the_denylist(path, may_commit):
+    repo = _Contents({})
+    assert agents._evaluate_change_limits(repo, "main", path, "x", "")[1] is may_commit
+
+
+def test_repository_denylist_entry_is_not_committed():
+    repo = _Contents(
+        {("main", ".automaintainer.yml"): "change_limits:\n  deny: ['scripts/**']\n"}
+    )
+    violations, may_commit = agents._evaluate_change_limits(
+        repo, "main", "scripts/test.sh", "x", ""
+    )
+    assert may_commit is False
+    assert "` scripts/** `" in violations[0]
+
+
+def test_line_limit_alone_still_commits_as_a_draft():
+    repo = _Contents(
+        {("main", ".automaintainer.yml"): "change_limits:\n  max_lines: 1\n"}
+    )
+    violations, may_commit = agents._evaluate_change_limits(
+        repo, "main", "app.py", "a\nb\n", ""
+    )
+    assert violations and may_commit is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        None,
+        GithubException(500, {"message": "boom"}, None),
+        GithubException(502, {"message": "Bad Gateway"}, None),
+        GithubException(403, {"message": "API rate limit exceeded"}, None),
+    ],
+    ids=["invalid-config", "server-error", "bad-gateway", "rate-limited"],
+)
+@pytest.mark.parametrize(
+    "path", ["app.py", "scripts/test.sh", ".github/workflows/ci.yml"]
+)
+def test_unusable_config_refuses_every_commit(error, path):
+    """#488: when the base config cannot be read or parsed, its own ``deny``
+    entries are unknown, so nothing is committed, not even a path the
+    built-in denylist allows."""
+    repo = _Contents({("main", ".automaintainer.yml"): "change_limits: 5\n"}, error)
+    violations, may_commit = agents._evaluate_change_limits(repo, "main", path, "x", "")
+    assert len(violations) == 1
+    assert may_commit is False
+
+
+def test_transient_error_does_not_bypass_the_repository_denylist():
+    """The reviewer's reproduction: ``deny: ['scripts/**']`` plus a 502."""
+
+    class _Flaky(_Contents):
+        def get_contents(self, path, ref=None):
+            raise GithubException(502, {"message": "Bad Gateway"}, None)
+
+    repo = _Flaky({("main", ".automaintainer.yml"): _DENY_SCRIPTS})
+    violations, may_commit = agents._evaluate_change_limits(
+        repo, "main", "scripts/test.sh", "x", ""
+    )
+    assert "could not be evaluated" in violations[0]
+    assert may_commit is False
+
+
+_DENY_SCRIPTS = "change_limits:\n  deny: ['scripts/**']\n"
+
+
+class _BaseFileUnreadable(_Contents):
+    """The config reads fine; only the base copy of the target fails."""
+
+    def get_contents(self, path, ref=None):
+        if path != ".automaintainer.yml":
+            raise GithubException(502, {"message": "Bad Gateway"}, None)
+        return super().get_contents(path, ref)
+
+
+@pytest.mark.parametrize(
+    "path, may_commit", [("app.py", True), ("scripts/test.sh", False)]
+)
+def test_unreadable_base_file_with_a_known_denylist(path, may_commit):
+    """The denylist is known, so it decides; the violation keeps the PR a
+    draft for a human."""
+    repo = _BaseFileUnreadable({("main", ".automaintainer.yml"): _DENY_SCRIPTS})
+    violations, found = agents._evaluate_change_limits(repo, "main", path, "x", None)
+    assert len(violations) == 1 and "could not be evaluated" in violations[0]
+    assert found is may_commit
