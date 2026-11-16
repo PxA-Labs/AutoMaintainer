@@ -548,25 +548,9 @@
     },
     "/github/app/install-url": {
       "post": {
-        "description": "Return the GitHub App install URL with a signed ``state`` for the\ncaller (org owner/admin). The state expires after\nSETUP_STATE_TTL_SECONDS seconds.",
+        "description": "Return the GitHub App install URL with a signed, single-use ``state``\nfor the caller (org owner/admin). The state expires after\nSETUP_STATE_TTL_SECONDS seconds.\n\nOnly the Supabase session is required: the GitHub user the state is\nbound to is the caller's GitHub identity in Supabase Auth, and the setup\ncallback proves ownership of the installation with the installer's own\nOAuth code, so the browser neither sends nor stores a GitHub token.",
         "operationId": "github_app_install_url_github_app_install_url_post",
         "parameters": [
-          {
-            "in": "header",
-            "name": "x-github-user-token",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Github-User-Token"
-            }
-          },
           {
             "in": "header",
             "name": "authorization",

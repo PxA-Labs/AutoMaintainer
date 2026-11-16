@@ -667,9 +667,13 @@ def test_reclaim_by_same_org_updates_in_place(claim):
 def install_flow(monkeypatch, claim):
     """Install flow configured; org-a's owner 'u' (GitHub user 42) can link.
 
-    ``oauth`` records the OAuth code exchanges; ``oauth_result`` controls the
-    token endpoint's answer.
+    ``exchanged`` records the OAuth code exchanges; ``answer`` controls the
+    token endpoint's answer. ``identities`` are the Supabase Auth identities
+    the admin API returns for the caller (a GitHub identity for user 42).
+    Used states are tracked in process (no REDIS_URL).
     """
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setattr(github_app, "_used_setup_nonces", {})
     monkeypatch.setenv("GITHUB_APP_SLUG", "auto-maintainer")
     monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv1.client")
     monkeypatch.setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
@@ -704,10 +708,38 @@ def install_flow(monkeypatch, claim):
                 }
             ]
         )
+        agents.supabase.auth.admin.get_user_by_id.side_effect = lookup
         return store
 
+    identities = [github_identity(42)]
+    looked_up = []
+
+    def lookup(user_id):
+        looked_up.append(user_id)
+        return SimpleNamespace(user=SimpleNamespace(id=user_id, identities=identities))
+
     return SimpleNamespace(
-        setup=setup, api=claim.api, exchanged=exchanged, answer=answer
+        setup=setup,
+        api=claim.api,
+        exchanged=exchanged,
+        answer=answer,
+        identities=identities,
+        looked_up=looked_up,
+    )
+
+
+def github_identity(github_id, provider="github"):
+    """A Supabase Auth identity as the admin API returns it."""
+    return SimpleNamespace(
+        id=str(github_id),
+        identity_id="0d6c3f2e-0000-4000-8000-000000000000",
+        user_id="u",
+        provider=provider,
+        identity_data={
+            "sub": str(github_id),
+            "provider_id": str(github_id),
+            "user_name": "alice",
+        },
     )
 
 
@@ -744,15 +776,25 @@ def admin_installation():
     )
 
 
-def test_install_url_carries_a_state_bound_to_the_caller(install_flow):
+def request_install_url(**headers):
+    return client.post("/github/app/install-url", headers=headers)
+
+
+def state_of(response):
     from urllib.parse import parse_qs, urlsplit
 
-    install_flow.setup()
-    install_flow.api(**admin_installation())
+    assert response.status_code == 200, response.text
+    [state] = parse_qs(urlsplit(response.json()["install_url"]).query)["state"]
+    return state
 
-    r = client.post(
-        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
-    )
+
+def test_install_url_carries_a_state_bound_to_the_caller(install_flow):
+    from urllib.parse import urlsplit
+
+    install_flow.setup()
+    seen = install_flow.api(**admin_installation())
+
+    r = request_install_url()
 
     assert r.status_code == 200, r.text
     url = urlsplit(r.json()["install_url"])
@@ -760,35 +802,210 @@ def test_install_url_carries_a_state_bound_to_the_caller(install_flow):
         "github.com",
         "/apps/auto-maintainer/installations/new",
     )
-    [state] = parse_qs(url.query)["state"]
-    payload = github_app.verify_setup_state(state)
+    payload = github_app.verify_setup_state(state_of(r))
     assert (payload["u"], payload["o"], payload["g"]) == ("u", "org-a", 42)
     assert r.json()["expires_in"] == github_app.SETUP_STATE_TTL_SECONDS
+    # The GitHub user id comes from the Supabase identity, not from GitHub.
+    assert install_flow.looked_up == ["u"]
+    assert seen == []
+
+
+def test_install_url_needs_no_github_token(install_flow):
+    """#481: Supabase drops provider_token on refresh or reload; the session
+    JWT alone starts the install, and a stray GitHub token header is
+    neither required nor used."""
+    install_flow.setup()
+    seen = install_flow.api(**admin_installation())
+
+    plain = request_install_url()
+    with_header = request_install_url(**{"X-GitHub-User-Token": "someone-else"})
+
+    for r in (plain, with_header):
+        assert github_app.verify_setup_state(state_of(r))["g"] == 42
+    assert seen == []  # GitHub is not asked who the token belongs to
+
+
+def test_install_url_has_no_github_token_parameter_in_the_api():
+    op = app.openapi()["paths"]["/github/app/install-url"]["post"]
+    headers = {p["name"] for p in op.get("parameters", []) if p["in"] == "header"}
+    assert headers == {"authorization"}  # the Supabase session only
 
 
 @pytest.mark.parametrize("role", ["member", "viewer", None])
 def test_install_url_requires_org_owner_or_admin(install_flow, role):
     install_flow.setup(role=role)
     seen = install_flow.api([])
-    r = client.post(
-        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
-    )
+    r = request_install_url()
     assert r.status_code == 403
     assert seen == []
+    assert install_flow.looked_up == []
 
 
-def test_install_url_requires_github_user_token(install_flow):
+@pytest.mark.parametrize(
+    "identities",
+    [
+        [],
+        [github_identity(42, provider="google")],
+        [github_identity("not-a-number")],
+        [github_identity(42), github_identity(7)],
+    ],
+    ids=["none", "other-provider", "malformed-id", "ambiguous"],
+)
+def test_install_url_requires_a_linked_github_identity(install_flow, identities):
+    """Without exactly one GitHub identity there is no GitHub user to bind
+    the state to, so no state is issued (an unbound state would let anyone
+    complete the install for this org)."""
     install_flow.setup()
-    assert client.post("/github/app/install-url").status_code == 400
+    install_flow.identities[:] = identities
+    r = request_install_url()
+    assert r.status_code == 409
+    assert "GitHub identity" in r.json()["detail"]
+
+
+def test_install_url_identity_lookup_failure_is_not_echoed(install_flow):
+    install_flow.setup()
+    agents.supabase.auth.admin.get_user_by_id.side_effect = RuntimeError(
+        "postgres://secret@db"
+    )
+    r = request_install_url()
+    assert r.status_code == 500
+    assert "secret" not in r.text
 
 
 def test_install_url_is_503_when_the_flow_is_not_configured(install_flow, monkeypatch):
     install_flow.setup()
     monkeypatch.delenv("GITHUB_APP_CLIENT_SECRET")
-    r = client.post(
-        "/github/app/install-url", headers={"X-GitHub-User-Token": "gh-user-token"}
-    )
-    assert r.status_code == 503
+    assert request_install_url().status_code == 503
+
+
+def test_install_url_to_setup_round_trip_without_a_github_token(install_flow):
+    """The whole flow with only the Supabase session on the dashboard side:
+    ownership is proven by the installer's OAuth code at the callback."""
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+
+    state = state_of(request_install_url())
+    _, params = redirect_params(install_callback(state=state))
+
+    assert params == {"github_setup": "linked", "github_installation_id": "555"}
+    [row] = writes(store, "github_installations", "insert")
+    assert row["org_id"] == "org-a"
+
+
+def test_round_trip_refuses_an_installation_the_user_does_not_control(
+    install_flow,
+):
+    """A state from the token-less install URL, completed by the bound GitHub
+    user, but for another user's personal account: not linked."""
+    store = install_flow.setup()
+    install_flow.api([installation(login="mallory", account_type="User")])
+
+    state = state_of(request_install_url())
+    _, params = redirect_params(install_callback(state=state))
+
+    assert params == {"github_setup": "forbidden"}
+    assert writes(store, "github_installations") == []
+
+
+def test_replayed_state_links_nothing(install_flow):
+    """A state is single-use: the second callback with it (e.g. a captured
+    URL with a fresh code) is refused before the code is redeemed."""
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+    state = state_for()
+
+    _, first = redirect_params(install_callback(state=state))
+    _, second = redirect_params(install_callback(state=state, code="fresh-code"))
+
+    assert first["github_setup"] == "linked"
+    assert second == {"github_setup": "expired"}
+    assert [f["code"] for f in install_flow.exchanged] == ["oauth-code"]
+    assert len(writes(store, "github_installations", "insert")) == 1
+
+
+def test_state_is_consumed_even_when_the_first_attempt_fails(install_flow):
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+    install_flow.answer["json"] = {"error": "bad_verification_code"}
+    state = state_for()
+
+    _, first = redirect_params(install_callback(state=state))
+    install_flow.answer["json"] = {"access_token": "gh-user-token"}
+    _, second = redirect_params(install_callback(state=state))
+
+    assert first == {"github_setup": "unauthorized"}
+    assert second == {"github_setup": "expired"}
+    assert writes(store, "github_installations") == []
+
+
+def test_forged_state_does_not_consume_the_real_one(install_flow):
+    install_flow.setup()
+    install_flow.api(**admin_installation())
+    state = state_for()
+
+    _, forged = redirect_params(install_callback(state=_tampered(state)))
+    _, real = redirect_params(install_callback(state=state))
+
+    assert forged == {"github_setup": "invalid"}
+    assert real["github_setup"] == "linked"
+
+
+def test_state_store_failure_fails_closed(install_flow, monkeypatch):
+    store = install_flow.setup()
+    install_flow.api(**admin_installation())
+
+    def down(*_a):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(github_app, "_claim_setup_nonce", down)
+
+    _, params = redirect_params(install_callback())
+
+    assert params == {"github_setup": "unavailable"}
+    assert install_flow.exchanged == []
+    assert writes(store, "github_installations") == []
+
+
+def test_used_states_are_shared_through_redis_when_configured(monkeypatch):
+    """With REDIS_URL set, SET NX on a per-nonce key with the state's
+    remaining lifetime, so a replay on another API instance is refused."""
+    import redis_locks
+
+    monkeypatch.setenv("REDIS_URL", "redis://example:6379/0")
+    keys = {}
+
+    class FakeRedis:
+        def set(self, key, value, nx=False, ex=None):
+            assert nx and ex
+            if key in keys:
+                return None
+            keys[key] = ex
+            return True
+
+    monkeypatch.setattr(redis_locks, "get_redis_client", lambda: FakeRedis())
+    payload = {"n": "nonce-1", "exp": 1_000_600}
+
+    github_app.consume_setup_state(payload, now=1_000_000)
+    with pytest.raises(github_app.SetupStateReplayed):
+        github_app.consume_setup_state(payload, now=1_000_001)
+    assert keys == {"automaintainer:github-setup-state:nonce-1": 600}
+
+
+def test_in_process_state_store_forgets_expired_nonces(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setattr(github_app, "_used_setup_nonces", {})
+    github_app.consume_setup_state({"n": "a", "exp": 110}, now=100)
+    github_app.consume_setup_state({"n": "b", "exp": 300}, now=200)
+    assert set(github_app._used_setup_nonces) == {"b"}
+
+
+def test_github_identity_accepts_dict_identities():
+    identities = [
+        {"provider": "email", "id": "5"},
+        {"provider": "github", "id": None, "identity_data": {"sub": "42"}},
+    ]
+    assert github_app.github_user_id_from_identities(identities) == 42
+    assert github_app.github_user_id_from_identities(None) is None
 
 
 def test_setup_callback_links_a_verified_installation(install_flow):

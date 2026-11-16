@@ -433,22 +433,60 @@ And the backend:
 | `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET` | The App's OAuth client credentials, used to exchange the install-time code. The secret also keys the HMAC that signs the install `state`, so rotating it invalidates installs that are in progress (at most 10 minutes old). |
 | `DASHBOARD_URL` | Exact dashboard origin the callback redirects to; when unset or not a bare origin, the API's own `/`. |
 
-The flow: an org owner/admin calls `POST /github/app/install-url` with their
-GitHub user token in `X-GitHub-User-Token` and is sent to the returned URL.
-Its `state` is HMAC-signed, expires after 10 minutes and is bound to the
-AutoMaintainer user, their org and their GitHub user id. After the install,
-GitHub sends the browser to `/github/app/setup` with `installation_id`,
-`setup_action`, `state` and an OAuth `code`. The route verifies the state,
-re-checks the user's org role, exchanges the code for the installer's user
-token, and runs the same ownership check and write as
-`POST /github/installations/claim` (the installer must be the GitHub user the
-state names). Only then is the installation linked. It redirects to
+The flow: an org owner/admin calls `POST /github/app/install-url` with only
+their Supabase session (no GitHub token, so it works after a page reload or a
+session refresh, when Supabase no longer has `provider_token`) and is sent to
+the returned URL. Its `state` is HMAC-signed, expires after 10 minutes, can be
+used once, and is bound to the AutoMaintainer user, their org and their GitHub
+user id. The GitHub user id is read server-side from the user's GitHub
+identity in Supabase Auth (admin API, `auth.identities`); a user without
+exactly one GitHub identity gets a 409 and must sign in with GitHub. After the
+install, GitHub sends the browser to `/github/app/setup` with
+`installation_id`, `setup_action`, `state` and an OAuth `code`. The route
+verifies and consumes the state, re-checks the user's org role, exchanges the
+code for the installer's user token, and runs the same ownership check and
+write as `POST /github/installations/claim` (the installer must be the GitHub
+user the state names). Only then is the installation linked. It redirects to
 `DASHBOARD_URL` with `github_setup=<outcome>` (`linked`, `unverified`,
 `invalid`, `expired`, `forbidden`, `unauthorized`, `conflict`, `requested`,
-`unavailable` or `error`) and, when linked, `github_installation_id`. The
-`installation_id` in the URL is never trusted on its own; a callback without
-`state` and `code` links nothing (`unverified`), and the installation can
-still be linked with `POST /github/installations/claim`.
+`unavailable` or `error`) and, when linked, `github_installation_id`. A
+replayed state reports `expired`. The `installation_id` in the URL is never
+trusted on its own; a callback without `state` and `code` links nothing
+(`unverified`), and the installation can still be linked with
+`POST /github/installations/claim`.
+
+Why no GitHub token is needed to start the install (#481):
+
+- **Ownership is proven at the callback, by GitHub.** The installer's OAuth
+  code is single-use, issued by GitHub to whoever completed the install, and
+  exchanged server-side with the App's client secret. With that token GitHub
+  must confirm the installation is accessible to the installer and that its
+  account is the installer's own account or an organization they are an
+  active admin of. Nothing the browser sends at either step can stand in for
+  that check.
+- **The state ties the install to one AutoMaintainer user and org.** It is
+  only issued to an org owner/admin, and the callback re-checks that role.
+  Without a GitHub user in the state, an admin of org A could hand an install
+  link to the owner of GitHub org B and have B's installation linked to A. The
+  state therefore names a GitHub user, and the callback refuses an installer
+  who is anyone else. That user comes from the Supabase GitHub identity, which
+  Supabase records only after a completed GitHub OAuth sign-in and which users
+  cannot edit (unlike `user_metadata`), so it carries the same assurance as
+  the provider token it replaces.
+- **Single use.** Each state's nonce is recorded on first use (in Redis with
+  `SET NX` and the state's remaining lifetime when `REDIS_URL` is set,
+  otherwise in process memory) before the OAuth code is redeemed, so a
+  captured setup URL cannot be replayed, even with a new code. Without
+  `REDIS_URL` the record is per process, which is enough for one API process
+  but not for several; set `REDIS_URL` when the API runs more than one
+  process. If Redis is unreachable the callback links nothing
+  (`unavailable`).
+- **Trade-off.** The identity was verified when the user last signed in with
+  GitHub, not when the install URL is issued. That binding alone grants
+  nothing: a link still needs a fresh OAuth code from that same GitHub user
+  that passes the ownership check. The admin lookup is one extra Supabase
+  call per install URL, and the `AUTH_DEV_BYPASS` user has no identity, so
+  local development without Supabase Auth cannot start the install flow.
 
 ### Tuning and observability (optional)
 
