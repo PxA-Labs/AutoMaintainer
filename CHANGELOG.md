@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI/CD & Infrastructure
 
+- Fix action pins, least-privilege tokens, frontend unit tests and keep-alive diagnostics ([#496](https://github.com/PxA-Labs/AutoMaintainer/pull/496)) - @purvanshjoshi
 - End-to-end docker compose smoke test (api, worker, beat, redis) ([#468](https://github.com/PxA-Labs/AutoMaintainer/pull/468)) - @purvanshjoshi
 ### Refactoring
 
