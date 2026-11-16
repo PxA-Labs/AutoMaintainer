@@ -17,11 +17,25 @@ const MAX_LENGTH = 2048;
 /** `value` if it is a safe same-origin path to return to, else null. */
 export function safeReturnPath(value: unknown): string | null {
   if (typeof value !== "string" || value.length > MAX_LENGTH) return null;
+  // Control characters are never part of a location we stored, and the URL
+  // parser silently strips tabs and newlines ("/\t/evil" becomes "//evil").
+  if (/[\u0000-\u001f\u007f]/.test(value)) return null;
   // A path, not "//host" (protocol-relative) or "/\host" (browsers treat the
-  // backslash as a slash), and not the callback itself (it would loop).
+  // backslash as a slash).
   if (!value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return null;
-  if (value.startsWith("/auth/")) return null;
-  return value;
+  // Resolve it the way navigation will, and keep only a same-origin result,
+  // re-serialised from its parts so nothing the parser reinterpreted remains.
+  const base = typeof window === "undefined" ? "http://localhost" : window.location.origin;
+  let url: URL;
+  try {
+    url = new URL(value, base);
+  } catch {
+    return null;
+  }
+  if (url.origin !== new URL(base).origin) return null;
+  // Not the callback itself (it would loop).
+  if (url.pathname.startsWith("/auth/")) return null;
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 /** Remember the current location so the sign-in callback can return to it. */

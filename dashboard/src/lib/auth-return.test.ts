@@ -36,6 +36,12 @@ describe("sign-in return path", () => {
     "javascript:alert(1)",
     "/auth/callback/",
     "/" + "a".repeat(5000),
+    // The URL parser strips tabs and newlines, turning these into "//evil".
+    "/\t/evil.example/",
+    "/\n/evil.example/",
+    "/\r\n/evil.example/",
+    // Dot segments that resolve back to the callback.
+    "/x/../auth/callback/",
   ])("never returns to %s", (stored) => {
     window.sessionStorage.setItem(RETURN_TO_STORAGE_KEY, stored);
     expect(consumeReturnTo()).toBe("/");
