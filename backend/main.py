@@ -17,8 +17,8 @@ from fastapi.staticfiles import StaticFiles
 
 from typing import Optional, List, Annotated, Literal
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
+import workspace
 import asyncio
-import hashlib
 import json
 import uuid
 import httpx
@@ -1302,6 +1302,11 @@ async def _github_client_for_repo(repo_name: str, org_id: str) -> Github:
     In the explicit single-tenant ``pat`` mode (see github_app) this is the
     GITHUB_TOKEN client instead, and no installation lookup is needed.
     """
+    return Github(await _github_token_for_repo(repo_name, org_id))
+
+
+async def _github_token_for_repo(repo_name: str, org_id: str) -> str:
+    """The token behind _github_client_for_repo (also used for git fetches)."""
     installation_id = None
     try:
         if get_auth_mode() == AUTH_MODE_APP:
@@ -1326,7 +1331,7 @@ async def _github_client_for_repo(repo_name: str, org_id: str) -> Github:
         raise
     except Exception as e:
         raise internal_error(502, "Could not obtain GitHub credentials", e)
-    return Github(token)
+    return token
 
 
 def _get_github_repo(gh: Github, repo_name: str):
@@ -1337,29 +1342,66 @@ def _get_github_repo(gh: Github, repo_name: str):
         raise HTTPException(status_code=404, detail="Repository not found")
 
 
-def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None:
-    """Best-effort write of an already-committed change into the local clone.
-
-    The commit has succeeded by the time this runs, so a local failure is
-    logged rather than turned into an error response for a change that landed.
-    """
-    # Defense in depth: callers pass paths from get_safe_repo_dir and
-    # get_safe_target_path, but re-check containment right here so the write
-    # is safe on its own (workspace root -> clone -> target).
-    base = os.path.realpath(str(get_base_workspace_dir()))
-    root = os.path.realpath(str(repo_dir))
-    if not root.startswith(base + os.sep) or not os.path.isdir(root):
-        return
-    resolved = os.path.realpath(str(target_path))
-    if not resolved.startswith(root + os.sep):
-        logger.warning("Refusing local mirror write outside the repository clone")
-        return
-    target_path = Path(resolved)
+async def _ide_view_token(repo_name: str, org_id: str) -> Optional[str]:
+    """Token for fetching an IDE view, or None (public repository, or GitHub
+    access not configured: the view then falls back to what was fetched)."""
     try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content, encoding="utf-8")
+        return await _github_token_for_repo(repo_name, org_id)
+    except HTTPException as e:
+        logger.info(f"No token to refresh the IDE view of {repo_name}: {e.detail}")
+        return None
+
+
+async def _ide_read_dir(
+    request: Request, repo_name: str, org_id: str, user_id: str, *, refresh: bool
+) -> Path:
+    """The directory the IDE reads ``repo_name`` from for this user (#505).
+
+    For a real clone that is the user's view (workspace.refresh_ide_view): their
+    working branch, or the default branch when they have none, never the
+    shared clone itself, whose untracked files and local edits would be shared
+    between users. ``refresh`` asks GitHub for the branch's current state
+    (tree, changes, after a write); otherwise an existing view is served
+    without a network round trip. A directory that is not a git clone (not
+    cloned yet) is returned unchanged for the callers' existing 404s.
+    """
+    clone = _repo_dir_for_request(request, repo_name)
+    if not workspace.is_git_clone(clone):
+        return clone
+    key = workspace.ide_user_key(org_id, user_id)
+    if not refresh:
+        view = await asyncio.to_thread(workspace.current_ide_view, clone, key)
+        if view is not None:
+            return view
+    token = await _ide_view_token(repo_name, org_id)
+    view = await asyncio.to_thread(
+        workspace.refresh_ide_view,
+        clone,
+        key,
+        _ide_working_branch(org_id, user_id),
+        token,
+        repo_name,
+    )
+    if view is None:
+        # Fail closed: never fall back to the shared clone.
+        raise HTTPException(
+            status_code=503, detail="The IDE workspace is not available; try again"
+        )
+    return view
+
+
+async def _refresh_view_after_write(
+    request: Request, repo_name: str, org_id: str, user_id: str, branch: str
+) -> None:
+    """Show a committed write in the caller's view. Best effort: the commit has
+    landed, so a local failure is logged, not returned as an error. Writes to
+    an explicit other branch do not change what the IDE reads."""
+    if branch != _ide_working_branch(org_id, user_id):
+        return
+    try:
+        await _ide_read_dir(request, repo_name, org_id, user_id, refresh=True)
     except Exception as e:
-        logger.warning(f"Committed upstream but local mirror write failed: {e}")
+        logger.warning(f"Committed upstream but the IDE view refresh failed: {e}")
 
 
 # --- IDE commit target branch (#139) ---
@@ -1374,6 +1416,8 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
 #   per user, so consecutive saves accumulate on one branch, and the hash keeps
 #   Supabase ids out of the repository's branch list.
 #
+# An explicit ``branch`` inside the ``automaintainer/ide-`` namespace that is
+# not the caller's own working branch is refused with 403 (#505).
 # The default branch and any branch GitHub reports as protected are refused
 # with 409 before anything is written. Getting the edits into the default
 # branch is a pull request: POST /repo/{name}/propose-changes, or a PR opened
@@ -1417,8 +1461,7 @@ def _same_branch(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def _ide_working_branch(org_id: str, user_id: str) -> str:
-    digest = hashlib.sha256(f"{org_id}:{user_id}".encode("utf-8")).hexdigest()
-    return f"{IDE_BRANCH_PREFIX}{digest[:12]}"
+    return f"{IDE_BRANCH_PREFIX}{workspace.ide_user_key(org_id, user_id)}"
 
 
 def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -> str:
@@ -1427,15 +1470,27 @@ def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -
         return _ide_working_branch(org_id, user_id)
     branch = requested.strip()
     _validate_branch_name(branch)
+    # The IDE working-branch namespace belongs to its owners: every name in it
+    # is derivable (and visible on GitHub), so without this check one user
+    # could commit into another user's working branch and their Propose
+    # would carry that code (#505). Compared case-insensitively, like
+    # _same_branch, so a case variant cannot sidestep it.
+    own = _ide_working_branch(org_id, user_id)
+    if branch.casefold().startswith(IDE_BRANCH_PREFIX.casefold()) and branch != own:
+        raise HTTPException(
+            status_code=403,
+            detail="IDE working branches can only be written by their owner; "
+            "omit 'branch' to use your own",
+        )
     return branch
 
 
 def _sync_ide_branch(repo, branch: str, default_branch: str) -> None:
     """Merge the default branch into an existing IDE working branch.
 
-    The IDE reads files from a clone synced to the default branch, so a file
-    merged there after the working branch was created would be visible in
-    the editor but missing on the branch it saves to (#139). The working
+    Without this, a file merged into the default branch after the working
+    branch was created would be missing on the branch the IDE saves to and
+    reads from (#139, #505). The working
     branch is server-owned, so it is fast-forwarded or merged before each
     write. Only the working branch is written: ``base`` is the merge target.
     A conflict is reported rather than resolved, so no user edit is lost.
@@ -1521,11 +1576,10 @@ async def update_repo_file(
         raise HTTPException(status_code=400, detail="Invalid file path")
     branch = _requested_ide_branch(payload.branch, org_id, user_id)
 
-    # Validate the local mirror path BEFORE any GitHub call. Checking it only
-    # after the commit meant a path the workspace refuses (.git/..., symlink
-    # escapes) still got an upstream commit, followed by a 500.
+    # Validate the path against the workspace BEFORE any GitHub call: a path
+    # the IDE refuses to read (.git/..., symlink escapes) is not written either.
     repo_dir = _repo_dir_for_request(request, repo_name)
-    target_path = get_safe_target_path(repo_dir, payload.file_path)
+    get_safe_target_path(repo_dir, payload.file_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
     message = (
@@ -1533,7 +1587,7 @@ async def update_repo_file(
     )
 
     def _commit() -> None:
-        # PyGithub and the mirror write are blocking I/O; run off the event loop.
+        # PyGithub calls are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
         _ensure_writable_branch(repo, branch)
         try:
@@ -1550,11 +1604,10 @@ async def update_repo_file(
         except Exception as e:
             raise internal_error(500, "Failed to update file", e)
 
-        # Mirror to the local clone so the IDE doesn't show stale reads. The
-        # clone is reset to the remote on the next agent sync.
-        _write_local_mirror(repo_dir, target_path, payload.content)
-
     await asyncio.to_thread(_commit)
+    # The shared clone is not written (#505): the caller's view is refreshed
+    # from the branch instead, so the edit is visible to this user only.
+    await _refresh_view_after_write(request, repo_name, org_id, user_id, branch)
     return {"status": "updated", "message": message, "branch": branch}
 
 
@@ -1581,9 +1634,9 @@ async def create_repo_file(
         actual_path = f"{payload.file_path.rstrip('/')}/.gitkeep"
         actual_content = ""
 
-    # Validate the local mirror path BEFORE committing upstream (see update).
+    # Validate the path BEFORE committing upstream (see update).
     repo_dir = _repo_dir_for_request(request, repo_name)
-    target_path = get_safe_target_path(repo_dir, actual_path)
+    get_safe_target_path(repo_dir, actual_path)
 
     gh = await _github_client_for_repo(repo_name, org_id)
 
@@ -1592,7 +1645,7 @@ async def create_repo_file(
     )
 
     def _commit() -> None:
-        # PyGithub and the mirror write are blocking I/O; run off the event loop.
+        # PyGithub calls are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
         _ensure_writable_branch(repo, branch)
         try:
@@ -1600,15 +1653,16 @@ async def create_repo_file(
         except Exception as e:
             raise internal_error(500, "Failed to create file", e)
 
-        _write_local_mirror(repo_dir, target_path, actual_content)
-
     await asyncio.to_thread(_commit)
+    # Never an untracked file in the shared clone (#505); see update.
+    await _refresh_view_after_write(request, repo_name, org_id, user_id, branch)
     return {"status": "created", "message": message, "branch": branch}
 
 
 @app.delete("/repo/{repo_name:path}/file")
 async def delete_repo_file(
     repo_name: str,
+    request: Request,
     file_path: str,
     commit_message: Optional[str] = None,
     branch: Optional[str] = None,
@@ -1648,6 +1702,7 @@ async def delete_repo_file(
             raise internal_error(500, "Failed to delete file", e)
 
     await asyncio.to_thread(_delete)
+    await _refresh_view_after_write(request, repo_name, org_id, user_id, target_branch)
     return {"status": "deleted", "message": message, "branch": target_branch}
 
 
@@ -2432,16 +2487,63 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
                     pass
 
 
-# --- Repository browsing endpoints (unchanged) ---
+# --- Repository browsing endpoints ---
+#
+# The IDE reads the caller's own view of the repository (_ide_read_dir): their
+# working branch, or the default branch, never the shared clone (#505).
+
+# Directory names the tree and search skip. ".git" also matches the pointer
+# file at the root of a view (a git worktree), which names a server path.
+_BROWSE_IGNORED = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    "env",
+    "build",
+    "dist",
+}
+
+
+def _build_tree(repo_dir: Path, path: str) -> list:
+    tree = []
+    try:
+        for item in os.listdir(path):
+            if item in _BROWSE_IGNORED:
+                continue
+            item_path = os.path.join(path, item)
+
+            # Prevent symlink loops
+            if os.path.islink(item_path):
+                continue
+
+            is_dir = os.path.isdir(item_path)
+            node = {
+                "name": item,
+                "path": Path(item_path).relative_to(repo_dir).as_posix(),
+                "type": "directory" if is_dir else "file",
+            }
+            if is_dir:
+                node["children"] = _build_tree(repo_dir, item_path)
+            tree.append(node)
+    except (OSError, PermissionError) as e:
+        logger.warning(f"Error accessing path {path}: {e}")
+        raise HTTPException(status_code=500, detail="Error accessing file system")
+
+    # Sort directories first, then files
+    tree.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
+    return tree
 
 
 @app.get("/repo/{repo_name:path}/tree")
-def get_repo_tree(
+async def get_repo_tree(
     repo_name: str,
     request: Request,
     org_id: str = Depends(require_repo_access),
+    user_id: str = Depends(get_user_id),
 ):
-    repo_dir = _repo_dir_for_request(request, repo_name)
+    # Opening the IDE: bring the caller's view up to date with GitHub.
+    repo_dir = await _ide_read_dir(request, repo_name, org_id, user_id, refresh=True)
 
     if not os.path.exists(repo_dir):
         raise HTTPException(
@@ -2449,118 +2551,94 @@ def get_repo_tree(
             detail="Repository not cloned yet. Start an agent loop first.",
         )
 
-    ignored_dirs = {
-        ".git",
-        "node_modules",
-        "__pycache__",
-        "venv",
-        "env",
-        "build",
-        "dist",
-    }
+    children = await asyncio.to_thread(_build_tree, repo_dir, str(repo_dir))
+    return {"name": repo_name, "type": "directory", "children": children}
 
-    def build_tree(path):
-        tree = []
-        try:
-            for item in os.listdir(path):
-                if item in ignored_dirs:
-                    continue
-                item_path = os.path.join(path, item)
 
-                # Prevent symlink loops
-                if os.path.islink(item_path):
-                    continue
+@app.get("/repo/{repo_name:path}/working-changes")
+async def get_working_changes(
+    repo_name: str,
+    request: Request,
+    org_id: str = Depends(require_repo_access),
+    user_id: str = Depends(get_user_id),
+):
+    """Files the caller's IDE working branch changes against the default branch.
 
-                is_dir = os.path.isdir(item_path)
-                node = {
-                    "name": item,
-                    "path": Path(item_path).relative_to(repo_dir).as_posix(),
-                    "type": "directory" if is_dir else "file",
-                }
-                if is_dir:
-                    node["children"] = build_tree(item_path)
-                tree.append(node)
-        except (OSError, PermissionError) as e:
-            logger.warning(f"Error accessing path {path}: {e}")
-            raise HTTPException(status_code=500, detail="Error accessing file system")
+    The dashboard restores its staged list from this after a reload (#505).
+    Only the caller's own branch is ever diffed: the branch comes from the
+    authenticated org and user, never from the request.
+    """
+    branch = _ide_working_branch(org_id, user_id)
+    key = workspace.ide_user_key(org_id, user_id)
+    clone = _repo_dir_for_request(request, repo_name)
+    if not workspace.is_git_clone(clone):
+        return {"branch": None, "changes": []}
+    view = await _ide_read_dir(request, repo_name, org_id, user_id, refresh=True)
+    if view.name != key:
+        # No working branch: the default view is being served.
+        return {"branch": None, "changes": []}
+    changes = await asyncio.to_thread(workspace.ide_branch_changes, clone, key)
+    return {"branch": branch, "changes": changes}
 
-        # Sort directories first, then files
-        tree.sort(key=lambda x: (x["type"] != "directory", x["name"].lower()))
-        return tree
 
-    return {"name": repo_name, "type": "directory", "children": build_tree(repo_dir)}
+def _search_files(repo_dir: Path, q: str) -> list:
+    ignored_dirs = _BROWSE_IGNORED | {".next"}
+    results = []
+    needle = q.lower()
+    for root, dirs, files in os.walk(repo_dir):
+        dirs[:] = [
+            d
+            for d in dirs
+            if d not in ignored_dirs and not os.path.islink(os.path.join(root, d))
+        ]
+        for file in files:
+            if file == ".git":
+                continue
+            file_path = os.path.join(root, file)
+            if os.path.islink(file_path):
+                continue
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f):
+                        if needle in line.lower():
+                            rel_path = Path(file_path).relative_to(repo_dir).as_posix()
+                            results.append(
+                                {
+                                    "file": rel_path,
+                                    "line_number": i + 1,
+                                    "snippet": line.strip()[:200],
+                                }
+                            )
+            except UnicodeDecodeError:
+                pass
+            except Exception:
+                pass
+    return results
 
 
 @app.get("/repo/{repo_name:path}/search")
-def search_repo(
+async def search_repo(
     repo_name: str,
     request: Request,
     q: str,
     org_id: str = Depends(require_repo_access),
+    user_id: str = Depends(get_user_id),
 ):
-    repo_dir = _repo_dir_for_request(request, repo_name)
+    repo_dir = await _ide_read_dir(request, repo_name, org_id, user_id, refresh=False)
 
     if not repo_dir.exists():
         raise HTTPException(status_code=404, detail="Repo not found locally")
 
-    ignored_dirs = {
-        ".git",
-        "node_modules",
-        "__pycache__",
-        "venv",
-        "env",
-        "build",
-        "dist",
-        ".next",
-    }
-    results = []
-
     try:
-        for root, dirs, files in os.walk(repo_dir):
-            dirs[:] = [
-                d
-                for d in dirs
-                if d not in ignored_dirs and not os.path.islink(os.path.join(root, d))
-            ]
-            for file in files:
-                file_path = os.path.join(root, file)
-                if os.path.islink(file_path):
-                    continue
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        for i, line in enumerate(f):
-                            if q.lower() in line.lower():
-                                rel_path = (
-                                    Path(file_path).relative_to(repo_dir).as_posix()
-                                )
-                                results.append(
-                                    {
-                                        "file": rel_path,
-                                        "line_number": i + 1,
-                                        "snippet": line.strip()[:200],
-                                    }
-                                )
-                except UnicodeDecodeError:
-                    pass
-                except Exception:
-                    pass
+        results = await asyncio.to_thread(_search_files, repo_dir, q)
     except Exception as e:
         raise internal_error(500, "Search failed", e)
 
     return {"query": q, "results": results[:100]}
 
 
-@app.get("/repo/{repo_name:path}/file")
-def get_repo_file(
-    repo_name: str,
-    request: Request,
-    file_path: str,
-    org_id: str = Depends(require_repo_access),
-):
-    repo_dir = _repo_dir_for_request(request, repo_name)
-    target_path = get_safe_target_path(repo_dir, file_path)
-
-    import os, stat
+def _read_text_file(target_path: Path) -> dict:
+    import stat
 
     try:
         fd = os.open(target_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -2590,6 +2668,21 @@ def get_repo_file(
             os.close(fd)
         except OSError:
             pass
+
+
+@app.get("/repo/{repo_name:path}/file")
+async def get_repo_file(
+    repo_name: str,
+    request: Request,
+    file_path: str,
+    org_id: str = Depends(require_repo_access),
+    user_id: str = Depends(get_user_id),
+):
+    # Reject traversal and .git before touching the workspace or GitHub.
+    get_safe_target_path(_repo_dir_for_request(request, repo_name), file_path)
+    repo_dir = await _ide_read_dir(request, repo_name, org_id, user_id, refresh=False)
+    target_path = get_safe_target_path(repo_dir, file_path)
+    return await asyncio.to_thread(_read_text_file, target_path)
 
 
 # --- Admin Endpoints ---

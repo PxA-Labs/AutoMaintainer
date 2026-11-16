@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from main import app, get_safe_repo_dir, require_repo_access
+from main import app, get_safe_repo_dir, get_user_id, require_repo_access
 
 client = TestClient(app)
 
@@ -35,10 +35,16 @@ def setup_dummy_repo():
 
 @pytest.fixture
 def authorized():
-    """Stand in for a caller who is authenticated and owns the repo."""
+    """Stand in for a caller who is authenticated and owns the repo.
+
+    The read routes also need the caller's user id: each user reads their own
+    view of the repository (#505).
+    """
     app.dependency_overrides[require_repo_access] = lambda: "test-org-id"
+    app.dependency_overrides[get_user_id] = lambda: "test-user-id"
     yield
     app.dependency_overrides.pop(require_repo_access, None)
+    app.dependency_overrides.pop(get_user_id, None)
 
 
 @pytest.fixture
