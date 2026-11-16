@@ -1480,6 +1480,74 @@ async def _llm_or_abort(phase: AgentPhase, system_prompt: str, user_prompt: str)
         ) from e
 
 
+_URL_USERINFO = re.compile(r"(?i)\b(https?://)[^/\s@]+@")
+
+
+def _redact_credentials(text: str, token: Optional[str]) -> str:
+    """``text`` with ``token`` and any ``user:password@`` in URLs masked."""
+    if token:
+        text = text.replace(token, "***")
+    return _URL_USERINFO.sub(r"\1***@", text)
+
+
+async def _sync_clone_or_abort(
+    repo: str, repo_dir: str, run_id: Optional[str], new_logs: list
+) -> None:
+    """Clone or update the run's local working copy of ``repo``.
+
+    Without a usable clone the GitNexus index and AST map would be built from a
+    missing or empty directory and the run would carry on with no codebase
+    context (#138), so a failed first clone ends the run with
+    ``REPO_CLONE_FAILED``. When only the update of an existing clone fails, the
+    cached copy is still a real checkout of the repository; the run continues
+    on it, but visibly (non-fatal ``REPO_SYNC_FAILED``), not just in the worker
+    log.
+
+    The token reaches git through its environment only (workspace.git_auth_env),
+    never a URL or argv. sync_repo_clone checks git's exit code and enforces a
+    timeout; exceptions (git missing, token lookup failing) are handled here,
+    and their text is redacted before it is shown anywhere.
+    """
+    from workspace import sync_repo_clone
+
+    # Checked before syncing: a clone that fails part way can leave a .git
+    # directory behind that must not count as a usable cache.
+    had_clone = os.path.isdir(os.path.join(repo_dir, ".git"))
+    token = None
+    try:
+        token = await asyncio.to_thread(_run_github_token)
+        if await sync_repo_clone(repo, repo_dir, token):
+            return
+        reason = "git failed or timed out"
+    except Exception as e:
+        reason = _redact_credentials(f"{type(e).__name__}: {e}", token)
+
+    if not had_clone:
+        logger.warning("Could not clone %s: %s", repo, reason)
+        raise PipelineAbortError(
+            "REPO_CLONE_FAILED",
+            f"Could not clone {repo} ({reason}); the run needs a working copy "
+            "of the repository.",
+            AgentPhase.ARCHITECT,
+        )
+
+    msg = (
+        f"Could not update the local clone of {repo} ({reason}); using the cached copy."
+    )
+    logger.warning(msg)
+    new_logs.append({"agent": "System", "msg": msg})
+    if run_id:
+        await emit_event(
+            ErrorEvent(
+                run_id=run_id,
+                phase=AgentPhase.ARCHITECT,
+                error_code="REPO_SYNC_FAILED",
+                message=msg,
+                fatal=False,
+            )
+        )
+
+
 async def architect_node(state: AgentState):
     new_logs = []
     repo = state["repo_name"]
@@ -1592,22 +1660,13 @@ async def architect_node(state: AgentState):
 
     # Clone the repo locally and analyze it with GitNexus so the MCP server has data
     import shutil
-    from workspace import get_safe_repo_dir, sync_repo_clone
+    from workspace import get_safe_repo_dir
 
     # Keyed by the repository id when the run has one, exactly as the IDE,
     # file and terminal routes key it, so they read the clone written here.
     repo_dir = str(get_safe_repo_dir(repo, state.get("repository_id")))
 
-    # The token reaches git through its environment only: `clone -c
-    # http.extraheader=...` persisted it in plaintext in .git/config and
-    # exposed it in argv. Exit codes and timeouts are handled in the helper;
-    # on failure we continue with whatever cached clone exists.
-    try:
-        clone_token = await asyncio.to_thread(_run_github_token)
-        if not await sync_repo_clone(repo, repo_dir, clone_token):
-            logger.warning(f"Could not sync clone of {repo}; using cached copy")
-    except Exception as e:
-        logger.warning(f"Failed to sync clone of {repo}, continuing with cache: {e}")
+    await _sync_clone_or_abort(repo, repo_dir, run_id, new_logs)
 
     if not os.path.exists(f"{repo_dir}/.gitnexus"):
         try:

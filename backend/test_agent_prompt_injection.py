@@ -159,7 +159,7 @@ async def test_architect_wraps_readme_and_file_list(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path))
 
     async def fake_exec(*a, **k):
-        p = MagicMock()
+        p = MagicMock(returncode=0)
 
         async def communicate():
             return (b"", b"")
