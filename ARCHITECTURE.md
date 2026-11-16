@@ -157,7 +157,16 @@ resumes as a rejection.
 ### Merge policy
 
 `MERGE_POLICY` (`get_merge_policy`) controls what happens after the
-Maintainer approves a PR:
+Maintainer approves a PR. It is the deployment's **ceiling**: a repository
+can make it stricter (`human` < `ci` < `auto`) through
+`repositories.merge_policy` (NULL inherits), set by org owners and admins in
+the dashboard or with `PUT /repositories/{id}/merge-policy`, which refuses a
+value looser than the ceiling (422). The run uses the stricter of the two,
+read at the merge decision (`backend/merge_policy.py`); if the repository's
+setting cannot be read the run uses `human` and records
+`repository merge policy unreadable (fail closed)`. `merge_decisions.policy`
+is this effective policy, with a `repository policy <p> (ceiling <c>)`
+reason when the repository lowered it:
 
 | Value | Behaviour |
 | --- | --- |

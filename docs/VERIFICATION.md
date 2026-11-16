@@ -54,6 +54,12 @@ cannot let the repository's other CI merge an unverified head. Because the
 status is bound to a SHA, a later push to the branch is never merged on an
 older result.
 
+The policy that gates a run is the **effective** one: `MERGE_POLICY` lowered
+by the repository's own `merge_policy` setting, if it set a stricter one
+(ARCHITECTURE.md, "Merge policy"). A repository set to `ci` under an `auto`
+deployment is gated exactly as described here; one set to `human` never
+merges. If the setting cannot be read the run is treated as `human`.
+
 If the status cannot be posted while `MERGE_POLICY=ci` (GitHub refuses the
 write, or the PR head could not be resolved at all), the run stops with
 `VERIFICATION_STATUS_FAILED`; the PR stays open. Under `human` (the default)
