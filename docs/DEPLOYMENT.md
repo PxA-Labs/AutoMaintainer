@@ -371,9 +371,18 @@ run.
 | Repository: *Pull requests* | write | Open, review and (under `MERGE_POLICY`) merge pull requests. |
 | Repository: *Issues* | write | Open issues and post the Reviewer's decision. |
 | Repository: *Commit statuses* | write | Post the verification status on the agent's commit. |
-| Repository: *Metadata* | read | Mandatory for every App; repository listing for sync. |
+| Repository: *Metadata* | read | Mandatory for every App; repository listing for sync; the trusted-trigger lookups (below). |
 | Repository: *Checks* | read | Optional. Needed only for `MERGE_POLICY=ci`, which reads check runs; without it that merge fails closed. |
 | Organization: *Members* | read | Lets the install callback and `POST /github/installations/claim` confirm that the installing user is an owner of the installing organization. |
+
+The trusted-trigger merge gate (`backend/trust.py`) needs no further
+permission. It resolves each actor's GitHub user id to the current login with
+`GET /user/{account_id}`, which GitHub's "Endpoints available for GitHub App
+installation access tokens" page lists; its "Permissions required for
+GitHub Apps" page does not list it under any permission. It then reads
+`GET /repos/{owner}/{repo}/collaborators/{username}/permission`, listed there
+under *Metadata: read*. If GitHub refuses either call, the PR is held (reason
+`trigger permission check failed`), never merged.
 
 *Workflows* is deliberately not requested, even if the App registration
 grants it. Agent commits and IDE saves that touch `.github/workflows/*` are

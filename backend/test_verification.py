@@ -539,7 +539,16 @@ def _maintainer_setup(monkeypatch, statuses):
     )
     commit.get_check_runs.return_value = []
     repo.get_commit.return_value = commit
-    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+    # ...identified by GitHub user id, which resolves to that login (#491).
+    user = SimpleNamespace(id=4242, login="alice", type="User")
+    monkeypatch.setattr(
+        agents,
+        "gh",
+        MagicMock(
+            get_repo=MagicMock(return_value=repo),
+            get_user_by_id=MagicMock(return_value=user),
+        ),
+    )
     monkeypatch.setattr(
         agents,
         "run_llm_with_tools",
@@ -556,7 +565,7 @@ _STATE = {
     "iteration": 0,
     "idea": "fix calc.py:1-1",
     "target_file_path": "calc.py",
-    "trigger": {"source": "api", "login": "alice"},
+    "trigger": {"source": "api", "login": "alice", "github_id": 4242},
 }
 
 

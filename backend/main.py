@@ -196,22 +196,57 @@ WRITE_ROLES = frozenset({"owner", "admin", "member"})
 ADMIN_ROLES = frozenset({"owner", "admin"})
 
 
+def _github_identity(user):
+    """The user's ``github`` identity, or None."""
+    for identity in getattr(user, "identities", None) or []:
+        if getattr(identity, "provider", None) == "github":
+            return identity
+    return None
+
+
 def github_login_of(user) -> Optional[str]:
     """The GitHub login linked to a Supabase auth user, or None.
 
     Read from the user's ``github`` identity, which Supabase fills from
     GitHub OAuth at sign-in, never from ``user_metadata``, which the user
-    can change through the auth API. It is the actor the trusted-trigger
-    merge gate (trust.py) checks for runs this user starts.
+    can change through the auth API. It is the login as of the last sign-in,
+    so it can be stale; the trusted-trigger gate (trust.py) decides by
+    github_id_of and only logs this one.
     """
-    for identity in getattr(user, "identities", None) or []:
-        if getattr(identity, "provider", None) != "github":
-            continue
-        data = getattr(identity, "identity_data", None) or {}
-        login = data.get("user_name") or data.get("preferred_username")
-        if isinstance(login, str) and login:
-            return login
+    identity = _github_identity(user)
+    data = getattr(identity, "identity_data", None) or {}
+    login = data.get("user_name") or data.get("preferred_username")
+    return login if isinstance(login, str) and login else None
+
+
+def _numeric_id(value) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value) or None
     return None
+
+
+def github_id_of(user) -> Optional[int]:
+    """The numeric GitHub user id linked to a Supabase auth user, or None.
+
+    Supabase Auth (GoTrue) keys an identity by ``provider_id``, which its
+    GitHub provider sets to the GitHub user id (the ``sub`` claim) and
+    exposes as the identity's ``id``; ``identity_data.sub`` holds the same
+    value. Neither can be changed through the auth API (``user_metadata``
+    can, so it is never read). Unlike the login, the id survives a rename;
+    the trusted-trigger gate (trust.py) checks the caller by it.
+    """
+    identity = _github_identity(user)
+    if identity is None:
+        return None
+    found = _numeric_id(getattr(identity, "id", None))
+    if found is None:
+        data = getattr(identity, "identity_data", None) or {}
+        found = _numeric_id(data.get("sub"))
+    return found
 
 
 # --- Dependency: Get current user/org from Supabase Auth ---
@@ -277,6 +312,7 @@ async def get_current_user(
         "role": role,
         "email": user.email,
         "github_login": github_login_of(user),
+        "github_id": github_id_of(user),
     }
 
 
@@ -822,6 +858,7 @@ async def start_agents(
                 "target_issue_number": req.target_issue,
                 "mode": req.mode,
                 "trigger_login": user.get("github_login"),
+                "trigger_github_id": user.get("github_id"),
                 "trigger_source": "api",
             },
             queue="agent_runs",

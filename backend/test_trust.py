@@ -1,9 +1,14 @@
 """#487: an automatic merge (MERGE_POLICY=ci or auto) needs a trusted trigger.
 
-The run's trigger (the API caller's linked GitHub login, plus the author of a
-targeted issue) must have write, maintain or admin permission on the
+The run's trigger (the API caller's linked GitHub account, plus the author of
+a targeted issue) must have write, maintain or admin permission on the
 repository, looked up deterministically through the run's GitHub client.
 Anything else, including a failed lookup, holds the PR for a human.
+
+#491: every actor is identified by its numeric GitHub user id, resolved to
+its current login (GET /user/{account_id}) before the permission lookup, so a
+stale stored login (renamed account, freed and re-registered name) cannot
+decide.
 """
 
 from types import SimpleNamespace
@@ -20,20 +25,24 @@ import tasks
 import trust
 from events import NullEmitter
 from test_agent_idempotency import RUN_ID, WRITER, WorkerCrash, world  # noqa: F401
-from test_agent_idempotency import _run
+from test_agent_idempotency import FakeUsers, _run, user_id
 from test_agent_merge_policy import VERIFIED, _setup, _state
 
 # --- trust.check_trigger -----------------------------------------------------------
 
 
 class PermRepo:
-    """The collaborator-permission and issue endpoints of a repository."""
+    """The collaborator-permission and issue endpoints of a repository, plus
+    the run client's GET /user/{account_id} (``users``)."""
 
-    def __init__(self, permissions=None, issue_user=None, issue_error=None):
+    def __init__(
+        self, permissions=None, issue_user=None, issue_error=None, logins=None
+    ):
         self.permissions = permissions or {}
         self.lookups = []
         self.issue_user = issue_user
         self.issue_error = issue_error
+        self.users = FakeUsers(logins)
 
     def get_collaborator_permission(self, login):
         self.lookups.append(login)
@@ -48,15 +57,25 @@ class PermRepo:
         return SimpleNamespace(number=number, user=self.issue_user)
 
 
-def _api(login):
-    return {"source": "api", "login": login}
+def _api(login, github_id=None):
+    if github_id is None and isinstance(login, str) and login:
+        github_id = user_id(login)
+    return {"source": "api", "login": login, "github_id": github_id}
+
+
+def _check(repo, trigger, target_issue=None):
+    return trust.check_trigger(repo, trigger, target_issue, repo.users)
+
+
+def _author(login, kind="User"):
+    return SimpleNamespace(id=user_id(login), login=login, type=kind)
 
 
 @pytest.mark.parametrize("permission", ["admin", "write"])
 def test_writer_trigger_is_trusted(permission):
     repo = PermRepo({"ann": permission})
 
-    found = trust.check_trigger(repo, _api("ann"), None)
+    found = _check(repo, _api("ann"))
 
     assert found.trusted is True
     assert found.reason == merge_audit.REASON_TRUSTED_TRIGGER
@@ -65,7 +84,7 @@ def test_writer_trigger_is_trusted(permission):
 
 @pytest.mark.parametrize("permission", ["read", "none", "triage", "", None])
 def test_reader_or_outsider_trigger_is_untrusted(permission):
-    found = trust.check_trigger(PermRepo({"eve": permission}), _api("eve"), None)
+    found = _check(PermRepo({"eve": permission}), _api("eve"))
 
     assert found.trusted is False
     assert found.reason == merge_audit.REASON_UNTRUSTED_TRIGGER
@@ -88,7 +107,7 @@ def test_reader_or_outsider_trigger_is_untrusted(permission):
 def test_unknown_bot_or_malformed_trigger_is_untrusted_without_a_lookup(trigger):
     repo = PermRepo({"ann": "admin", "dependabot[bot]": "admin"})
 
-    found = trust.check_trigger(repo, trigger, None)
+    found = _check(repo, trigger)
 
     assert found.trusted is False
     assert found.reason == merge_audit.REASON_UNTRUSTED_TRIGGER
@@ -98,7 +117,7 @@ def test_unknown_bot_or_malformed_trigger_is_untrusted_without_a_lookup(trigger)
 def test_non_collaborator_404_is_untrusted():
     repo = PermRepo({"eve": GithubException(404, {"message": "Not Found"}, None)})
 
-    found = trust.check_trigger(repo, _api("eve"), None)
+    found = _check(repo, _api("eve"))
 
     assert (found.trusted, found.reason) == (False, "untrusted trigger")
 
@@ -112,7 +131,7 @@ def test_non_collaborator_404_is_untrusted():
     ],
 )
 def test_failed_permission_lookup_fails_closed(error):
-    found = trust.check_trigger(PermRepo({"ann": error}), _api("ann"), None)
+    found = _check(PermRepo({"ann": error}), _api("ann"))
 
     assert found.trusted is False
     assert found.reason == merge_audit.REASON_TRIGGER_CHECK_FAILED
@@ -122,10 +141,10 @@ def test_targeted_issue_by_an_outsider_is_untrusted_even_for_a_writer_caller():
     """The issue body is the task the models follow."""
     repo = PermRepo(
         {"ann": "write", "eve": "read"},
-        issue_user=SimpleNamespace(login="eve", type="User"),
+        issue_user=_author("eve"),
     )
 
-    found = trust.check_trigger(repo, _api("ann"), 12)
+    found = _check(repo, _api("ann"), 12)
 
     assert found.trusted is False
     assert found.reason == merge_audit.REASON_UNTRUSTED_TRIGGER
@@ -133,11 +152,9 @@ def test_targeted_issue_by_an_outsider_is_untrusted_even_for_a_writer_caller():
 
 
 def test_targeted_issue_by_a_writer_is_trusted_with_one_lookup_per_login():
-    repo = PermRepo(
-        {"ann": "write"}, issue_user=SimpleNamespace(login="ann", type="User")
-    )
+    repo = PermRepo({"ann": "write"}, issue_user=_author("ann"))
 
-    found = trust.check_trigger(repo, _api("ann"), 12)
+    found = _check(repo, _api("ann"), 12)
 
     assert found.trusted is True
     assert repo.lookups == ["ann"]
@@ -146,10 +163,10 @@ def test_targeted_issue_by_a_writer_is_trusted_with_one_lookup_per_login():
 def test_targeted_issue_by_a_bot_is_untrusted():
     repo = PermRepo(
         {"ann": "write", "evil[bot]": "admin"},
-        issue_user=SimpleNamespace(login="evil[bot]", type="Bot"),
+        issue_user=_author("evil[bot]", "Bot"),
     )
 
-    found = trust.check_trigger(repo, _api("ann"), 12)
+    found = _check(repo, _api("ann"), 12)
 
     assert (found.trusted, found.reason) == (False, "untrusted trigger")
 
@@ -159,9 +176,134 @@ def test_unreadable_issue_author_fails_closed():
         {"ann": "write"}, issue_error=GithubException(502, {"message": "x"}, None)
     )
 
-    found = trust.check_trigger(repo, _api("ann"), 12)
+    found = _check(repo, _api("ann"), 12)
 
     assert (found.trusted, found.reason) == (False, "trigger permission check failed")
+
+
+# --- #491: actors are checked by GitHub user id ----------------------------------
+
+
+def test_renamed_account_is_checked_under_its_current_login(caplog):
+    """The stored login is stale: the id now resolves to a new login, which
+    has write. The permission is looked up for the new login."""
+    ann = user_id("ann")
+    repo = PermRepo({"ann-renamed": "write"}, logins={ann: "ann-renamed"})
+
+    with caplog.at_level("INFO", logger="trust"):
+        found = _check(repo, _api("ann", ann))
+
+    assert found.trusted is True
+    assert repo.users.lookups == [ann]
+    assert repo.lookups == ["ann-renamed"]
+    assert "ann-renamed" in found.detail
+    assert "now ann-renamed" in caplog.text and "'ann'" in caplog.text
+
+
+def test_stored_login_now_owned_by_another_account_is_not_trusted():
+    """The caller signed in as "ann", then renamed; "ann" now belongs to a
+    different account that has write. The caller's id resolves to its new
+    login, an outsider, and "ann" is never looked up."""
+    caller = user_id("mallory")
+    repo = PermRepo({"ann": "write", "mallory": "read"}, logins={caller: "mallory"})
+
+    found = _check(repo, _api("ann", caller))
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+    assert repo.lookups == ["mallory"]
+    assert "mallory has read permission" in found.detail
+
+
+@pytest.mark.parametrize("github_id", [None, 0, -1, True, "1001", 1.5, [1001]])
+def test_trigger_without_a_valid_github_id_is_untrusted_without_a_lookup(github_id):
+    """A message queued before #491 (login only) or an identity without an
+    id: the login of a writer is not enough."""
+    repo = PermRepo({"ann": "admin"})
+    trigger = {"source": "api", "login": "ann", "github_id": github_id}
+
+    found = _check(repo, trigger)
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+    assert repo.users.lookups == [] and repo.lookups == []
+    assert "'ann' has no GitHub user id" in found.detail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GithubException(403, {"message": "Resource not accessible"}, None),
+        GithubException(502, {"message": "Bad gateway"}, None),
+        ConnectionError("network down"),
+    ],
+)
+def test_failed_user_id_lookup_fails_closed(error):
+    ann = user_id("ann")
+    repo = PermRepo({"ann": "write"}, logins={ann: error})
+
+    found = _check(repo, _api("ann", ann))
+
+    assert (found.trusted, found.reason) == (False, "trigger permission check failed")
+    assert repo.lookups == []
+    assert f"GitHub user {ann}" in found.detail
+
+
+def test_deleted_account_is_untrusted():
+    repo = PermRepo({"ghost": "write"})
+
+    found = _check(repo, _api("ghost", 987654321))
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+    assert repo.lookups == []
+
+
+def test_user_id_resolving_to_a_bot_is_untrusted():
+    bot = user_id("helper-bot")
+    repo = PermRepo({"helper-bot": "admin"})
+    repo.users.get_user_by_id = lambda i: SimpleNamespace(
+        id=i, login="helper-bot", type="Bot"
+    )
+
+    found = _check(repo, _api("helper-bot", bot))
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+    assert repo.lookups == []
+
+
+def test_issue_author_is_checked_by_id():
+    """The issue author's id decides, like the caller's: an author whose id
+    now resolves to an outsider is not trusted under the login on the
+    issue."""
+    author = user_id("bo")
+    repo = PermRepo(
+        {"ann": "write", "bo": "write", "bo-renamed": "none"},
+        issue_user=SimpleNamespace(id=author, login="bo", type="User"),
+        logins={author: "bo-renamed"},
+    )
+
+    found = _check(repo, _api("ann"), 12)
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+    assert repo.lookups == ["ann", "bo-renamed"]
+
+
+def test_issue_author_without_an_id_is_untrusted():
+    repo = PermRepo(
+        {"ann": "write"}, issue_user=SimpleNamespace(login="ann", type="User")
+    )
+
+    found = _check(repo, _api("ann"), 12)
+
+    assert (found.trusted, found.reason) == (False, "untrusted trigger")
+
+
+def test_caller_who_wrote_the_issue_is_looked_up_once():
+    repo = PermRepo({"ann": "write"}, issue_user=_author("ann"))
+
+    found = _check(repo, _api("ann"), 12)
+
+    assert found.trusted is True
+    assert repo.users.lookups == [user_id("ann")]
+    assert repo.lookups == ["ann"]
 
 
 # --- The gate in maintainer_node -----------------------------------------------------
@@ -189,10 +331,11 @@ def _green(monkeypatch, policy):
     [
         ("eve", "read", "untrusted trigger"),
         (None, None, "untrusted trigger"),
+        ("login-only", "write", "untrusted trigger"),
         ("ann", GithubException(500, {}, None), "trigger permission check failed"),
         ("ann", RuntimeError("timeout"), "trigger permission check failed"),
     ],
-    ids=["reader", "unknown", "http-error", "client-error"],
+    ids=["reader", "unknown", "no-github-id", "http-error", "client-error"],
 )
 async def test_untrusted_or_unverifiable_trigger_holds_the_pr(
     monkeypatch, recorded, policy, login, permission, reason
@@ -204,9 +347,14 @@ async def test_untrusted_or_unverifiable_trigger_holds_the_pr(
         else permission
     )
 
-    result = await agents.maintainer_node(
-        {**_state(), "trigger": {"source": "api", "login": login}}
+    # "login-only": a writer's login without a GitHub user id (#491).
+    trigger = (
+        {"source": "api", "login": WRITER_LOGIN}
+        if login == "login-only"
+        else _api(login)
     )
+
+    result = await agents.maintainer_node({**_state(), "trigger": trigger})
 
     pr.merge.assert_not_called()
     assert result["merge_status"] == "awaiting_human_review"
@@ -406,8 +554,8 @@ async def test_writer_triggered_run_merges_under_auto(world, monkeypatch):  # no
 # --- Carrying the trigger from /start to the graph -----------------------------------
 
 
-def _identity(provider, **data):
-    return SimpleNamespace(provider=provider, identity_data=data)
+def _identity(provider, id=None, **data):
+    return SimpleNamespace(provider=provider, id=id, identity_data=data)
 
 
 @pytest.mark.parametrize(
@@ -429,6 +577,53 @@ def test_github_login_comes_from_the_github_identity(identities, login):
         identities=identities, user_metadata={"user_name": "spoofed-admin"}
     )
     assert main.github_login_of(user) == login
+
+
+@pytest.mark.parametrize(
+    "identities, github_id",
+    [
+        # GoTrue exposes the identity's provider_id (GitHub's user id) as id.
+        ([_identity("github", id="583231", user_name="ann")], 583231),
+        # ...and identity_data.sub holds the same value.
+        ([_identity("github", sub="583231")], 583231),
+        ([_identity("github", id="583231", sub="1")], 583231),
+        (
+            [_identity("google", id="77", sub="77"), _identity("github", id="9")],
+            9,
+        ),
+        ([_identity("github", id="not-a-number", sub="12")], 12),
+        ([_identity("github", id="-5")], None),
+        ([_identity("github", id="0")], None),
+        ([_identity("github", user_name="ann")], None),
+        ([_identity("google", id="77")], None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_github_id_comes_from_the_github_identity(identities, github_id):
+    user = SimpleNamespace(
+        identities=identities,
+        user_metadata={"sub": "1", "provider_id": "1", "user_name": "spoofed"},
+    )
+    assert main.github_id_of(user) == github_id
+
+
+def test_current_user_carries_the_github_id(monkeypatch):
+    from test_authz import supabase_with_members
+
+    member = {"user_id": "u1", "org_id": "org-1", "role": "member", "joined_at": "t"}
+    sb = supabase_with_members([member])
+    sb.auth.get_user.return_value.user.identities = [
+        _identity("github", id="583231", user_name="ann")
+    ]
+    monkeypatch.setattr(agents, "supabase", sb)
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+
+    import asyncio
+
+    user = asyncio.run(main.get_current_user(authorization="Bearer tok"))
+
+    assert (user["github_id"], user["github_login"]) == (583231, "ann")
 
 
 def test_start_queues_the_callers_github_login_as_the_trigger(monkeypatch):
@@ -454,6 +649,7 @@ def test_start_queues_the_callers_github_login_as_the_trigger(monkeypatch):
             "role": "member",
             "email": "e",
             "github_login": "ann",
+            "github_id": 583231,
         }
 
     main.app.dependency_overrides[main.get_current_user] = user
@@ -467,6 +663,7 @@ def test_start_queues_the_callers_github_login_as_the_trigger(monkeypatch):
     assert response.status_code == 200, response.text
     kwargs = task.apply_async.call_args.kwargs["kwargs"]
     assert kwargs["trigger_login"] == "ann"
+    assert kwargs["trigger_github_id"] == 583231
     assert kwargs["trigger_source"] == "api"
     assert kwargs["target_issue_number"] == 5
 
@@ -500,9 +697,11 @@ def test_worker_passes_the_trigger_to_the_run(monkeypatch):
         github_installation_id=7,
         trigger_login="ann",
         trigger_source="api",
+        trigger_github_id=583231,
     )
 
     assert seen["trigger_login"] == "ann" and seen["trigger_source"] == "api"
+    assert seen["trigger_github_id"] == 583231
 
 
 def test_task_without_a_trigger_runs_with_an_unknown_one(monkeypatch):
@@ -526,6 +725,32 @@ def test_task_without_a_trigger_runs_with_an_unknown_one(monkeypatch):
         },
     )
     assert seen["trigger_login"] is None and seen["trigger_source"] is None
+    assert seen["trigger_github_id"] is None
+
+
+def test_worker_accepts_a_message_queued_before_the_github_id(monkeypatch):
+    """A message queued by an API without #491 has no trigger_github_id
+    kwarg: the task still runs it, with no id (so it is never auto-merged)."""
+    seen = {}
+
+    def execute(task, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(tasks, "_execute_agent_run", execute)
+    tasks.run_agent_loop_task(
+        "run-1",
+        "o/r",
+        "org-1",
+        "u",
+        1,
+        7,
+        target_issue_number=None,
+        mode="autonomous",
+        trigger_login="ann",
+        trigger_source="api",
+    )
+
+    assert seen["trigger_login"] == "ann" and seen["trigger_github_id"] is None
 
 
 async def test_run_agent_loop_puts_the_trigger_in_graph_state(monkeypatch):
@@ -546,10 +771,11 @@ async def test_run_agent_loop_puts_the_trigger_in_graph_state(monkeypatch):
         emitter=NullEmitter(),
         trigger_login="ann",
         trigger_source="api",
+        trigger_github_id=583231,
     )
     await agents.run_agent_loop("o/r", run_id="r2", emitter=NullEmitter())
 
     assert seen == [
-        {"source": "api", "login": "ann"},
-        {"source": None, "login": None},
+        {"source": "api", "login": "ann", "github_id": 583231},
+        {"source": None, "login": None, "github_id": None},
     ]

@@ -1170,9 +1170,10 @@ class AgentState(TypedDict):
     # workspace.get_safe_repo_dir.
     repository_id: Optional[int]
     target_issue: int | None
-    # Who caused the run: {"source": "api", "login": <GitHub login or None>}.
-    # Set once by run_agent_loop and never written by a node; the merge gate
-    # (trust.py) checks it before any automatic merge.
+    # Who caused the run: {"source": "api", "github_id": <GitHub user id or
+    # None>, "login": <login stored with it, or None>}. Set once by
+    # run_agent_loop and never written by a node; the merge gate (trust.py)
+    # checks the id (resolved to its current login) before any automatic merge.
     trigger: Optional[dict]
     architect_directive: str
     idea: str
@@ -3077,6 +3078,7 @@ async def _trigger_trust(gh_repo, state):
             gh_repo,
             state.get("trigger"),
             state.get("target_issue"),
+            gh,
         )
     if cache is not None:
         cache["result"] = result
@@ -3525,14 +3527,16 @@ async def run_agent_loop(
     repository_id: Optional[int] = None,
     trigger_login: Optional[str] = None,
     trigger_source: Optional[str] = None,
+    trigger_github_id: Optional[int] = None,
 ):
     """Run the agent graph for ``repo_name``.
 
-    ``trigger_login`` is the GitHub login of whoever caused the run and
-    ``trigger_source`` how (``api`` for POST /start). Under MERGE_POLICY=ci or
-    auto the PR is merged only when that login (and the author of
+    ``trigger_github_id`` is the numeric GitHub user id of whoever caused the
+    run, ``trigger_login`` the login stored with it and ``trigger_source``
+    how (``api`` for POST /start). Under MERGE_POLICY=ci or auto the PR is
+    merged only when that user's current login (and the author of
     ``target_issue``, if any) can write to the repository (trust.py); without
-    a login nothing is merged automatically.
+    an id nothing is merged automatically.
 
     ``github_installation_id`` is the GitHub App installation of the
     repository (``repositories.github_installation_id``); every GitHub call of
@@ -3614,7 +3618,11 @@ async def run_agent_loop(
         "repo_name": repo_name,
         "repository_id": repository_id,
         "target_issue": target_issue,
-        "trigger": {"source": trigger_source, "login": trigger_login},
+        "trigger": {
+            "source": trigger_source,
+            "login": trigger_login,
+            "github_id": trigger_github_id,
+        },
         "architect_directive": "",
         "idea": "",
         "pm_decision": "",
