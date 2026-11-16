@@ -1046,6 +1046,125 @@ async def list_run_merge_decisions(
     return {"run_id": run_key, "decisions": result.data or []}
 
 
+# --- Per-repository merge policy (epic #411, merge_policy.py) ---------------
+from typing import Literal as _Literal  # noqa: E402
+
+
+class MergePolicyUpdate(BaseModel):
+    # Required (no default); null means "inherit MERGE_POLICY".
+    merge_policy: Optional[_Literal["human", "ci", "auto"]]
+
+
+async def _org_repository(sb, repository_id: int, org_id: str) -> dict:
+    """The caller's org's repositories row (id, full_name, merge_policy), or
+    404 -- another org's repository is indistinguishable from a missing one."""
+    found = await asyncio.to_thread(
+        lambda: sb.table("repositories")
+        .select("id, full_name, merge_policy")
+        .eq("id", repository_id)
+        .eq("org_id", org_id)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    repository = _row_or_none(found)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    return repository
+
+
+def _merge_policy_view(repository: dict, role: Optional[str]) -> dict:
+    import merge_policy
+
+    ceiling = merge_policy.deployment_ceiling()
+    setting = repository.get("merge_policy")
+    return {
+        "repository_id": repository["id"],
+        "full_name": repository.get("full_name"),
+        "setting": setting,
+        "ceiling": ceiling,
+        "effective": merge_policy.effective(ceiling, setting),
+        "allowed": merge_policy.allowed_settings(ceiling),
+        "can_edit": role in ADMIN_ROLES,
+    }
+
+
+@app.get("/repositories/{repository_id}/merge-policy")
+async def get_repository_merge_policy(
+    repository_id: int, user: dict = Depends(get_current_user)
+):
+    """A repository's merge policy: its stored setting (null = inherit), the
+    deployment ceiling (MERGE_POLICY), the effective policy and the settings
+    an admin may choose. Any member of the repository's org may read it."""
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    repository = await _org_repository(sb, repository_id, user["org_id"])
+    return _merge_policy_view(repository, user.get("role"))
+
+
+@app.put("/repositories/{repository_id}/merge-policy")
+async def put_repository_merge_policy(
+    repository_id: int,
+    payload: MergePolicyUpdate,
+    user: dict = Depends(get_current_user),
+):
+    """Set a repository's merge policy (org owners and admins only). A
+    repository may only be stricter than or equal to MERGE_POLICY: a looser
+    value is refused with 422 instead of being stored as an intent that never
+    takes effect. Written with the service role; clients cannot write the
+    column themselves (RLS, migration *_repository_merge_policy.sql)."""
+    import merge_policy
+
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    # Checked before the lookup, so a non-admin learns nothing about ids.
+    if user.get("role") not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization owners and admins can change the merge policy",
+        )
+    org_id = user["org_id"]
+    await _org_repository(sb, repository_id, org_id)
+
+    ceiling = merge_policy.deployment_ceiling()
+    if not merge_policy.is_allowed(payload.merge_policy, ceiling):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"merge_policy {payload.merge_policy!r} is looser than this "
+                f"deployment's MERGE_POLICY ({ceiling}); allowed: "
+                + ", ".join(merge_policy.allowed_settings(ceiling))
+                + " or null (inherit)"
+            ),
+        )
+
+    updated = await asyncio.to_thread(
+        lambda: sb.table("repositories")
+        .update({"merge_policy": payload.merge_policy})
+        .eq("id", repository_id)
+        .eq("org_id", org_id)
+        .execute()
+    )
+    rows = getattr(updated, "data", None)
+    if not isinstance(rows, list) or not rows:
+        # Deleted between the lookup and the update.
+        raise HTTPException(status_code=404, detail="Repository not found")
+    logger.info(
+        "Merge policy of repository %s in org %s set to %s by user %s",
+        repository_id,
+        org_id,
+        payload.merge_policy or "inherit",
+        user.get("user_id"),
+    )
+    return _merge_policy_view(rows[0], user.get("role"))
+
+
 @app.post("/stop")
 async def stop_agents(
     req: Optional[StopRequest] = None,

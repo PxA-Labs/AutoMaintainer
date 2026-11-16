@@ -2392,7 +2392,7 @@ async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: st
     else:
         status_error = "the PR head commit could not be resolved"
     if status_error is not None:
-        if get_merge_policy() == "ci":
+        if (await _effective_merge_policy()).policy == "ci":
             raise PipelineAbortError(
                 "VERIFICATION_STATUS_FAILED",
                 f"Could not record the verification status on PR #{pr_number}: "
@@ -2526,7 +2526,7 @@ async def _refuse_protected_change(
             pr,
             pr_number,
             iteration,
-            get_merge_policy(),
+            (await _effective_merge_policy()).policy,
             merge_audit.HELD,
             merge_audit.ACTOR_POLICY,
             [merge_audit.REASON_CHANGE_LIMITS, merge_audit.REASON_NOT_COMMITTED],
@@ -2874,17 +2874,33 @@ async def implementer_node(state: AgentState):
 #                     head passed, at least one check exists and the
 #                     automaintainer/verification status is present and green.
 #   auto            - legacy behaviour: merge on approval alone.
+# MERGE_POLICY is the deployment's ceiling; a repository can only tighten it
+# (repositories.merge_policy, merge_policy.py). _effective_merge_policy() is
+# what a run acts on.
 MERGE_POLICIES = ("human", "ci", "auto")
 MAX_REVIEW_DIFF_CHARS = 20000
 _PASSING_CHECK_STATES = {"success", "neutral", "skipped"}
 
 
 def get_merge_policy() -> str:
-    policy = (os.getenv("MERGE_POLICY") or "human").strip().lower()
-    if policy not in MERGE_POLICIES:
-        logger.warning("Unknown MERGE_POLICY %r; falling back to 'human'.", policy)
-        return "human"
-    return policy
+    """The deployment ceiling: MERGE_POLICY, unknown values mean human."""
+    import merge_policy
+
+    return merge_policy.deployment_ceiling()
+
+
+async def _effective_merge_policy():
+    """The merge_policy.Resolution of the current run: the stricter of
+    MERGE_POLICY and its repository's setting, read now. Never raises; an
+    unreadable setting means human for the run (fail closed)."""
+    import merge_policy
+
+    return await asyncio.to_thread(
+        merge_policy.resolve_for_run,
+        supabase,
+        current_run_id.get(None),
+        get_merge_policy(),
+    )
 
 
 _NO_PATCH_NOTE = "(binary file or diff too large to display)"
@@ -3275,7 +3291,12 @@ async def maintainer_node(state: AgentState):
                     )
                 )
 
-        policy = get_merge_policy()
+        # The effective policy (merge_policy.py): MERGE_POLICY lowered by the
+        # repository's setting, or human when that cannot be read. It is what
+        # merge_decisions.policy records; policy_reasons say why it is below
+        # MERGE_POLICY.
+        resolution = await _effective_merge_policy()
+        policy, policy_reasons = resolution.policy, list(resolution.reasons)
         if not is_approved:
             await _record_merge_decision(
                 pr,
@@ -3292,7 +3313,10 @@ async def maintainer_node(state: AgentState):
             head_sha = pr.head.sha
             should_merge, reason = policy == "auto", "MERGE_POLICY=auto"
             # Audit reasons (merge_audit.py), in the order the gates ran.
-            audit_reasons = ["maintainer approved", f"policy {policy}"]
+            audit_reasons = [
+                "maintainer approved",
+                f"policy {policy}",
+            ] + policy_reasons
             if policy == "ci":
                 should_merge, reason = _ci_checks_passed(gh_repo, head_sha)
                 audit_reasons.append(
@@ -3374,11 +3398,10 @@ async def maintainer_node(state: AgentState):
                 await record("held")
                 merge_status = "awaiting_human_review"
                 reviewers = _request_human_review(gh_repo, pr, issue_number)
-                why = (
-                    "MERGE_POLICY=human"
-                    if policy == "human"
-                    else f"not auto-merged: {reason}"
-                )
+                if policy == "human":
+                    why = policy_reasons[0] if policy_reasons else "MERGE_POLICY=human"
+                else:
+                    why = f"not auto-merged: {reason}"
                 new_logs.append(
                     {
                         "agent": "System",

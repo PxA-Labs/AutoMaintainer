@@ -166,6 +166,31 @@
         "title": "InstallationClaimRequest",
         "type": "object"
       },
+      "MergePolicyUpdate": {
+        "properties": {
+          "merge_policy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "human",
+                  "ci",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merge Policy"
+          }
+        },
+        "required": [
+          "merge_policy"
+        ],
+        "title": "MergePolicyUpdate",
+        "type": "object"
+      },
       "ProposeChangesRequest": {
         "properties": {
           "changes": {
@@ -1120,6 +1145,122 @@
           }
         },
         "summary": "Get Repo Tree"
+      }
+    },
+    "/repositories/{repository_id}/merge-policy": {
+      "get": {
+        "description": "A repository's merge policy: its stored setting (null = inherit), the\ndeployment ceiling (MERGE_POLICY), the effective policy and the settings\nan admin may choose. Any member of the repository's org may read it.",
+        "operationId": "get_repository_merge_policy_repositories__repository_id__merge_policy_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Repository Merge Policy"
+      },
+      "put": {
+        "description": "Set a repository's merge policy (org owners and admins only). A\nrepository may only be stricter than or equal to MERGE_POLICY: a looser\nvalue is refused with 422 instead of being stored as an intent that never\ntakes effect. Written with the service role; clients cannot write the\ncolumn themselves (RLS, migration *_repository_merge_policy.sql).",
+        "operationId": "put_repository_merge_policy_repositories__repository_id__merge_policy_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergePolicyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Repository Merge Policy"
       }
     },
     "/runs": {
