@@ -2837,6 +2837,41 @@ def _merge_pr(pr, pr_number: int, head_sha: str) -> None:
         )
 
 
+async def _record_merge_decision(
+    pr,
+    pr_number: int,
+    iteration: int,
+    policy: str,
+    decision: str,
+    actor: str,
+    reasons: list[str],
+    verification: Optional[dict],
+    head_sha: Optional[str] = None,
+) -> None:
+    """Write the merge_decisions audit row of a decision on ``pr``
+    (merge_audit.py). Best effort: record_decision never raises and its
+    outcome changes nothing. ``actor`` "agent" is the Maintainer's verdict."""
+    import merge_audit
+
+    if head_sha is None:
+        head_sha = getattr(getattr(pr, "head", None), "sha", None)
+    await asyncio.to_thread(
+        merge_audit.record_decision,
+        supabase,
+        current_run_id.get(None),
+        pr_number=pr_number,
+        head_sha=head_sha if isinstance(head_sha, str) else "",
+        iteration=iteration,
+        policy=policy,
+        decision=decision,
+        actor=actor,
+        actor_role="Maintainer" if actor == merge_audit.ACTOR_AGENT else None,
+        reasons=list(reasons),
+        pr_url=getattr(pr, "html_url", None),
+        verification=verification,
+    )
+
+
 MAINTAINER_VERIFICATION_INSTRUCTIONS = (
     "The review includes the result of running the repository's tests on the "
     "pushed head. Its status line is set by AutoMaintainer; the command, "
@@ -3027,30 +3062,76 @@ async def maintainer_node(state: AgentState):
                     )
                 )
 
-        if is_approved:
-            policy = get_merge_policy()
+        policy = get_merge_policy()
+        if not is_approved:
+            await _record_merge_decision(
+                pr,
+                pr_number,
+                iteration,
+                policy,
+                "not_merged",
+                "agent",
+                ["maintainer rejected"]
+                + (["maintainer reply invalid (fail closed)"] if parse_error else []),
+                state.get("verification"),
+            )
+        else:
             head_sha = pr.head.sha
             should_merge, reason = policy == "auto", "MERGE_POLICY=auto"
+            # Audit reasons (merge_audit.py), in the order the gates ran.
+            audit_reasons = ["maintainer approved", f"policy {policy}"]
             if policy == "ci":
                 should_merge, reason = _ci_checks_passed(gh_repo, head_sha)
+                audit_reasons.append(
+                    (
+                        "ci checks passed: "
+                        if should_merge
+                        else "ci status not success: "
+                    )
+                    + reason
+                )
             if should_merge and not commented:
                 # Never merge a change whose review is not visible on the PR.
                 should_merge, reason = False, "the review comment could not be posted"
+                audit_reasons.append("review comment not posted")
             if should_merge and _review_diff_incomplete(diff_text):
                 # The Maintainer approved a change it did not see in full.
                 should_merge, reason = False, "the reviewed diff was incomplete"
+                audit_reasons.append("reviewed diff incomplete")
             if should_merge and (
                 state.get("change_limit_violations")
                 or checkpoint.get("change_limit_violations")
             ):
                 # change_limits.py: over-limit changes are for a human only.
                 should_merge, reason = False, "the change exceeds the change limits"
+                audit_reasons.append("change limits exceeded")
+
+            async def record(decision: str) -> None:
+                await _record_merge_decision(
+                    pr,
+                    pr_number,
+                    iteration,
+                    policy,
+                    decision,
+                    "policy",
+                    audit_reasons,
+                    state.get("verification"),
+                    head_sha=head_sha,
+                )
 
             if should_merge:
                 # An earlier attempt may have merged and crashed before saving
                 # its checkpoint; merging again would fail the run.
                 if getattr(pr, "merged", None) is not True:
-                    _merge_pr(pr, pr_number, head_sha)
+                    try:
+                        _merge_pr(pr, pr_number, head_sha)
+                    except PipelineAbortError:
+                        audit_reasons.append("github did not merge the pr")
+                        await record("not_merged")
+                        raise
+                else:
+                    audit_reasons.append("already merged by an earlier attempt")
+                await record("merged")
                 merge_status = "merged"
                 new_logs.append(
                     {
@@ -3069,6 +3150,7 @@ async def maintainer_node(state: AgentState):
                     }
                 )
             else:
+                await record("held")
                 merge_status = "awaiting_human_review"
                 reviewers = _request_human_review(gh_repo, pr, issue_number)
                 why = (
