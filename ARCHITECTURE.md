@@ -163,12 +163,34 @@ Maintainer approves a PR:
 | --- | --- |
 | `human` (default; also used for unknown values) | Never merges. Leaves the PR open with `merge_status=awaiting_human_review` and requests a review from the issue's assignees, or from the repository owner if it is a user account. |
 | `ci` | Merges only if the `automaintainer/verification` commit status on the PR head is `success` (see [Verification](#verification)) **and** every other commit status and check run is in a passing state (`success`, `neutral` or `skipped`, see `_PASSING_CHECK_STATES`). The check runs once, right after the review, so pending checks block the merge. Without a sandbox (and without `VERIFY_ALLOW_LOCAL=true`) verification reports an error, so `ci` never merges. |
-| `auto` | Merges on the Maintainer's approval alone. Not recommended. |
+| `auto` | Merges on the Maintainer's approval alone (and a trusted trigger, below). Not recommended. |
 
-Under `ci` and `auto`, the merge is also skipped in two cases: the review
-comment could not be posted, or the diff the Maintainer saw was incomplete
-(truncated, or a file without a patch). The merge pins the reviewed head SHA,
-so GitHub refuses it if the branch moved after the review.
+Under `ci` and `auto`, the merge is also skipped when the review comment could
+not be posted, when the diff the Maintainer saw was incomplete (truncated, or
+a file without a patch), when the change exceeds the change limits, and when
+the run's trigger is not trusted (`backend/trust.py`, #487). The last gate is
+deterministic and runs after everything a model decided: every GitHub user who
+caused the run must have `write`, `maintain` or `admin` permission on the
+repository (`GET /repos/{owner}/{repo}/collaborators/{username}/permission`,
+through the run's installation-scoped client, looked up once per run). For a
+run started with `POST /start` that is the caller's linked GitHub login (from
+their Supabase GitHub identity) and, when the run targets an issue, that
+issue's author too, because the issue body is the task the models follow.
+There is no webhook-started run. An unknown login (no linked GitHub identity,
+e.g. the dev-auth bypass), a bot account (there is no bot allowlist), a
+non-collaborator or a failed lookup holds the PR with
+`merge_status=awaiting_human_review`, like `human`. The gate vouches for who
+caused the run, not for repository content it reads (README, code comments),
+which only a writer can change. The merge pins the reviewed head SHA, so
+GitHub refuses it if the branch moved after the review.
+
+A path on the change-limits denylist is refused **before** it is committed
+(#488): nothing reaches the run branch, where a push-triggered workflow could
+run it, no PR is opened, and the run fails with `PROTECTED_PATH`. If a later
+iteration of a run that already has a PR hits a denied path (the base
+branch's `.automaintainer.yml` changed), that PR is held as a draft
+`needs-human` PR. File and line limits are also evaluated before the commit;
+a change over them is still committed and opened as a draft for a human.
 
 ### Verification
 

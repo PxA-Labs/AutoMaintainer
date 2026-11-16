@@ -71,6 +71,18 @@ green verification, including merges by people.
 The GitHub App needs the **Commit statuses: read & write** repository
 permission.
 
+Green checks are not enough for an automatic merge, because a
+prompt-injected run controls both the change and the tests it adds. Under
+`ci` and `auto` the merge also needs a **trusted trigger** (`backend/trust.py`,
+#487): the caller who started the run (their linked GitHub login) and the
+author of the issue it targets, if any, must each have `write`, `maintain` or
+`admin` permission on the repository. The lookup is deterministic, made once
+per run through the run's installation token, and fails closed: an unknown or
+bot account, a non-collaborator or any API error leaves the PR open for a
+human with a `held` decision (`untrusted trigger` or `trigger permission
+check failed`). A redelivered run replays the held decision from its
+checkpoint; one that reviews again looks the trigger up again.
+
 ### Maintainer input
 
 The Maintainer's review prompt includes the `VerificationResult` of the
@@ -151,7 +163,9 @@ the `iteration`, the `policy` in force (`human`, `ci`, `auto`; an unknown
 | `MERGE_POLICY=human` | `held` | `policy` | `policy human` |
 | `ci`: verification or checks not green | `held` | `policy` | `ci status not success: ...` |
 | Review comment not posted / diff incomplete / change limits | `held` | `policy` | `review comment not posted`, `reviewed diff incomplete`, `change limits exceeded` |
-| `auto`, or `ci` with green checks | `merged` | `policy` | `policy auto` / `ci checks passed: ...` |
+| `ci`/`auto`: trigger not a repository writer, or its lookup failed | `held` | `policy` | `untrusted trigger` / `trigger permission check failed` |
+| A later iteration hits a denied path (nothing committed, the run fails with `PROTECTED_PATH`) | `held` | `policy` | `change limits exceeded`, `protected change not committed` |
+| `auto`, or `ci` with green checks, and a trusted trigger | `merged` | `policy` | `policy auto` / `ci checks passed: ...`, then `trusted trigger` |
 | GitHub refuses the merge (the run then fails) | `not_merged` | `policy` | `github did not merge the pr` |
 
 `reasons` lists the gates in the order they ran (at most 10, 200 characters
@@ -289,13 +303,21 @@ model either obeys the payload (compliant attacker) or ignores it, under each
 `MERGE_POLICY`, with every other CI check green so `ci` would merge. The
 tests assert the deterministic layer that stops each attack: a
 `.github/workflows/` path is never chosen as a target (the run stops with
-`NO_TARGET_FILE`), a denied path such as `conftest.py` becomes a draft
-`needs-human` PR that is not merged, and the payload reaches prompts only
-inside escaped `<untrusted-data>` blocks. One known gap is a strict xfail: a
-compliant model's in-limits change to an unprotected file merges under `auto`,
-and under `ci` when the checks pass; only `human` prevents it. The
-`.github/workflows/redteam.yml` workflow runs them on every pull request that
-touches `backend/`.
+`NO_TARGET_FILE`), a denied path such as `conftest.py` is never committed
+(the run fails with `PROTECTED_PATH` and opens no PR, #488), a compliant
+model's approved in-limits change to an unprotected file is held by the
+trusted-trigger gate (#487) because the issue author, or the account that
+started the run, has only read access, and the payload reaches prompts only
+inside escaped `<untrusted-data>` blocks. The fake GitHub answers the
+collaborator-permission endpoint; control tests show the same well-behaved
+change merging under `ci` and `auto` when a writer starts the run, and a
+failed permission lookup holding it. Every decision writes one
+`merge_decisions` row into the fake database, and the tests check its
+decision and reasons. One test pins the gate's documented limit: a payload
+in the README of a run a writer started still merges under `ci`/`auto` if a
+model obeys it, since only a writer could have put it there; only `human`
+prevents that. The `.github/workflows/redteam.yml` workflow runs them on
+every pull request that touches `backend/`.
 
 ## Docker sandbox backend
 
