@@ -73,6 +73,11 @@ def fake_pty(monkeypatch):
 
         def read(self, *a, **k):
             time.sleep(0.01)
+            # One prompt, so a refusal test whose shell was wrongly spawned
+            # receives it and fails instead of waiting forever.
+            if not captured.get("prompted"):
+                captured["prompted"] = True
+                return "$ "
             return ""
 
         def write(self, data):
@@ -91,10 +96,10 @@ def test_terminal_websocket_origin_security():
     with pytest.raises(WebSocketDisconnect) as excinfo:
         with client.websocket_connect(
             "/api/terminal/ws", headers={"origin": "http://malicious.com"}
-        ):
-            pass
+        ) as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
 
 
 def test_terminal_websocket_rejects_missing_origin():
@@ -105,10 +110,10 @@ def test_terminal_websocket_rejects_missing_origin():
     header by default, which made this an unauthenticated shell.
     """
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect("/api/terminal/ws"):
-            pass
+        with client.websocket_connect("/api/terminal/ws") as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
 
 
 def test_terminal_websocket_rejects_origin_suffix_spoof():
@@ -120,19 +125,21 @@ def test_terminal_websocket_rejects_origin_suffix_spoof():
         with pytest.raises(WebSocketDisconnect) as excinfo:
             with client.websocket_connect(
                 "/api/terminal/ws", headers={"origin": spoofed}
-            ):
-                pass
+            ) as ws:
+                ws.receive_text()
 
-        assert excinfo.value.code == 1008, f"{spoofed} was not rejected"
+        assert excinfo.value.code == 4403, f"{spoofed} was not rejected"
 
 
 def test_terminal_websocket_rejects_missing_token():
     """A trusted origin is not sufficient; the handshake needs a valid token."""
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        with client.websocket_connect("/api/terminal/ws", headers=allowed_origin()):
-            pass
+        with client.websocket_connect(
+            "/api/terminal/ws", headers=allowed_origin()
+        ) as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4401
 
 
 def test_terminal_websocket_rejects_malformed_subprotocol():
@@ -143,10 +150,10 @@ def test_terminal_websocket_rejects_malformed_subprotocol():
                 "/api/terminal/ws",
                 headers=allowed_origin(),
                 subprotocols=protocols,
-            ):
-                pass
+            ) as ws:
+                ws.receive_text()
 
-        assert excinfo.value.code == 1008, f"{protocols} was not rejected"
+        assert excinfo.value.code == 4401, f"{protocols} was not rejected"
 
 
 @pytest.mark.parametrize("environment", [None, "development", "production"])
@@ -169,10 +176,10 @@ def test_terminal_websocket_disabled_unless_opted_in(
             "/api/terminal/ws",
             headers=allowed_origin(),
             subprotocols=["bearer", "tok"],
-        ):
-            pass
+        ) as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
 
 
 @pytest.mark.parametrize("allowlist", ["", "someone-else", " , ,"])
@@ -189,10 +196,10 @@ def test_terminal_websocket_requires_admin_allowlist(
             "/api/terminal/ws",
             headers=allowed_origin(),
             subprotocols=["bearer", "tok"],
-        ):
-            pass
+        ) as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
 
 
 def test_terminal_dev_bypass_alone_does_not_grant_shell(monkeypatch):
@@ -206,10 +213,10 @@ def test_terminal_dev_bypass_alone_does_not_grant_shell(monkeypatch):
             "/api/terminal/ws",
             headers=allowed_origin(),
             subprotocols=["bearer", "tok"],
-        ):
-            pass
+        ) as ws:
+            ws.receive_text()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
 
 
 # Every secret-bearing variable the backend reads, plus generic patterns.
@@ -274,6 +281,21 @@ def test_terminal_child_env_withholds_server_secrets(monkeypatch, windows):
 def test_parse_terminal_repo(repo_url, expected):
     """The dashboard sends "owner/repo"; a github.com URL is accepted too."""
     assert main._parse_terminal_repo(repo_url) == expected
+
+
+def _connect_and_receive(path="/api/terminal/ws"):
+    """Connect as the dashboard does and wait for the server's first frame.
+
+    A refused handshake raises WebSocketDisconnect with the close code. If a
+    shell was wrongly spawned, the fake PTY's prompt arrives instead and the
+    caller's pytest.raises fails rather than hanging.
+    """
+    with client.websocket_connect(
+        path,
+        headers=allowed_origin(),
+        subprotocols=["bearer", "valid-token"],
+    ) as ws:
+        ws.receive_text()
 
 
 def _connect_and_resize(path="/api/terminal/ws"):
@@ -368,9 +390,9 @@ def test_terminal_websocket_rejects_user_without_org(monkeypatch):
     monkeypatch.setattr(agents, "supabase", _supabase_stub([]), raising=False)
 
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        _connect_and_resize()
+        _connect_and_receive()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4401
 
 
 def test_terminal_websocket_rejects_pending_invite(monkeypatch):
@@ -381,9 +403,9 @@ def test_terminal_websocket_rejects_pending_invite(monkeypatch):
     monkeypatch.setattr(agents, "supabase", _supabase_stub([pending]), raising=False)
 
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        _connect_and_resize()
+        _connect_and_receive()
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4401
 
 
 def test_terminal_websocket_accepts_org_member(monkeypatch, fake_pty):
@@ -416,8 +438,8 @@ def test_terminal_rejects_repo_outside_callers_org(monkeypatch, tmp_path, fake_p
 
     for repo_url in ("https://github.com/victim/private", "victim/private"):
         with pytest.raises(WebSocketDisconnect) as excinfo:
-            _connect_and_resize(f"/api/terminal/ws?repo_url={repo_url}")
-        assert excinfo.value.code == 1008
+            _connect_and_receive(f"/api/terminal/ws?repo_url={repo_url}")
+        assert excinfo.value.code == 4403
 
     assert not fake_pty["spawned"]
 
@@ -428,9 +450,9 @@ def test_terminal_rejects_unparseable_repo_url(monkeypatch, fake_pty):
     monkeypatch.setattr(agents, "supabase", _supabase_stub([MEMBER]), raising=False)
 
     with pytest.raises(WebSocketDisconnect) as excinfo:
-        _connect_and_resize("/api/terminal/ws?repo_url=../../etc")
+        _connect_and_receive("/api/terminal/ws?repo_url=../../etc")
 
-    assert excinfo.value.code == 1008
+    assert excinfo.value.code == 4403
     assert not fake_pty["spawned"]
 
 

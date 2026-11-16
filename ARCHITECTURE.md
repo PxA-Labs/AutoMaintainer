@@ -403,6 +403,43 @@ Source: `backend/main.py`.
 - **`AUTH_DEV_BYPASS=true`** trusts every request as a fixed development user.
   It is ignored, and refused at startup, when `ENVIRONMENT=production`.
 
+### Route auth matrix
+
+Built from `app.routes` and enforced by `backend/test_route_inventory.py`
+(#210): every route must be classified there, every non-public HTTP route
+answers 401 without a valid token, a resource of another organization
+answers exactly like a missing one (404, same body, no side effects), and
+WebSockets refuse with 4401 (no or invalid token) or 4403 (not allowed).
+
+| Route | Auth | Tenant check | Role |
+| --- | --- | --- | --- |
+| `GET /healthz`, `/healthz/supabase`, `/healthz/observability` | public (probes) | none, no tenant data | - |
+| `POST /webhooks/github` | public; HMAC `X-Hub-Signature-256`, 503 without a secret | installation resolved from the signed payload | - |
+| `GET /github/app/setup` | public; signed expiring `state` + OAuth code | ownership verified with GitHub | admin re-checked |
+| `/openapi.json`, `/docs`, `/redoc` | public | none, schema only | - |
+| `GET /repo/{name}/tree`, `/search`, `/file` | token | `require_repo_access` | member |
+| `POST /repo/{name}/file`, `/file/create`, `DELETE /repo/{name}/file` | token | `require_repo_access` | write; never the default or a protected branch (#139) |
+| `POST /repo/{name}/propose-changes` | token | `validate_repo_access` | write |
+| `POST /start` | token | `validate_repo_access` on `repo_name` | write |
+| `POST /stop` with `run_id` | token | run `org_id` | write |
+| `POST /stop` without `run_id` | token | caller's org only | admin |
+| `GET /status/{id}`, `/runs/{id}/verifications`, `/runs/{id}/decisions` | token | run `org_id` | member |
+| `GET /runs` | token | filtered by `org_id` | member |
+| `GET`/`PUT /repositories/{id}/merge-policy` | token | repository `org_id` | read: member; write: admin |
+| `POST /assist/inline` | token | none (request body only) | member, rate-limited |
+| `POST /github/installations/claim`, `/github/app/install-url` | token + GitHub user token | verified with GitHub; never moved between orgs (409) | admin |
+| `GET /admin/metrics`, `/admin/runs` | token | filtered by `org_id` | admin |
+| `WS /api/terminal/ws` | subprotocol `["bearer", token]` (never a query string, which access logs record) | `repo_url` must belong to the caller's org | `ENABLE_TERMINAL=true` and `TERMINAL_ADMIN_USER_IDS` |
+
+The terminal is a full interactive shell (`/bin/bash`, or `COMSPEC` on
+Windows) running as the API's OS user: it can run any command that user can.
+It stays **off unless `ENABLE_TERMINAL=true`**, in every environment; see
+[Web IDE, inline assist and terminal](#web-ide-inline-assist-and-terminal).
+Every check runs before the handshake is accepted. A refused handshake from
+an allowed origin is then accepted and closed at once, because a close
+before accepting reaches a browser only as code 1006; a foreign origin is
+refused without completing the handshake.
+
 ## GitHub authentication
 
 Source: `backend/github_app.py`. The mode is set by `GITHUB_AUTH_MODE`:
@@ -444,8 +481,11 @@ Source: `backend/main.py`, `dashboard/src/components/WebIDE.tsx`.
 
 - **IDE routes**: `/repo/{name}/tree`, `/search` and `GET /file` read the
   local clone. `POST /file`, `POST /file/create` and `DELETE /file` commit
-  **directly to the repository's default branch** through the GitHub API,
-  then update the local mirror. `POST /repo/{name}/propose-changes` creates a
+  through the GitHub API to the request's `branch`, or, when it is omitted,
+  to the caller's working branch `automaintainer/ide-<hash>` (created from
+  the default branch on first use). They **never** commit to the default
+  branch or a protected branch (409), then update the local mirror (#139).
+  `POST /repo/{name}/propose-changes` creates a
   new branch, commits the edited files there and opens a PR. The editor is
   Monaco.
 - **Inline assist**: `POST /assist/inline` streams an LLM completion as

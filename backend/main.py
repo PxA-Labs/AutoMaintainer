@@ -11,13 +11,14 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from github import Github
+from github import Github, GithubException, UnknownObjectException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from typing import Optional, List, Annotated, Literal
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
+import hashlib
 import json
 import uuid
 import httpx
@@ -97,6 +98,10 @@ class FileUpdateRequest(BaseModel):
     file_path: str
     content: str
     commit_message: Optional[str] = None
+    # Branch to commit to. Omitted: the caller's IDE working branch (see
+    # _ide_working_branch). The default branch and protected branches are
+    # always refused (#139).
+    branch: Optional[str] = None
 
 
 class FileCreateRequest(BaseModel):
@@ -104,6 +109,7 @@ class FileCreateRequest(BaseModel):
     content: str = ""
     is_dir: bool = False
     commit_message: Optional[str] = None
+    branch: Optional[str] = None
 
 
 def internal_error(status_code: int, public_message: str, exc: BaseException):
@@ -1354,12 +1360,155 @@ def _write_local_mirror(repo_dir: Path, target_path: Path, content: str) -> None
         logger.warning(f"Committed upstream but local mirror write failed: {e}")
 
 
+# --- IDE commit target branch (#139) ---
+#
+# The IDE file routes used to commit straight to the repository's default
+# branch, so every Save was an unreviewed commit to main while the UI implied
+# the edit was only staged. They now commit to a working branch instead:
+#
+# - ``branch`` given: that branch, created from the default branch if missing.
+# - ``branch`` omitted (what the dashboard sends today): the caller's IDE
+#   working branch, ``automaintainer/ide-<hash of org and user>``. It is stable
+#   per user, so consecutive saves accumulate on one branch, and the hash keeps
+#   Supabase ids out of the repository's branch list.
+#
+# The default branch and any branch GitHub reports as protected are refused
+# with 409 before anything is written. Getting the edits into the default
+# branch is a pull request: POST /repo/{name}/propose-changes, or a PR opened
+# from the working branch on GitHub.
+
+IDE_BRANCH_PREFIX = "automaintainer/ide-"
+# A conservative subset of git's ref-name rules (git check-ref-format).
+_BRANCH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*")
+_BRANCH_NAME_MAX_LEN = 200
+# Ref-qualified spellings git (and GitHub's ref resolution) would expand to an
+# existing ref: "refs/heads/main", "heads/main", "tags/v1", "remotes/x/main".
+# Accepting them would let "refs/heads/main" slip past the default-branch
+# check, so a branch name must be a bare short name.
+_REF_NAMESPACE_PREFIXES = ("refs/", "heads/", "tags/", "remotes/")
+
+
+def _is_symbolic_ref_name(branch: str) -> bool:
+    """HEAD, FETCH_HEAD, ORIG_HEAD, ...: symbolic refs, never a branch."""
+    upper = branch.upper()
+    return upper == "HEAD" or ("/" not in branch and upper.endswith("_HEAD"))
+
+
+def _validate_branch_name(branch: str) -> None:
+    if (
+        len(branch) > _BRANCH_NAME_MAX_LEN
+        or not _BRANCH_NAME_RE.fullmatch(branch)
+        or ".." in branch
+        or "/." in branch
+        or branch.startswith((".", "-"))
+        or branch.endswith((".", ".lock"))
+        or branch.lower().startswith(_REF_NAMESPACE_PREFIXES)
+        or _is_symbolic_ref_name(branch)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid branch name")
+
+
+def _same_branch(a: Optional[str], b: Optional[str]) -> bool:
+    # Case-insensitive: git refs are case-sensitive, but on case-insensitive
+    # filesystems "Main" and "main" collide, so treat them as the same branch.
+    return isinstance(a, str) and isinstance(b, str) and a.casefold() == b.casefold()
+
+
+def _ide_working_branch(org_id: str, user_id: str) -> str:
+    digest = hashlib.sha256(f"{org_id}:{user_id}".encode("utf-8")).hexdigest()
+    return f"{IDE_BRANCH_PREFIX}{digest[:12]}"
+
+
+def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -> str:
+    """The branch an IDE write targets, validated before any GitHub call."""
+    if requested is None or not requested.strip():
+        return _ide_working_branch(org_id, user_id)
+    branch = requested.strip()
+    _validate_branch_name(branch)
+    return branch
+
+
+def _sync_ide_branch(repo, branch: str, default_branch: str) -> None:
+    """Merge the default branch into an existing IDE working branch.
+
+    The IDE reads files from a clone synced to the default branch, so a file
+    merged there after the working branch was created would be visible in
+    the editor but missing on the branch it saves to (#139). The working
+    branch is server-owned, so it is fast-forwarded or merged before each
+    write. Only the working branch is written: ``base`` is the merge target.
+    A conflict is reported rather than resolved, so no user edit is lost.
+
+    Blocking (PyGithub); call from a worker thread.
+    """
+    try:
+        # 204 (already up to date) returns None; 201 returns the merge commit.
+        repo.merge(
+            base=branch,
+            head=default_branch,
+            commit_message=f"Merge {default_branch} into {branch}",
+        )
+    except GithubException as e:
+        if e.status == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="Your IDE working branch conflicts with the default "
+                "branch; resolve the conflict on GitHub (or propose your "
+                "changes as a pull request) before saving again",
+            )
+        raise internal_error(502, "Could not update the IDE working branch", e)
+    except Exception as e:
+        raise internal_error(502, "Could not update the IDE working branch", e)
+
+
+def _ensure_writable_branch(repo, branch: str) -> None:
+    """Refuse the default or a protected branch; create ``branch`` if missing.
+
+    Blocking (PyGithub); call from a worker thread.
+    """
+    default_branch = repo.default_branch
+    if not isinstance(default_branch, str) or _same_branch(branch, default_branch):
+        # An unknown default branch fails closed.
+        raise HTTPException(
+            status_code=409,
+            detail="The IDE does not commit to the default branch; "
+            "omit 'branch' to use your IDE working branch, or propose changes "
+            "as a pull request",
+        )
+    try:
+        existing = repo.get_branch(branch)
+    except UnknownObjectException:
+        existing = None
+    except Exception as e:
+        raise internal_error(502, "Could not read the target branch", e)
+
+    if existing is not None:
+        # Anything but an explicit False fails closed.
+        if getattr(existing, "protected", True) is not False:
+            raise HTTPException(
+                status_code=409, detail="The target branch is protected"
+            )
+        if branch.startswith(IDE_BRANCH_PREFIX):
+            _sync_ide_branch(repo, branch, default_branch)
+        return
+
+    try:
+        base = repo.get_git_ref(f"heads/{default_branch}")
+        repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base.object.sha)
+    except GithubException as e:
+        # 422 "Reference already exists": a concurrent save created it.
+        if e.status != 422:
+            raise internal_error(502, "Could not create the target branch", e)
+    except Exception as e:
+        raise internal_error(502, "Could not create the target branch", e)
+
+
 @app.post("/repo/{repo_name:path}/file")
 async def update_repo_file(
     repo_name: str,
     request: Request,
     payload: FileUpdateRequest,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -1368,6 +1517,7 @@ async def update_repo_file(
         or ".." in payload.file_path
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
+    branch = _requested_ide_branch(payload.branch, org_id, user_id)
 
     # Validate the local mirror path BEFORE any GitHub call. Checking it only
     # after the commit meant a path the workspace refuses (.git/..., symlink
@@ -1383,21 +1533,27 @@ async def update_repo_file(
     def _commit() -> None:
         # PyGithub and the mirror write are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, branch)
         try:
-            file = repo.get_contents(payload.file_path)
-        except Exception as e:
+            file = repo.get_contents(payload.file_path, ref=branch)
+        except UnknownObjectException as e:
             logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
+        except Exception as e:
+            raise internal_error(502, "Could not read the file from GitHub", e)
         try:
-            repo.update_file(file.path, message, payload.content, file.sha)
+            repo.update_file(
+                file.path, message, payload.content, file.sha, branch=branch
+            )
         except Exception as e:
             raise internal_error(500, "Failed to update file", e)
 
-        # Mirror to the local clone so the IDE doesn't show stale reads.
+        # Mirror to the local clone so the IDE doesn't show stale reads. The
+        # clone is reset to the remote on the next agent sync.
         _write_local_mirror(repo_dir, target_path, payload.content)
 
     await asyncio.to_thread(_commit)
-    return {"status": "updated", "message": message}
+    return {"status": "updated", "message": message, "branch": branch}
 
 
 @app.post("/repo/{repo_name:path}/file/create")
@@ -1406,6 +1562,7 @@ async def create_repo_file(
     request: Request,
     payload: FileCreateRequest,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
@@ -1414,6 +1571,7 @@ async def create_repo_file(
         or ".." in payload.file_path
     ):
         raise HTTPException(status_code=400, detail="Invalid file path")
+    branch = _requested_ide_branch(payload.branch, org_id, user_id)
 
     actual_path = payload.file_path
     actual_content = payload.content
@@ -1434,15 +1592,16 @@ async def create_repo_file(
     def _commit() -> None:
         # PyGithub and the mirror write are blocking I/O; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, branch)
         try:
-            repo.create_file(actual_path, message, actual_content)
+            repo.create_file(actual_path, message, actual_content, branch=branch)
         except Exception as e:
             raise internal_error(500, "Failed to create file", e)
 
         _write_local_mirror(repo_dir, target_path, actual_content)
 
     await asyncio.to_thread(_commit)
-    return {"status": "created", "message": message}
+    return {"status": "created", "message": message, "branch": branch}
 
 
 @app.delete("/repo/{repo_name:path}/file")
@@ -1450,12 +1609,15 @@ async def delete_repo_file(
     repo_name: str,
     file_path: str,
     commit_message: Optional[str] = None,
+    branch: Optional[str] = None,
     org_id: str = Depends(require_repo_write_access),
+    user_id: str = Depends(get_user_id),
 ):
     if not re.fullmatch(r"^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)?$", repo_name):
         raise HTTPException(status_code=400, detail="Invalid repository name")
     if not re.fullmatch(r"^[a-zA-Z0-9_.\-/]+$", file_path) or ".." in file_path:
         raise HTTPException(status_code=400, detail="Invalid file path")
+    target_branch = _requested_ide_branch(branch, org_id, user_id)
 
     gh = await _github_client_for_repo(repo_name, org_id)
     message = commit_message or f"Delete {file_path} via AutoMaintainer IDE"
@@ -1463,11 +1625,14 @@ async def delete_repo_file(
     def _delete() -> None:
         # PyGithub calls are blocking HTTP round trips; run off the event loop.
         repo = _get_github_repo(gh, repo_name)
+        _ensure_writable_branch(repo, target_branch)
         try:
-            file = repo.get_contents(file_path)
-        except Exception as e:
+            file = repo.get_contents(file_path, ref=target_branch)
+        except UnknownObjectException as e:
             logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
+        except Exception as e:
+            raise internal_error(502, "Could not read the file from GitHub", e)
 
         if isinstance(file, list):
             raise HTTPException(
@@ -1476,12 +1641,12 @@ async def delete_repo_file(
             )
 
         try:
-            repo.delete_file(file.path, message, file.sha)
+            repo.delete_file(file.path, message, file.sha, branch=target_branch)
         except Exception as e:
             raise internal_error(500, "Failed to delete file", e)
 
     await asyncio.to_thread(_delete)
-    return {"status": "deleted", "message": message}
+    return {"status": "deleted", "message": message, "branch": target_branch}
 
 
 # --- Propose Changes Endpoint ---
@@ -2065,12 +2230,38 @@ async def _authorize_terminal_cwd(
     return True, None
 
 
+# Application close codes (RFC 6455 reserves 4000-4999 for applications),
+# mirroring HTTP 401 and 403.
+WS_CLOSE_UNAUTHENTICATED = 4401
+WS_CLOSE_FORBIDDEN = 4403
+
+
+async def _refuse_websocket(websocket: WebSocket, code: int) -> None:
+    """Refuse a handshake that already failed authentication or authorization.
+
+    Every check runs before this is called, so nothing has been spawned or
+    read. Closing before accept() makes the ASGI server answer with a bare
+    HTTP 403, which a browser reports as close code 1006 for every reason; to
+    let a client tell "sign in again" (4401) from "not allowed" (4403), the
+    handshake is completed and closed at once with the code. The "bearer"
+    subprotocol is echoed only when offered (browsers fail a handshake that
+    selects a protocol they did not offer); the token is never echoed.
+    """
+    offered = websocket.scope.get("subprotocols") or []
+    await websocket.accept(subprotocol="bearer" if "bearer" in offered else None)
+    await websocket.close(code=code)
+
+
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    if not _terminal_enabled():
-        await websocket.close(code=1008)
-        return
+    """Interactive shell (/bin/bash, or COMSPEC on Windows) as the API's OS user.
 
+    Checks, all before the handshake is accepted: exact Origin match, a
+    Supabase token of an accepted org member (4401 otherwise),
+    ENABLE_TERMINAL=true, the user id on TERMINAL_ADMIN_USER_IDS, and repo_url
+    belonging to the caller's org (4403 otherwise; another org's repository
+    and a missing one are indistinguishable).
+    """
     # Fail closed. The previous guard was `if origin and not (...)`, which
     # skipped the check entirely when Origin was absent -- every non-browser
     # client (websocat, curl, python-websockets) omits it by default. It also
@@ -2079,19 +2270,30 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     # configured allowlist; set ALLOWED_ORIGINS to permit another origin. The
     # CORS preview-deployment regex is deliberately NOT honoured here -- an
     # interactive shell should not be reachable from arbitrary preview hosts.
+    #
+    # Checked first and refused without completing the handshake, so a page on
+    # a foreign origin learns nothing (not even whether the terminal is on).
     origin = websocket.headers.get("origin")
     if not origin or origin not in ALLOWED_ORIGINS:
-        await websocket.close(code=1008)
+        await websocket.close(code=WS_CLOSE_FORBIDDEN)
         return
 
+    # The token is checked before ENABLE_TERMINAL so an unauthenticated
+    # caller gets 4401 either way and cannot tell whether the terminal is on.
     user = await authenticate_websocket(websocket)
-    if not user or not _terminal_user_allowed(user.get("user_id")):
-        await websocket.close(code=1008)
+    if not user:
+        await _refuse_websocket(websocket, WS_CLOSE_UNAUTHENTICATED)
+        return
+    if not _terminal_enabled():
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
+        return
+    if not _terminal_user_allowed(user.get("user_id")):
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     allowed, cwd = await _authorize_terminal_cwd(repo_url, user)
     if not allowed:
-        await websocket.close(code=1008)
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     await websocket.accept(subprotocol="bearer")

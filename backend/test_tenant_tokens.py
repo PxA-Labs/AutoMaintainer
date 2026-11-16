@@ -295,6 +295,7 @@ def repo_routes(monkeypatch, tmp_path):
     repo = MagicMock()
     repo.get_contents.return_value = SimpleNamespace(path="a.py", sha="s")
     repo.default_branch = "main"
+    repo.get_branch.return_value = SimpleNamespace(protected=False)
     repo.create_pull.return_value = SimpleNamespace(number=1, html_url="https://pr")
 
     def fake_github(token):
