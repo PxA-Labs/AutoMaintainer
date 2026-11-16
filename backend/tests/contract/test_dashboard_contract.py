@@ -123,8 +123,8 @@ DASHBOARD_CALLS = {
         },
         reads=frozenset({"branch_name", "pr_number", "pr_url"}),
     ),
-    # lib/github-app.ts requestInstallUrl() (no body; the GitHub user token
-    # goes in the X-GitHub-User-Token header, which this table does not model)
+    # lib/github-app.ts requestInstallUrl() (no body; only the Supabase
+    # bearer token, no GitHub token header since #481)
     ("POST", "/github/app/install-url"): Call(reads=frozenset({"install_url"})),
     # lib/merge-policy.ts fetchMergePolicy(), typed as RepositoryMergePolicy
     ("GET", "/repositories/{}/merge-policy"): Call(

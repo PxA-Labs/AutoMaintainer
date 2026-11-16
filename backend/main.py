@@ -42,10 +42,12 @@ from github_app import (
     SETUP_STATE_TTL_SECONDS,
     SetupStateError,
     SetupStateExpired,
+    SetupStateReplayed,
     build_install_url,
+    consume_setup_state,
     create_setup_state,
     exchange_oauth_code,
-    github_user_id_for_token,
+    github_user_id_from_identities,
     install_flow_configured,
     verify_setup_state,
     AUTH_MODE_APP,
@@ -1892,16 +1894,19 @@ async def _link_installation(sb, org_id: str, record: dict) -> None:
 
 # --- GitHub App install flow -------------------------------------------------
 #
-# 1. POST /github/app/install-url (org owner/admin, with the GitHub user token
-#    in X-GitHub-User-Token) returns the App's install URL carrying a signed,
-#    expiring ``state`` bound to (user, org, GitHub user id); see
-#    github_app.create_setup_state.
+# 1. POST /github/app/install-url (org owner/admin; the Supabase session is
+#    the only credential) returns the App's install URL carrying a signed,
+#    expiring, single-use ``state`` bound to (user, org, GitHub user id); see
+#    github_app.create_setup_state. The GitHub user id comes from the user's
+#    GitHub identity in Supabase Auth (admin API), never from the browser, so
+#    the dashboard does not need Supabase's short-lived provider_token.
 # 2. The App is registered with "Request user authorization (OAuth) during
 #    installation", so after the install GitHub sends the browser to
 #    GET /github/app/setup with installation_id, setup_action, state and an
 #    OAuth code.
-# 3. The callback verifies the state, re-checks that the user is still an
-#    owner/admin of the org, exchanges the code for the installer's
+# 3. The callback verifies and consumes the state (a replayed state is
+#    refused), re-checks that the user is still an owner/admin of the org,
+#    exchanges the code for the installer's
 #    user-to-server token, and runs the same verification and write as
 #    POST /github/installations/claim (verify_installation_claim, which here
 #    also requires the token to belong to the GitHub user named in the state).
@@ -1925,14 +1930,24 @@ _INSTALLATION_ID_RE = re.compile(r"[0-9]{1,19}")
 _OAUTH_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,256}")
 
 
+async def _github_user_id_of(sb, user_id: str) -> Optional[int]:
+    """GitHub user id of ``user_id``'s GitHub identity in Supabase Auth."""
+    response = await asyncio.to_thread(sb.auth.admin.get_user_by_id, user_id)
+    auth_user = getattr(response, "user", None)
+    return github_user_id_from_identities(getattr(auth_user, "identities", None))
+
+
 @app.post("/github/app/install-url")
-async def github_app_install_url(
-    user: dict = Depends(get_current_user),
-    x_github_user_token: Annotated[str | None, Header()] = None,
-):
-    """Return the GitHub App install URL with a signed ``state`` for the
-    caller (org owner/admin). The state expires after
-    SETUP_STATE_TTL_SECONDS seconds."""
+async def github_app_install_url(user: dict = Depends(get_current_user)):
+    """Return the GitHub App install URL with a signed, single-use ``state``
+    for the caller (org owner/admin). The state expires after
+    SETUP_STATE_TTL_SECONDS seconds.
+
+    Only the Supabase session is required: the GitHub user the state is
+    bound to is the caller's GitHub identity in Supabase Auth, and the setup
+    callback proves ownership of the installation with the installer's own
+    OAuth code, so the browser neither sends nor stores a GitHub token.
+    """
     if user.get("role") not in ADMIN_ROLES:
         raise HTTPException(
             status_code=403,
@@ -1944,17 +1959,21 @@ async def github_app_install_url(
             detail="GitHub App install flow is not configured "
             "(GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET)",
         )
-    user_token = (x_github_user_token or "").strip()
-    if not user_token:
-        raise HTTPException(
-            status_code=400, detail="Missing X-GitHub-User-Token header"
-        )
+
+    from agents import supabase as sb
+
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
     try:
-        github_user_id = await github_user_id_for_token(user_token)
-    except InstallationClaimError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail)
+        github_user_id = await _github_user_id_of(sb, user["user_id"])
     except Exception as e:
-        raise internal_error(502, "Could not identify the GitHub user", e)
+        raise internal_error(500, "Could not read your GitHub identity", e)
+    if github_user_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Your account has no linked GitHub identity. "
+            "Sign in with GitHub, then install the App.",
+        )
 
     state = create_setup_state(user["user_id"], user["org_id"], github_user_id)
     return {
@@ -2038,10 +2057,18 @@ async def _complete_app_setup(
         return {"github_setup": "unavailable"}
     try:
         claim = verify_setup_state(state)
+        # Single use: consumed before anything else is done with it, so a
+        # replay (or a retry after a failure) needs a new install URL.
+        consume_setup_state(claim)
     except SetupStateError as e:
         logger.warning(f"GitHub App setup callback with a bad state: {e}")
-        expired = isinstance(e, SetupStateExpired)
-        return {"github_setup": "expired" if expired else "invalid"}
+        # A replayed state reports "expired": either way the link can no
+        # longer be used and the install has to be started again.
+        stale = isinstance(e, (SetupStateExpired, SetupStateReplayed))
+        return {"github_setup": "expired" if stale else "invalid"}
+    except Exception as e:
+        logger.error(f"Could not record the GitHub App setup state as used: {e}")
+        return {"github_setup": "unavailable"}
 
     from agents import supabase as sb
 

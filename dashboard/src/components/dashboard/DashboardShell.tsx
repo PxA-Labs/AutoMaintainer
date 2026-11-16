@@ -39,7 +39,7 @@ export function DashboardShell() {
   }, []);
 
   // GitHub App installations, the install action and the setup redirect.
-  const githubApp = useGitHubApp(user?.id ?? null, session?.provider_token);
+  const githubApp = useGitHubApp(user?.id ?? null);
 
   // Health check for Supabase persistence
   const isSupabaseUnreachable = useSupabaseHealth();

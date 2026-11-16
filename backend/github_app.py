@@ -22,6 +22,7 @@ a warning logged at import.
 """
 
 import os
+import re
 import base64
 import hashlib
 import hmac
@@ -812,15 +813,21 @@ async def verify_installation_claim(
 
 # --- GitHub App install flow (setup URL callback) ---------------------------
 #
-# An authenticated org owner/admin asks for an install URL. It carries a
-# ``state`` that is HMAC-signed, expires, and is bound to the AutoMaintainer
-# user, their org and their GitHub user id. With "Request user authorization
-# (OAuth) during installation" enabled, GitHub sends the browser back with
-# that state, the installation id and an OAuth ``code``. The callback checks
-# the state, exchanges the code for the installer's user-to-server token and
-# runs verify_installation_claim with it, so the installation id in the URL is
-# never trusted by itself. Binding the GitHub user id stops a "link my org to
-# your installation" CSRF: a state minted by one user fails when a different
+# An authenticated org owner/admin asks for an install URL with only their
+# Supabase session. It carries a ``state`` that is HMAC-signed, expires, is
+# single-use, and is bound to the AutoMaintainer user, their org and their
+# GitHub user id. That id is read server-side from the user's GitHub identity
+# in Supabase Auth (created when Supabase completed a GitHub OAuth sign-in
+# for this user), not from anything the browser sends, so the dashboard needs
+# no GitHub token (Supabase drops ``provider_token`` on session refresh).
+# With "Request user authorization (OAuth) during installation" enabled,
+# GitHub sends the browser back with that state, the installation id and an
+# OAuth ``code``. The callback checks and consumes the state, exchanges the
+# code for the installer's user-to-server token and runs
+# verify_installation_claim with it, so the installation id in the URL is
+# never trusted by itself and ownership is proven against GitHub at link
+# time. Binding the GitHub user id stops a "link my org to your
+# installation" CSRF: a state minted by one user fails when a different
 # GitHub user completes the install.
 
 SETUP_STATE_TTL_SECONDS = 600
@@ -835,6 +842,10 @@ class SetupStateError(Exception):
 
 class SetupStateExpired(SetupStateError):
     """A correctly signed state whose lifetime has passed."""
+
+
+class SetupStateReplayed(SetupStateError):
+    """A correctly signed, unexpired state that was already used once."""
 
 
 def install_flow_configured() -> bool:
@@ -885,9 +896,8 @@ def verify_setup_state(state: Optional[str], now: Optional[float] = None) -> dic
     """Return the state's payload ({u, o, g, exp, n}) or raise SetupStateError.
 
     The signature is checked (constant time) before the payload is parsed.
-    A state is not single-use: within its lifetime it can be replayed, but it
-    only completes a link together with a fresh, single-use OAuth code issued
-    to the same GitHub user, which already proves who is installing.
+    This does not consume the state; the setup callback calls
+    consume_setup_state once the state has verified.
     """
     if not state or len(state) > 1024:
         raise SetupStateError("missing state")
@@ -926,17 +936,78 @@ def build_install_url(state: str) -> str:
     )
 
 
-async def github_user_id_for_token(user_token: str) -> int:
-    """The numeric GitHub id of the user behind ``user_token``."""
-    async with _user_api_client() as client:
-        me = await _user_get(client, "/user", user_token)
-    if me.status_code in (401, 403):
-        raise InstallationClaimError(401, "GitHub user token is invalid or expired")
-    me.raise_for_status()
-    uid = me.json().get("id")
-    if not isinstance(uid, int) or isinstance(uid, bool):
-        raise InstallationClaimError(502, "GitHub did not return a user id")
-    return uid
+# Used state nonces when REDIS_URL is not configured (single-process local
+# development): nonce -> expiry (epoch seconds).
+_used_setup_nonces: Dict[str, float] = {}
+_used_setup_nonces_lock = threading.Lock()
+
+
+def _claim_setup_nonce(nonce: str, ttl: int, now: float) -> bool:
+    """Record ``nonce`` as used; False when it already was.
+
+    Redis (SET NX with the state's remaining lifetime) when REDIS_URL is set,
+    so every API instance shares it; otherwise an in-process map, which only
+    covers one process. A Redis error propagates, so the caller fails closed.
+    """
+    if os.getenv("REDIS_URL"):
+        from redis_locks import get_redis_client
+
+        key = f"automaintainer:github-setup-state:{nonce}"
+        return bool(get_redis_client().set(key, "1", nx=True, ex=ttl))
+    with _used_setup_nonces_lock:
+        for used, expires in list(_used_setup_nonces.items()):
+            if expires <= now:
+                del _used_setup_nonces[used]
+        if nonce in _used_setup_nonces:
+            return False
+        _used_setup_nonces[nonce] = now + ttl
+        return True
+
+
+def consume_setup_state(payload: dict, now: Optional[float] = None) -> None:
+    """Mark a verified state (a verify_setup_state payload) as used.
+
+    Raises SetupStateReplayed when it was used before. The nonce is kept for
+    the state's remaining lifetime; after that the state is expired anyway.
+    """
+    now = time.time() if now is None else now
+    nonce = payload.get("n")
+    if not isinstance(nonce, str) or not nonce:
+        raise SetupStateError("malformed state")
+    ttl = max(1, int(payload["exp"] - now))
+    if not _claim_setup_nonce(nonce, ttl, now):
+        raise SetupStateReplayed("state already used")
+
+
+_GITHUB_ID_RE = re.compile(r"[0-9]{1,19}")
+
+
+def github_user_id_from_identities(identities) -> Optional[int]:
+    """The GitHub user id of a Supabase Auth user's GitHub identity.
+
+    ``identities`` is ``User.identities`` from the Supabase admin API (objects
+    or dicts). Supabase creates an identity only after completing that
+    provider's OAuth flow, and users cannot edit identities (unlike
+    ``user_metadata``), so its id is GitHub's numeric user id as GitHub
+    reported it. Returns None when there is no GitHub identity, or more than
+    one distinct one.
+    """
+
+    def field(obj, name):
+        return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+    found = set()
+    for identity in identities or ():
+        if field(identity, "provider") != "github":
+            continue
+        data = field(identity, "identity_data")
+        data = data if isinstance(data, dict) else {}
+        for raw in (field(identity, "id"), data.get("provider_id"), data.get("sub")):
+            text = "" if raw is None else str(raw)
+            if _GITHUB_ID_RE.fullmatch(text) and int(text) > 0:
+                found.add(int(text))
+                break
+    return found.pop() if len(found) == 1 else None
 
 
 def _oauth_client() -> httpx.AsyncClient:

@@ -32,12 +32,9 @@ export interface UseGitHubApp {
  * State for the GitHub App install flow: the caller's role, the org's
  * installations and repositories, the setup redirect outcome and the
  * install action. `userId` is the signed-in Supabase user (null when
- * signed out); `githubToken` is the session's GitHub provider token.
+ * signed out). The install action needs only the Supabase session.
  */
-export function useGitHubApp(
-  userId: string | null,
-  githubToken: string | null | undefined
-): UseGitHubApp {
+export function useGitHubApp(userId: string | null): UseGitHubApp {
   // Results are tagged with the user they were loaded for, so a sign-out or
   // account switch never shows the previous user's lists.
   const [loaded, setLoaded] = useState<{ userId: string; state: GitHubAppState } | null>(null);
@@ -95,7 +92,7 @@ export function useGitHubApp(
     setInstalling(true);
     setInstallError(null);
     try {
-      const url = await requestInstallUrl(githubToken);
+      const url = await requestInstallUrl();
       window.location.assign(url);
       // Stay "installing" while the browser navigates away.
     } catch (err) {
@@ -104,7 +101,7 @@ export function useGitHubApp(
       );
       setInstalling(false);
     }
-  }, [githubToken]);
+  }, []);
 
   const dismissSetupResult = useCallback(() => setSetupResult(null), []);
 
