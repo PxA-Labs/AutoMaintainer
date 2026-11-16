@@ -117,7 +117,7 @@ def make_world(monkeypatch, tmp_path):
     monkeypatch.setattr(agents, "_run_github_token", lambda: None)
     db = FakeSupabase()
     # The runs row the API creates; merge_audit needs its organisation.
-    db.runs[RUN_ID] = {"id": RUN_ID, "org_id": ORG, "repo_name": "o/r"}
+    db.add_run(RUN_ID, ORG, repo_name="o/r")
     monkeypatch.setattr(agents, "supabase", db)
 
     async def verify(clone_url, branch, head_sha, token, **_):

@@ -430,7 +430,7 @@ async def test_held_run_is_not_merged_when_redelivered(
     lookup and no merge, even if the account has meanwhile been granted
     write access."""
     monkeypatch.setenv("MERGE_POLICY", "auto")
-    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    world.db.add_run(RUN_ID, "org-1")
 
     first = await _run(trigger_login="eve")
     world.repo.permissions["eve"] = "write"
@@ -451,7 +451,7 @@ async def test_crash_after_a_hold_holds_again_on_redelivery(
     """Crash after the held row but before the checkpoint: the redelivery
     reviews again and the gate holds again (the earlier held row is sticky)."""
     monkeypatch.setenv("MERGE_POLICY", "auto")
-    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    world.db.add_run(RUN_ID, "org-1")
     real = agents._request_human_review
     crashes = iter([WorkerCrash("review request")])
 
@@ -480,7 +480,7 @@ async def test_hold_is_sticky_when_write_access_is_granted_before_redelivery(
     the run is redelivered: the earlier held row keeps the PR held, without
     a second permission lookup."""
     monkeypatch.setenv("MERGE_POLICY", "auto")
-    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    world.db.add_run(RUN_ID, "org-1")
     real = agents._request_human_review
     crashes = iter([WorkerCrash("review request")])
 
@@ -512,7 +512,7 @@ async def test_unreadable_earlier_decisions_fall_back_to_the_lookup(
     """The sticky check is best effort: when merge_decisions cannot be read,
     the fresh (fail-closed) permission lookup decides alone."""
     monkeypatch.setenv("MERGE_POLICY", "auto")
-    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    world.db.add_run(RUN_ID, "org-1")
     real_table = world.db.table
 
     def table(name):
@@ -539,7 +539,7 @@ async def test_unreadable_earlier_decisions_fall_back_to_the_lookup(
 
 async def test_writer_triggered_run_merges_under_auto(world, monkeypatch):  # noqa: F811
     monkeypatch.setenv("MERGE_POLICY", "auto")
-    world.db.runs[RUN_ID] = {"id": RUN_ID, "org_id": "org-1"}
+    world.db.add_run(RUN_ID, "org-1")
 
     result = await _run()
 

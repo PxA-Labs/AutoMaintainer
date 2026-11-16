@@ -162,9 +162,16 @@ can make it stricter (`human` < `ci` < `auto`) through
 `repositories.merge_policy` (NULL inherits), set by org owners and admins in
 the dashboard or with `PUT /repositories/{id}/merge-policy`, which refuses a
 value looser than the ceiling (422). The run uses the stricter of the two,
-read at the merge decision (`backend/merge_policy.py`); if the repository's
-setting cannot be read the run uses `human` and records
-`repository merge policy unreadable (fail closed)`. `merge_decisions.policy`
+read at the merge decision (`backend/merge_policy.py`). It fails closed: if
+the setting cannot be read the run uses `human` and records
+`repository merge policy unreadable (fail closed)`, and if the run's `runs`
+or `repositories` row is missing (PostgREST returns a row hidden by RLS, a
+wrong key or a deleted row as an empty result, which could hide a stricter
+setting) it records `repository merge policy row missing (fail closed)`.
+Only an existing repository row whose `merge_policy` is NULL inherits the
+ceiling. `MERGE_POLICY` must be the same on the API (which shows the ceiling
+and validates `PUT`) and on every `agent_runs` worker (which enforces it).
+`merge_decisions.policy`
 is this effective policy, with a `repository policy <p> (ceiling <c>)`
 reason when the repository lowered it:
 

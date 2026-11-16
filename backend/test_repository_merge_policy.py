@@ -181,29 +181,51 @@ def test_setting_above_the_ceiling_is_never_effective():
     assert (resolution.policy, resolution.reasons) == ("ci", [])
 
 
-@pytest.mark.parametrize(
-    "client",
-    [
-        FakeClient(setting=None),
-        FakeClient(runs=[]),  # no run row: no repository to read a setting from
-        FakeClient(runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": None}]),
-        FakeClient(runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": 999}]),
-    ],
-    ids=["inherit", "no-run-row", "run-without-repository", "no-repository-row"],
-)
-def test_no_setting_inherits_the_ceiling(client):
-    resolution = merge_policy.resolve_for_run(client, RUN_ID, "auto")
+def test_no_setting_inherits_the_ceiling():
+    # Only an existing repository row whose merge_policy is NULL inherits.
+    resolution = merge_policy.resolve_for_run(FakeClient(setting=None), RUN_ID, "auto")
     assert (resolution.policy, resolution.reasons) == ("auto", [])
 
 
-def test_another_orgs_repository_setting_is_not_used():
-    # A run row naming another org's repository (which RLS and /start make
-    # impossible) does not pick up that repository's setting.
-    client = FakeClient(
-        runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": OTHER_REPO_ID}]
-    )
-    client.tables["repositories"][1]["merge_policy"] = "human"
-    assert merge_policy.resolve_for_run(client, RUN_ID, "auto").policy == "auto"
+@pytest.mark.parametrize(
+    "client, run_id",
+    [
+        (FakeClient(runs=[]), RUN_ID),
+        (
+            FakeClient(runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": None}]),
+            RUN_ID,
+        ),
+        (
+            FakeClient(runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": 999}]),
+            RUN_ID,
+        ),
+        # A run row naming another org's repository (impossible through RLS
+        # and /start): the row is not found within the run's org, and that
+        # repository's setting ("auto") is not used.
+        (
+            FakeClient(
+                runs=[{"id": RUN_ID, "org_id": "org-1", "repository_id": OTHER_REPO_ID}]
+            ),
+            RUN_ID,
+        ),
+        (FakeClient(setting="human"), None),
+    ],
+    ids=[
+        "no-run-row",
+        "run-without-repository",
+        "no-repository-row",
+        "other-orgs-repository",
+        "no-run-id",
+    ],
+)
+def test_missing_row_fails_closed_to_human(client, run_id, caplog):
+    """PostgREST returns a row hidden by RLS, a wrong key or a deleted row
+    as an empty result, not an error. That absence could hide a stricter
+    stored setting, so it fails closed like an error, never inherits."""
+    resolution = merge_policy.resolve_for_run(client, run_id, "auto")
+    assert resolution.policy == "human"
+    assert resolution.reasons == [merge_policy.REASON_MISSING]
+    assert "not found" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -323,6 +345,39 @@ async def test_unreadable_setting_holds_the_pr_and_records_why(monkeypatch, reco
     row = recorded.call_args.kwargs
     assert (row["policy"], row["decision"]) == ("human", "held")
     assert merge_policy.REASON_UNREADABLE in row["reasons"]
+
+
+async def test_missing_repository_row_holds_the_pr_and_records_why(
+    monkeypatch, recorded
+):
+    # Under an auto ceiling, a repository row that cannot be found (hidden by
+    # RLS, deleted, wrong org) must not let the run merge on approval alone.
+    client = FakeClient(setting="human")
+    client.tables["repositories"] = []
+    _, pr = _node(monkeypatch, "auto", client)
+
+    result = await agents.maintainer_node(_state_with())
+
+    pr.merge.assert_not_called()
+    assert result["merge_status"] == "awaiting_human_review"
+    row = recorded.call_args.kwargs
+    assert (row["policy"], row["decision"]) == ("human", "held")
+    assert merge_policy.REASON_MISSING in row["reasons"]
+
+
+async def test_rejected_run_records_why_the_policy_was_lowered(monkeypatch, recorded):
+    from test_merge_decision_audit import REJECT
+
+    _node(monkeypatch, "auto", FakeClient(setting="ci"), review=REJECT)
+
+    await agents.maintainer_node(_state_with())
+
+    row = recorded.call_args.kwargs
+    assert (row["policy"], row["decision"]) == ("ci", "not_merged")
+    assert row["reasons"] == [
+        "maintainer rejected",
+        "repository policy ci (ceiling auto)",
+    ]
 
 
 async def test_inherited_setting_keeps_the_ceiling(monkeypatch, recorded):

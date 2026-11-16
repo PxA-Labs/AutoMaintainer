@@ -2892,7 +2892,14 @@ def get_merge_policy() -> str:
 async def _effective_merge_policy():
     """The merge_policy.Resolution of the current run: the stricter of
     MERGE_POLICY and its repository's setting, read now. Never raises; an
-    unreadable setting means human for the run (fail closed)."""
+    unreadable setting or a missing run/repository row means human for the
+    run (fail closed).
+
+    It is read at each decision that depends on it (the status-post abort in
+    _verify_and_report, the protected-path hold, the merge decision) rather
+    than once per run, so a setting changed mid-run can differ between those
+    decisions. That is harmless: every read is fail-closed and the merge
+    decision always acts on, and records, the value it read itself."""
     import merge_policy
 
     return await asyncio.to_thread(
@@ -3306,7 +3313,8 @@ async def maintainer_node(state: AgentState):
                 "not_merged",
                 "agent",
                 ["maintainer rejected"]
-                + (["maintainer reply invalid (fail closed)"] if parse_error else []),
+                + (["maintainer reply invalid (fail closed)"] if parse_error else [])
+                + policy_reasons,
                 state.get("verification"),
             )
         else:

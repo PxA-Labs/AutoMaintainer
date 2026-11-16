@@ -58,9 +58,10 @@ The policy that gates a run is the **effective** one: `MERGE_POLICY` lowered
 by the repository's own `merge_policy` setting, if it set a stricter one
 (ARCHITECTURE.md, "Merge policy"). A repository set to `ci` under an `auto`
 deployment is gated exactly as described here; one set to `human` never
-merges. If the setting cannot be read the run is treated as `human`.
+merges. If the setting cannot be read, or the run's repository row is
+missing, the run is treated as `human`.
 
-If the status cannot be posted while `MERGE_POLICY=ci` (GitHub refuses the
+If the status cannot be posted while the effective policy is `ci` (GitHub refuses the
 write, or the PR head could not be resolved at all), the run stops with
 `VERIFICATION_STATUS_FAILED`; the PR stays open. Under `human` (the default)
 and `auto`, a failure to post is logged and the run continues.

@@ -218,12 +218,29 @@ class FakeRepo:
 
 
 class FakeSupabase:
-    """The runs table, plus the merge_decisions rows inserted (merge_audit.py);
-    other tables accept writes and return nothing."""
+    """The runs and repositories tables, plus the merge_decisions rows
+    inserted (merge_audit.py); other tables accept writes and return nothing."""
 
     def __init__(self):
         self.runs = {}
+        self.repositories = {}
         self.decisions = []
+
+    def add_run(self, run_id, org_id, repository_id=1, merge_policy=None, **row):
+        """A runs row and its repository, as /start creates them. The
+        repository's merge_policy is read at the merge decision
+        (merge_policy.py); a missing row would fail closed to human."""
+        self.runs[run_id] = {
+            "id": run_id,
+            "org_id": org_id,
+            "repository_id": repository_id,
+            **row,
+        }
+        self.repositories[repository_id] = {
+            "id": repository_id,
+            "org_id": org_id,
+            "merge_policy": merge_policy,
+        }
 
     def table(self, name):
         return _Query(self, name)
@@ -278,6 +295,11 @@ class _Query:
                     if all(row.get(k) == v for k, v in filters.items())
                 ]
             )
+        if self.table == "repositories" and self.op == "select":
+            filters = getattr(self, "filters", {})
+            row = self.db.repositories.get(filters.get("id"))
+            match = row and all(row.get(k) == v for k, v in filters.items())
+            return SimpleNamespace(data=[dict(row)] if match else [])
         if self.table != "runs":
             return SimpleNamespace(data=[])
         row = self.db.runs.get(self.id)
@@ -332,6 +354,7 @@ def world(monkeypatch, tmp_path):
     repo = FakeRepo()
     monkeypatch.setattr(agents, "gh", run_client(repo))
     db = FakeSupabase()
+    db.add_run(RUN_ID, "org-1")  # as /start creates it
     monkeypatch.setattr(agents, "supabase", db)
 
     calls = []
