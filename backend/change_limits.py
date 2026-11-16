@@ -54,18 +54,19 @@ DEFAULT_MAX_LINES = 500
 # Test-runner configuration is denied because a change to it can skip or
 # short-circuit the tests that verification runs (``addopts``, a conftest
 # hook, a ``test`` script) and so turn a failing change into a passing one
-# (#480). So are modules that replace the runner: the detected pytest command
-# is ``python -m pytest`` from the repository root, and ``-m`` puts that
+# (#480). So are modules that replace the runner, for custom test commands
+# that run ``python -m pytest`` from the repository root (``-m`` puts that
 # directory first on ``sys.path``, so a root ``pytest.py`` or ``pytest/``
-# package runs instead of pytest. npm reads the project ``.npmrc`` (its
+# package runs instead of pytest). npm reads the project ``.npmrc`` (its
 # ``script-shell`` decides what runs ``npm test``).
 #
 # This is a partial guard. Test files are not denied: writing tests is part
 # of the agent's job, and the Maintainer sees the verification output
 # instead. Nor are setup files or other modules the tests load (their names
-# are configurable), nor a root module shadowing one of pytest's own
-# dependencies (``pluggy``, ``iniconfig``, ``packaging``); running
-# ``python -P -m pytest`` in verification would close that last gap. No
+# are configurable). Denying by name cannot stop a root module that shadows
+# something pytest imports, standard library included (``argparse.py``,
+# ``inspect.py``); the detected command closes that by putting the root
+# last on ``sys.path`` (verification.PYTEST_LAUNCHER). No
 # default protects a custom ``test_command``: a repository that sets one
 # should deny its entry point (a script, a Makefile) with
 # ``change_limits.deny``. A repository that wants the agent to edit one of

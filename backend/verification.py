@@ -194,6 +194,19 @@ def _config_timeout(config: dict) -> int:
     return min(value, ceiling)
 
 
+# How the detected pytest command starts pytest (#480). `python -m pytest`
+# puts the repository root FIRST on sys.path, so a change could add a root
+# module named after anything pytest imports (pytest itself, pluggy, or a
+# standard-library module such as argparse) and make a failing suite exit 0.
+# `-P` (Python 3.11+) keeps the root off the front; the launcher then appends
+# it LAST, so installed and standard-library modules always win while tests
+# can still import packages from the repository root, as under `-m`.
+PYTEST_LAUNCHER = (
+    "import os, sys; sys.path.append(os.getcwd()); "
+    "import pytest; raise SystemExit(pytest.console_main())"
+)
+
+
 def _has_pytest_config(repo_dir: Path) -> bool:
     if (repo_dir / "pytest.ini").is_file() or (repo_dir / "tests").is_dir():
         return True
@@ -256,7 +269,7 @@ def detect_test_plan(repo_dir: Path) -> Optional[TestPlan]:
         return TestPlan(list(command), timeout, "config")
     if _has_pytest_config(repo_dir):
         python = os.getenv("VERIFY_PYTHON") or "python"
-        return TestPlan([python, "-m", "pytest", "-q"], timeout, "pytest")
+        return TestPlan([python, "-P", "-c", PYTEST_LAUNCHER, "-q"], timeout, "pytest")
     if _has_npm_test(repo_dir):
         return TestPlan(["npm", "test", "--silent"], timeout, "npm")
     return None

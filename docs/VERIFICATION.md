@@ -180,7 +180,14 @@ Without the file, the command is detected, first match wins:
 
 1. **pytest**, when there is a `tests/` directory, a `pytest.ini`, a
    `[tool.pytest...]` table in `pyproject.toml`, or `[tool:pytest]` in
-   `setup.cfg`: `<VERIFY_PYTHON> -m pytest -q`.
+   `setup.cfg`: `<VERIFY_PYTHON> -P -c <launcher> -q`, where the launcher
+   appends the repository root to the **end** of `sys.path` and runs
+   pytest. Under plain `python -m pytest` the root comes first, so a root
+   module named after anything pytest imports (`pytest.py`, `pluggy.py`, or
+   a standard-library name such as `argparse.py`) would replace it and could
+   make a failing suite exit 0. With the root last, installed and
+   standard-library modules always win, and tests can still import packages
+   from the repository root. `-P` needs Python 3.11 or later.
 2. **npm**, when `package.json` has a `scripts.test` other than the `npm init`
    placeholder: `npm test --silent`.
 3. Otherwise `skipped` with "no tests detected".
@@ -195,7 +202,7 @@ Without the file, the command is detected, first match wins:
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
 | `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail). The PR body shows the last 3000 characters. |
-| `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. |
+| `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. Must be Python 3.11 or later (`-P`); with an older one the detected command fails. |
 
 ## Security model
 
@@ -425,11 +432,11 @@ remote sandbox host setup).
   `jest.config.*`, `vitest.config.*`, `vitest.workspace.*`,
   `vitest.projects.*`, `vite.config.*` (Vitest falls back to its `test`
   block), `.mocharc*`, `karma.conf.*` and `playwright.config.*`. It also
-  holds files that replace the runner: the detected pytest command is
-  `python -m pytest` run from the repository root, and `-m` puts that
-  directory first on `sys.path`, so a root `pytest.py` or `pytest/` package
-  would run instead of pytest and could print a pass; `pytest.py`,
-  `pytest/**` and `_pytest/**` are denied at any depth. npm reads the
+  holds files that replace the runner for custom commands such as
+  `python -m pytest` (`-m` puts the working directory first on `sys.path`,
+  so a root `pytest.py` or `pytest/` package would run instead of pytest and
+  could print a pass); `pytest.py`, `pytest/**` and `_pytest/**` are denied
+  at any depth. npm reads the
   project `.npmrc` when it runs `npm test` (`script-shell=true` would make it
   exit 0 without running the script), so `.npmrc` is denied too. A change to
   one of them gets a draft `needs-human` PR and is never merged, even when
@@ -440,16 +447,18 @@ remote sandbox host setup).
   can monkeypatch the runner much as `conftest.py` can, and setup-file names
   are configurable, so denying by name is a partial guard. The same goes for
   build configuration the runner applies, such as `babel.config.js` or
-  `tsconfig.json`. A root module named after one of pytest's own
-  dependencies (`pluggy`, `iniconfig`, `packaging`) still shadows it under
-  `python -m pytest`; running `python -P -m pytest` (Python 3.11+, which
-  leaves the working directory off `sys.path`) would close that gap and is a
-  recommended follow-up in `backend/verification.py`. A change can still
+  `tsconfig.json`. Denying by name cannot stop a root module that shadows
+  anything pytest imports, standard library included (`argparse.py`,
+  `inspect.py`): under plain `python -m pytest` such a file makes a failing
+  suite exit 0. The detected command puts the root last on `sys.path`
+  instead (see the detection rules above); a custom `test_command` should
+  run `python -P` and add the root the same way, or use the `pytest`
+  executable. A change can still
   weaken, skip or delete assertions in a test file it edits and make
   verification pass. No default entry protects a custom `test_command` (a
   script, `make test`, `tox`): add its entry point to `change_limits.deny`
-  on the base branch, e.g. `deny: ["scripts/test.sh", "Makefile"]`. The Maintainer now sees the
-  verification output (see [Maintainer input](#maintainer-input)), but that
+  on the base branch, e.g. `deny: ["scripts/test.sh", "Makefile"]`. The
+  Maintainer now sees the verification output (see [Maintainer input](#maintainer-input)), but that
   is a model reading untrusted output, not a guarantee. Human review, or
   required CI that the change cannot modify, remains necessary for
   `MERGE_POLICY=ci`/`auto`. A repository whose fixes routinely touch, say,
