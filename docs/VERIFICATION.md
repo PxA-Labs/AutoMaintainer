@@ -86,6 +86,19 @@ checkpoint) keeps the hold: an earlier `held` row of the run with either
 reason is sticky, so access granted in between does not merge it. That
 check is best effort; if the rows cannot be read, the fresh lookup decides.
 
+A run without a target issue opens its own issue, whose "Proposed Feature" is
+the task the models follow, and a redelivered run looks that issue up again by
+its hidden `<!-- automaintainer-run: <run_id> -->` marker. The marker is
+public once the issue exists, so it proves nothing on its own: the lookup
+(`agents._find_run_issue`, #490) accepts only an issue that carries the marker
+**and** was opened by the identity the run acts as, `<app-slug>[bot]` for an
+App installation (the slug from `GET /app`, falling back to `GITHUB_APP_SLUG`)
+or the token's user (`GET /user`) in `pat` mode. An outsider's copy is
+skipped, and when the identity cannot be resolved no issue is reused and a new
+one is opened (at worst a duplicate). The run issue's author is therefore not
+a trigger actor: it is the run itself, and only it and repository writers can
+edit the issue. Issue comments are not read by any agent.
+
 ### Maintainer input
 
 The Maintainer's review prompt includes the `VerificationResult` of the
@@ -319,7 +332,12 @@ failed permission lookup holding it. Every decision writes one
 decision and reasons. One test pins the gate's documented limit: a payload
 in the README of a run a writer started still merges under `ci`/`auto` if a
 model obeys it, since only a writer could have put it there; only `human`
-prevents that. The `.github/workflows/redteam.yml` workflow runs them on
+prevents that. A fourth vector plants an outsider's issue that copies the
+run's marker, before the run or after a crash that lost the checkpoint
+(#490); with a writer as the trigger, picking it up would merge the
+payload's change under `ci`/`auto`. The tests assert the payload reaches no
+prompt, the planted issue is left untouched and only the legitimate change is
+committed. The `.github/workflows/redteam.yml` workflow runs them on
 every pull request that touches `backend/`.
 
 ## Docker sandbox backend
@@ -513,8 +531,11 @@ remote sandbox host setup).
   at any depth. npm reads the
   project `.npmrc` when it runs `npm test` (`script-shell=true` would make it
   exit 0 without running the script), so `.npmrc` is denied too. A change to
-  one of them gets a draft `needs-human` PR and is never merged, even when
-  verification passes. Test files themselves (`tests/**`, `test_*.py`,
+  one of them is refused before it is committed (#488): nothing reaches the
+  run branch, no PR is opened and the run fails with `PROTECTED_PATH`, a
+  terminal failure that a human resolves by making the change or rerunning
+  by hand. (Only when a later iteration of a run that already has a PR hits
+  a denied path is that PR also held as a draft `needs-human` PR.) Test files themselves (`tests/**`, `test_*.py`,
   `*.test.*`) are **not** denied, because writing and fixing tests is part of
   the agent's job. Nor is any other file the tests load: setup files
   (`jest.setup.js`, `tests/__init__.py`), helpers and the source under test
@@ -538,6 +559,14 @@ remote sandbox host setup).
   `MERGE_POLICY=ci`/`auto`. A repository whose fixes routinely touch, say,
   `pyproject.toml` can re-allow it with `change_limits.allow` on the base
   branch (see [Per repository](#per-repository-automaintaineryml)).
+- **An unreadable base `.automaintainer.yml` refuses every commit.** When
+  the file on the base branch cannot be read (any GitHub error but a 404,
+  such as a 5xx or a rate limit) or parsed, its `change_limits.deny` entries
+  are unknown, so no path is committed: the run fails with `PROTECTED_PATH`
+  before anything reaches the run branch. The failure is terminal, so a
+  transient GitHub error ends the run and it has to be rerun by hand. A
+  missing file (404) is not an error; the deployment's `CHANGE_LIMIT_*`
+  settings apply.
 - **Event counts are synthetic.** The `TestResultEvent` reports
   `passed_count`/`failed_count` as 1/0 for the whole command; individual test
   counts are not parsed from the output.

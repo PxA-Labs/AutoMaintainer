@@ -183,7 +183,12 @@ non-collaborator or a failed lookup holds the PR with
 the run: a redelivery that reviews again finds the earlier `held`
 merge_decisions row and holds again. The gate vouches for who
 caused the run, not for repository content it reads (README, code comments),
-which only a writer can change. The merge pins the reviewed head SHA, so
+which only a writer can change. The run's own issue (a run without a target
+issue) is not an outsider's input either: a redelivery reuses an issue only
+when it carries the run's hidden marker **and** was opened by the identity the
+run acts as (`<app-slug>[bot]`, or the PAT's user), never a copy of the marker
+in someone else's issue (#490; see [Idempotent side
+effects](#idempotent-side-effects)). The merge pins the reviewed head SHA, so
 GitHub refuses it if the branch moved after the review.
 
 A path on the change-limits denylist is refused **before** it is committed
@@ -214,9 +219,8 @@ docs/VERIFICATION.md. Details, settings and the security model are in
 
 ### Change limits
 
-After the Implementer commits to the run branch and before it opens the PR
-(and after every later push to it),
-`backend/change_limits.py` measures the change against the base branch:
+Before the Implementer commits to the run branch (and before every later
+push to it), `backend/change_limits.py` measures the change against the base branch:
 changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
 (`CHANGE_LIMIT_MAX_LINES`, default 500) and a path denylist
 (`CHANGE_LIMIT_DENYLIST`, comma-separated globs replacing the default:
@@ -247,8 +251,10 @@ section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,
 **base** branch, so a change cannot relax its own limits. For example,
 `allow: ["pyproject.toml"]` lets a repository's agent edit `pyproject.toml`
 while every other runner configuration file stays denied. An invalid or
-unreadable configuration counts as a violation. A change over a limit gets a
-draft PR, the `needs-human` label and a "Change limits exceeded" PR-body
+unreadable configuration refuses every commit with `PROTECTED_PATH`, as a
+denied path does (see [Merge policy](#merge-policy)); the failure is terminal
+and the run has to be rerun by hand. A change over the file or line limit
+gets a draft PR, the `needs-human` label and a "Change limits exceeded" PR-body
 section, and the Maintainer never merges it under any `MERGE_POLICY`. The
 violations are kept in the run state and checkpoint, so they stay in force for
 later iterations and redeliveries; the agent never marks such a PR ready for
