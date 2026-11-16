@@ -110,6 +110,14 @@ interface FileChange {
   oldContent: string;
   newContent: string;
   status: 'modified' | 'created' | 'deleted';
+  /**
+   * Restored after a reload from the working branch's diff (#505). The
+   * default branch's content is not loaded, so the entry stays staged when
+   * edited. `pending`: newContent is not known yet and is loaded from the
+   * caller's working branch when proposing.
+   */
+  restored?: boolean;
+  pending?: boolean;
 }
 
 interface ProposedChange {
@@ -414,14 +422,21 @@ function ProposeChangesDialog({
               <div className="border-t border-zinc-800 pt-4">
                 <h4 className="text-sm font-medium text-zinc-400 mb-3">File Diffs</h4>
                 <div className="space-y-4 max-h-[50vh] overflow-y-auto">
-                  {changes.map((change, i) => (
-                    <DiffView
-                      key={i}
-                      oldContent={change.oldContent}
-                      newContent={change.newContent}
-                      fileName={change.path}
-                    />
-                  ))}
+                  {changes.map((change, i) =>
+                    change.pending ? (
+                      <p key={i} className="text-sm text-zinc-400">
+                        <code className="text-zinc-200">{change.path}</code> ({change.status}) is saved on
+                        your working branch; its contents are included when you propose.
+                      </p>
+                    ) : (
+                      <DiffView
+                        key={i}
+                        oldContent={change.oldContent}
+                        newContent={change.newContent}
+                        fileName={change.path}
+                      />
+                    )
+                  )}
                 </div>
               </div>
 
@@ -882,6 +897,46 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
     };
   }, [repoUrl]);
 
+  // Staged changes live in page state, but saved edits live on the caller's
+  // working branch. Restore the staged list from that branch's diff against
+  // the default branch, so a reload does not lose them (#505).
+  useEffect(() => {
+    let active = true;
+    authedFetch(`/repo/${encodeURIComponent(repoUrl)}/working-changes`)
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: unknown) => {
+        if (!active || !data || typeof data !== "object") return;
+        const { branch, changes } = data as { branch?: unknown; changes?: unknown };
+        if (!Array.isArray(changes)) return;
+        const restored: FileChange[] = changes.flatMap((c: unknown) => {
+          const entry = c as { path?: unknown; status?: unknown } | null;
+          if (!entry || typeof entry.path !== "string") return [];
+          const status: FileChange["status"] =
+            entry.status === "created" || entry.status === "deleted" ? entry.status : "modified";
+          return [{
+            path: entry.path,
+            oldContent: "",
+            newContent: "",
+            status,
+            restored: true,
+            pending: status !== "deleted",
+          }];
+        });
+        if (restored.length === 0) return;
+        if (typeof branch === "string") setSavedBranch(branch);
+        setStagedChanges(prev => [
+          ...prev,
+          ...restored.filter(r => !prev.some(p => p.path === r.path)),
+        ]);
+      })
+      .catch(() => {
+        // Best effort: without it the IDE works as before a reload.
+      });
+    return () => {
+      active = false;
+    };
+  }, [repoUrl]);
+
 
 
   const switchTab = (path: string) => {
@@ -1021,6 +1076,14 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
     // before the first edit, so a saved-then-reopened file still diffs
     // against that baseline rather than its saved version.
     const staged = stagedChanges.find(c => c.path === path);
+    if (staged?.restored) {
+      // Its default-branch baseline is unknown: keep it staged, with the
+      // edited content and status.
+      setStagedChanges(prev =>
+        prev.map(c => (c.path === path ? { ...c, newContent, pending: false } : c))
+      );
+      return;
+    }
     const original = staged ? staged.oldContent : originalContents[path] || "";
     if (newContent !== original) {
       setStagedChanges(prev => {
@@ -1133,6 +1196,19 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
 
     setProposing(true);
     try {
+      // Restored entries carry no content yet: use the open buffer, else
+      // load the file from the caller's working branch.
+      const changes = await Promise.all(stagedChanges.map(async (c): Promise<FileChange> => {
+        if (!c.pending || c.status === "deleted") return c;
+        const open = editedContents[c.path] ?? fileContents[c.path];
+        if (open !== undefined) return { ...c, newContent: open, pending: false };
+        const fileRes = await authedFetch(`/repo/${encodeURIComponent(repoUrl)}/file?file_path=${encodeURIComponent(c.path)}`);
+        if (!fileRes.ok) throw new Error(`Could not load ${c.path}`);
+        const file: { content?: unknown } = await fileRes.json();
+        if (typeof file.content !== "string") throw new Error(`Could not load ${c.path}`);
+        return { ...c, newContent: file.content, pending: false };
+      }));
+
       // Call backend to create PR
       const res = await authedFetch(`/repo/${encodeURIComponent(repoUrl)}/propose-changes`, {
         method: "POST",
@@ -1140,7 +1216,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
         body: JSON.stringify({
           title,
           description,
-          changes: stagedChanges.map(c => ({
+          changes: changes.map(c => ({
             path: c.path,
             content: c.newContent,
             status: c.status
@@ -1161,7 +1237,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
         title,
         description,
         branchName: data.branch_name,
-        changes: stagedChanges,
+        changes,
         status: 'opened',
         prNumber: data.pr_number,
         prUrl: data.pr_url,

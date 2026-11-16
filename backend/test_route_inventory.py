@@ -93,6 +93,11 @@ TENANT = {
         f"/repo/{t.repo}/file?file_path=a.py",
         {},
     ),
+    ("GET", "/repo/{repo_name:path}/working-changes"): lambda t: (
+        "get",
+        f"/repo/{t.repo}/working-changes",
+        {},
+    ),
     ("POST", "/repo/{repo_name:path}/file"): lambda t: (
         "post",
         f"/repo/{t.repo}/file",

@@ -16,10 +16,15 @@ vi.mock("./InlineAssist", () => ({ default: () => null }));
 type Pending = { url: string; init?: RequestInit; resolve: (r: Response) => void };
 const pending: Pending[] = [];
 const calls: Array<{ url: string; init?: RequestInit }> = [];
+// What GET /repo/{name}/working-changes answers (the caller's branch diff).
+const working: { body: unknown } = { body: { branch: null, changes: [] } };
 
 vi.mock("@/lib/api", () => ({
   authedFetch: (url: string, init?: RequestInit) => {
     calls.push({ url, init });
+    if (url.endsWith("/working-changes")) {
+      return Promise.resolve(new Response(JSON.stringify(working.body)));
+    }
     if (url.endsWith("/tree")) {
       return Promise.resolve(
         new Response(
@@ -61,6 +66,61 @@ describe("WebIDE", () => {
   beforeEach(() => {
     pending.length = 0;
     calls.length = 0;
+    working.body = { branch: null, changes: [] };
+  });
+
+  it("restores the staged list from the working branch after a reload (#505)", async () => {
+    working.body = {
+      branch: "automaintainer/ide-abc123",
+      changes: [
+        { path: "README.md", status: "modified" },
+        { path: "gone.py", status: "deleted" },
+      ],
+    };
+    render(<WebIDE repoUrl="octo/a" />);
+
+    // No tab is open: the sidebar's Propose button appears once restored.
+    fireEvent.click(await screen.findByRole("button", { name: /^propose changes$/i }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("gone.py");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^propose changes$/i }));
+    fireEvent.change(await screen.findByLabelText(/pr title/i), { target: { value: "Restore" } });
+    fireEvent.click(screen.getByRole("button", { name: /create pull request/i }));
+
+    // The restored file's content comes from the caller's own view.
+    await waitFor(() => expect(fileGets()).toHaveLength(1));
+    expect(fileGets()[0].url).toContain("file_path=README.md");
+    await act(async () => resolveFile("octo/a", fileJson("saved on my branch")));
+
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/propose-changes"))).toBe(true));
+    const propose = calls.find((c) => c.url.endsWith("/propose-changes"));
+    expect(JSON.parse(String(propose!.init?.body)).changes).toEqual([
+      { path: "README.md", content: "saved on my branch", status: "modified" },
+      { path: "gone.py", content: "", status: "deleted" },
+    ]);
+  });
+
+  it("keeps a restored file staged when it is edited", async () => {
+    working.body = { branch: "automaintainer/ide-abc123", changes: [{ path: "README.md", status: "modified" }] };
+    render(<WebIDE repoUrl="octo/a" />);
+    await screen.findByRole("button", { name: /^propose changes$/i });
+    await openReadme();
+    await act(async () => resolveFile("octo/a", fileJson("saved")));
+    expect((await screen.findByRole("status")).textContent).toContain("automaintainer/ide-abc123");
+    fireEvent.change(await screen.findByTestId("editor"), { target: { value: "edited" } });
+    fireEvent.change(await screen.findByTestId("editor"), { target: { value: "saved" } });
+
+    // Back to the loaded content, but its default-branch baseline is
+    // unknown, so it stays staged.
+    expect(screen.getByRole("button", { name: /^propose \(1\)$/i })).toBeDefined();
+  });
+
+  it("ignores a malformed working-changes answer", async () => {
+    working.body = { changes: "nope" };
+    render(<WebIDE repoUrl="octo/a" />);
+    await screen.findAllByText("README.md");
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/working-changes"))).toBe(true));
+    expect(screen.queryByRole("button", { name: /^propose/i })).toBeNull();
   });
 
   it("does not let a slow response from the previous repo fill the new repo's tab", async () => {
@@ -137,8 +197,8 @@ describe("WebIDE", () => {
     fireEvent.change(await screen.findByLabelText(/pr title/i), { target: { value: "Edit readme" } });
     fireEvent.click(screen.getByRole("button", { name: /create pull request/i }));
 
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/propose-changes"))).toBe(true));
     const propose = calls.find((c) => c.url.endsWith("/propose-changes"));
-    expect(propose).toBeDefined();
     expect(JSON.parse(String(propose!.init?.body)).changes).toEqual([
       { path: "README.md", content: "v2", status: "modified" },
     ]);

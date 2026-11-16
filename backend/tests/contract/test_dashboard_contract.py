@@ -110,6 +110,8 @@ DASHBOARD_CALLS = {
     ),
     # components/WebIDE.tsx delete
     ("DELETE", "/repo/{}/file"): Call(query=frozenset({"file_path"})),
+    # components/WebIDE.tsx staged-list restore (#505)
+    ("GET", "/repo/{}/working-changes"): Call(reads=frozenset({"branch", "changes"})),
     # components/WebIDE.tsx search
     ("GET", "/repo/{}/search"): Call(
         query=frozenset({"q"}), reads=frozenset({"results"})
