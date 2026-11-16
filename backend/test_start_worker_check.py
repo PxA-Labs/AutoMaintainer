@@ -31,6 +31,7 @@ class FakeInspect:
 
 @pytest.fixture(autouse=True)
 def fresh_probe(monkeypatch):
+    monkeypatch.delenv("AGENT_WORKER_CHECK", raising=False)
     monkeypatch.setattr(
         main, "_worker_probe", {"checked_at": float("-inf"), "available": False}
     )
@@ -88,6 +89,7 @@ def test_start_without_agent_worker_is_503_and_creates_no_run(monkeypatch, inspe
 
     assert response.status_code == 503
     assert "agent worker" in response.json()["detail"]
+    assert response.json()["code"] == "AGENT_WORKER_UNAVAILABLE"
     assert response.headers["Retry-After"]
     sb.table.return_value.insert.assert_not_called()
     task.apply_async.assert_not_called()
@@ -106,6 +108,35 @@ def test_start_with_agent_worker_queues_the_run(monkeypatch):
     task.apply_async.assert_called_once()
     sb.table.return_value.insert.assert_called_once()
     assert inspect.calls == [main.WORKER_PING_TIMEOUT_SECONDS]
+
+
+@pytest.mark.parametrize("value", ["false", "0", "off", " No "])
+def test_disabled_check_queues_without_probing(monkeypatch, value):
+    monkeypatch.setenv("AGENT_WORKER_CHECK", value)
+    sb = supabase_with_repo(monkeypatch)
+    task = queued_task(monkeypatch)
+    inspect = FakeInspect(replies=None)  # would answer "no worker"
+    use_inspect(monkeypatch, inspect)
+
+    response = client.post("/start", json={"repo_name": "o/r"})
+
+    assert response.status_code == 200, response.text
+    assert inspect.calls == []
+    sb.table.return_value.insert.assert_called_once()
+    task.apply_async.assert_called_once()
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", ""])
+def test_check_stays_on_for_other_values(monkeypatch, value):
+    monkeypatch.setenv("AGENT_WORKER_CHECK", value)
+    sb = supabase_with_repo(monkeypatch)
+    queued_task(monkeypatch)
+    use_inspect(monkeypatch, FakeInspect(replies=None))
+
+    response = client.post("/start", json={"repo_name": "o/r"})
+
+    assert response.status_code == 503
+    sb.table.return_value.insert.assert_not_called()
 
 
 def test_probe_result_is_cached_for_a_few_seconds(monkeypatch):

@@ -9,7 +9,7 @@ from fastapi import (
     Query,
     Request,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from github import Github, GithubException, UnknownObjectException
 from fastapi.middleware.cors import CORSMiddleware
@@ -782,7 +782,24 @@ def _agent_worker_available_cached() -> bool:
         return _worker_probe["available"]
 
 
+# Machine-readable code in the 503 body; `detail` stays a human message.
+AGENT_WORKER_UNAVAILABLE = "AGENT_WORKER_UNAVAILABLE"
+
+
+def agent_worker_check_enabled() -> bool:
+    """False when AGENT_WORKER_CHECK is set to a false value.
+
+    For local development and tests that run without a broker. With the
+    check off, /start queues runs even when nobody will consume them.
+    Read on every call so it can be toggled without re-importing main.
+    """
+    value = os.getenv("AGENT_WORKER_CHECK", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 async def agent_worker_available() -> bool:
+    if not agent_worker_check_enabled():
+        return True
     return await asyncio.to_thread(_agent_worker_available_cached)
 
 
@@ -820,11 +837,16 @@ async def start_agents(
 
     # Without a worker the task would wait in the broker indefinitely and the
     # run would stay "queued". Checked before the run row is created.
+    # The body keeps FastAPI's `detail` (the dashboard shows it) and adds a
+    # stable `code` for clients.
     if not await agent_worker_available():
-        raise HTTPException(
+        return JSONResponse(
             status_code=503,
-            detail="No agent worker is available to run this job. "
-            "Start a Celery worker on the 'agent_runs' queue and try again.",
+            content={
+                "detail": "No agent worker is available to run this job. "
+                "Start a Celery worker on the 'agent_runs' queue and try again.",
+                "code": AGENT_WORKER_UNAVAILABLE,
+            },
             headers={"Retry-After": str(int(WORKER_PING_CACHE_SECONDS) or 1)},
         )
 
