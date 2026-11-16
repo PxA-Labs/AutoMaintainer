@@ -1428,6 +1428,38 @@ def _requested_ide_branch(requested: Optional[str], org_id: str, user_id: str) -
     return branch
 
 
+def _sync_ide_branch(repo, branch: str, default_branch: str) -> None:
+    """Merge the default branch into an existing IDE working branch.
+
+    The IDE reads files from a clone synced to the default branch, so a file
+    merged there after the working branch was created would be visible in
+    the editor but missing on the branch it saves to (#139). The working
+    branch is server-owned, so it is fast-forwarded or merged before each
+    write. Only the working branch is written: ``base`` is the merge target.
+    A conflict is reported rather than resolved, so no user edit is lost.
+
+    Blocking (PyGithub); call from a worker thread.
+    """
+    try:
+        # 204 (already up to date) returns None; 201 returns the merge commit.
+        repo.merge(
+            base=branch,
+            head=default_branch,
+            commit_message=f"Merge {default_branch} into {branch}",
+        )
+    except GithubException as e:
+        if e.status == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="Your IDE working branch conflicts with the default "
+                "branch; resolve the conflict on GitHub (or propose your "
+                "changes as a pull request) before saving again",
+            )
+        raise internal_error(502, "Could not update the IDE working branch", e)
+    except Exception as e:
+        raise internal_error(502, "Could not update the IDE working branch", e)
+
+
 def _ensure_writable_branch(repo, branch: str) -> None:
     """Refuse the default or a protected branch; create ``branch`` if missing.
 
@@ -1455,6 +1487,8 @@ def _ensure_writable_branch(repo, branch: str) -> None:
             raise HTTPException(
                 status_code=409, detail="The target branch is protected"
             )
+        if branch.startswith(IDE_BRANCH_PREFIX):
+            _sync_ide_branch(repo, branch, default_branch)
         return
 
     try:
@@ -1502,9 +1536,11 @@ async def update_repo_file(
         _ensure_writable_branch(repo, branch)
         try:
             file = repo.get_contents(payload.file_path, ref=branch)
-        except Exception as e:
+        except UnknownObjectException as e:
             logger.info(f"get_contents({payload.file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
+        except Exception as e:
+            raise internal_error(502, "Could not read the file from GitHub", e)
         try:
             repo.update_file(
                 file.path, message, payload.content, file.sha, branch=branch
@@ -1592,9 +1628,11 @@ async def delete_repo_file(
         _ensure_writable_branch(repo, target_branch)
         try:
             file = repo.get_contents(file_path, ref=target_branch)
-        except Exception as e:
+        except UnknownObjectException as e:
             logger.info(f"get_contents({file_path}) on {repo_name} failed: {e}")
             raise HTTPException(status_code=404, detail="File not found in repo")
+        except Exception as e:
+            raise internal_error(502, "Could not read the file from GitHub", e)
 
         if isinstance(file, list):
             raise HTTPException(

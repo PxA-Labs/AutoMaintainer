@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from github import UnknownObjectException
 
 import agents
 import main
@@ -135,10 +136,22 @@ async def test_healthz_stays_responsive_during_slow_github_call(
 
 @pytest.mark.asyncio
 async def test_errors_raised_in_the_worker_thread_still_map_to_http(slow_github):
-    slow_github.get_contents.side_effect = Exception("404 from GitHub")
+    slow_github.get_contents.side_effect = UnknownObjectException(
+        404, {"message": "Not Found"}, None
+    )
     async with _client() as client:
         r = await client.post(
             "/repo/a/app/file", json={"file_path": "a.py", "content": "x"}
         )
     assert r.status_code == 404
     assert r.json()["detail"] == "File not found in repo"
+
+
+@pytest.mark.asyncio
+async def test_non_404_github_errors_are_not_reported_as_missing(slow_github):
+    slow_github.get_contents.side_effect = Exception("GitHub 500")
+    async with _client() as client:
+        r = await client.post(
+            "/repo/a/app/file", json={"file_path": "a.py", "content": "x"}
+        )
+    assert r.status_code == 502

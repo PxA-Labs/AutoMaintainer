@@ -239,3 +239,90 @@ def test_concurrent_branch_creation_is_tolerated(repo):
 
     assert response.status_code == 200, response.text
     assert _write_branches(repo) == [WORKING_BRANCH]
+
+
+# --- Stale working branch: files merged into main after it was created ---
+
+
+@pytest.fixture
+def stale_repo(repo):
+    """The working branch exists but predates a.py, which is only on main.
+
+    a.py appears on the working branch only once main has been merged into it.
+    """
+    repo.get_branch.side_effect = None
+    repo.get_branch.return_value = SimpleNamespace(protected=False)
+
+    def get_contents(path, ref):
+        if ref == WORKING_BRANCH and not repo.merge.called:
+            raise UnknownObjectException(404, {"message": "Not Found"}, None)
+        return SimpleNamespace(path=path, sha=f"sha-on-{ref}")
+
+    repo.get_contents.side_effect = get_contents
+    return repo
+
+
+@pytest.mark.parametrize("method,path,kwargs", [SAVE, DELETE])
+def test_stale_working_branch_is_brought_up_to_date(stale_repo, method, path, kwargs):
+    response = _send(method, path, kwargs)
+
+    assert response.status_code == 200, response.text
+    stale_repo.merge.assert_called_once()
+    assert stale_repo.merge.call_args.kwargs["base"] == WORKING_BRANCH
+    assert stale_repo.merge.call_args.kwargs["head"] == "main"
+    # The write used the working branch's blob, not main's.
+    assert _write_branches(stale_repo) == [WORKING_BRANCH]
+    write = stale_repo.update_file if method == "post" else stale_repo.delete_file
+    assert f"sha-on-{WORKING_BRANCH}" in write.call_args.args
+    stale_repo.create_git_ref.assert_not_called()
+
+
+@pytest.mark.parametrize("method,path,kwargs", WRITES)
+def test_stale_working_branch_conflict_is_reported(stale_repo, method, path, kwargs):
+    """A conflict must not be resolved by dropping the user's edits."""
+    stale_repo.merge.side_effect = GithubException(
+        409, {"message": "Merge conflict"}, None
+    )
+
+    response = _send(method, path, kwargs)
+
+    assert response.status_code == 409, response.text
+    assert "conflicts with the default branch" in response.json()["detail"]
+    assert _write_branches(stale_repo) == []
+
+
+def test_working_branch_sync_failure_is_not_a_404(stale_repo):
+    stale_repo.merge.side_effect = GithubException(500, {"message": "boom"}, None)
+
+    response = _send(*SAVE)
+
+    assert response.status_code == 502, response.text
+    assert _write_branches(stale_repo) == []
+
+
+@pytest.mark.parametrize("method,path,kwargs", [SAVE, DELETE])
+def test_file_read_error_other_than_not_found_is_not_a_404(repo, method, path, kwargs):
+    repo.get_contents.side_effect = GithubException(500, {"message": "boom"}, None)
+
+    response = _send(method, path, kwargs)
+
+    assert response.status_code == 502, response.text
+    assert _write_branches(repo) == []
+
+
+@pytest.mark.parametrize("method,path,kwargs", WRITES)
+def test_stale_working_branch_sync_never_writes_main(stale_repo, method, path, kwargs):
+    """The default branch is only ever the merge head, never the target."""
+    _send(method, path, kwargs)
+
+    for call in stale_repo.merge.call_args_list:
+        assert not main._same_branch(call.kwargs["base"], "main")
+    assert all(not main._same_branch(b, "main") for b in _write_branches(stale_repo))
+    stale_repo.create_git_ref.assert_not_called()
+
+
+def test_explicit_non_ide_branch_is_not_merged(stale_repo):
+    """Only the server-owned IDE branch is synced; a user's branch is not."""
+    _send(*SAVE, branch="feature/issue-12-abc")
+
+    stale_repo.merge.assert_not_called()
