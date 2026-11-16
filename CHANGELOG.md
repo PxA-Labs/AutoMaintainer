@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **agents**: Fail runs on clone failure and report missing target issues as INVALID_TARGET_ISSUE ([#497](https://github.com/PxA-Labs/AutoMaintainer/pull/497)) (closes [#138](https://github.com/PxA-Labs/AutoMaintainer/issues/138), [#142](https://github.com/PxA-Labs/AutoMaintainer/issues/142)) - @purvanshjoshi
 - **agents**: Require a trusted trigger to auto-merge and check limits before commit ([#489](https://github.com/PxA-Labs/AutoMaintainer/pull/489)) (closes [#488](https://github.com/PxA-Labs/AutoMaintainer/issues/488)) - @purvanshjoshi
 - **verification**: Hold test-runner configuration for a human and stop root modules shadowing pytest ([#484](https://github.com/PxA-Labs/AutoMaintainer/pull/484)) - @purvanshjoshi
 - **db**: Replace the non-re-runnable schema file with versioned migrations ([#475](https://github.com/PxA-Labs/AutoMaintainer/pull/475)) (closes [#473](https://github.com/PxA-Labs/AutoMaintainer/issues/473)) - @purvanshjoshi
