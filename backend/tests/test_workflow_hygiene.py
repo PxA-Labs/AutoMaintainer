@@ -8,12 +8,19 @@ These guard CI hygiene that used to regress silently:
   analyze versions made CodeQL fail on main);
 - the top-level token permissions are read-only, and write scopes are
   granted only to the jobs that need them;
-- the dashboard CI runs its unit tests (``npm test``), not only lint and build.
+- the dashboard CI runs its unit tests (``npm test``), not only lint and build;
+- the Supabase keep-alive step fails loudly, naming the missing secret or the
+  HTTP status and its likely cause. Its script is run under bash against a
+  stub ``curl``, so no network or real project is involved.
 """
 
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -129,3 +136,166 @@ def test_no_job_uses_blanket_permissions():
         for job_name, job in _load(wf)["jobs"].items():
             perms = job.get("permissions", {})
             assert isinstance(perms, dict), f"{wf.name}:{job_name}: {perms!r}"
+
+
+# --- Supabase keep-alive -------------------------------------------------
+
+KEEPALIVE = WORKFLOWS_DIR / "supabase-keepalive.yml"
+
+# Stands in for curl: records its arguments, writes FAKE_BODY to the -o file
+# and prints FAKE_STATUS the way `curl -w '%{http_code}'` does.
+FAKE_CURL = """printf '%s\\n' "$@" > "$CURL_ARGS_FILE"
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+if [ -n "$out" ]; then printf '%s' "${FAKE_BODY:-}" > "$out"; fi
+if [ -n "${FAKE_STDERR:-}" ]; then echo "$FAKE_STDERR" >&2; fi
+printf '%s' "$FAKE_STATUS"
+exit "${FAKE_EXIT:-0}"
+"""
+
+
+def _bash():
+    """A POSIX bash; on Windows, Git Bash rather than the WSL launcher."""
+    candidates = [shutil.which("bash")]
+    vcs = shutil.which("git")
+    if vcs:
+        # Git for Windows: <root>/cmd/git.exe next to <root>/bin/bash.exe.
+        candidates.append(str(Path(vcs).resolve().parents[1] / "bin" / "bash.exe"))
+    for c in candidates:
+        if not c or not Path(c).exists():
+            continue
+        if os.name == "nt" and ("system32" in c.lower() or "windowsapps" in c.lower()):
+            continue
+        return c
+    return None
+
+
+BASH = _bash()
+
+
+def _keepalive_step():
+    (step,) = _load(KEEPALIVE)["jobs"]["ping-supabase"]["steps"]
+    return step
+
+
+def test_keepalive_is_read_only_bounded_and_reads_secrets_only_via_env():
+    wf = _load(KEEPALIVE)
+    job = wf["jobs"]["ping-supabase"]
+    assert wf["permissions"] == {} and job["permissions"] == {}
+    assert isinstance(job["timeout-minutes"], int) and job["timeout-minutes"] <= 10
+    step = _keepalive_step()
+    assert step["shell"] == "bash"
+    assert "${{" not in step["run"]  # no expression interpolation in the script
+    assert set(step["env"]) == {"SUPABASE_URL", "SUPABASE_SERVICE_KEY"}
+
+
+@pytest.fixture
+def run_keepalive(tmp_path):
+    if BASH is None:
+        pytest.skip("bash is not available")
+    script = tmp_path / "keepalive.sh"
+    script.write_bytes(_keepalive_step()["run"].encode("utf-8"))
+    fake_curl = tmp_path / "fake-curl.sh"
+    fake_curl.write_bytes(FAKE_CURL.encode("utf-8"))
+    # A shell function shadows any curl binary, whatever PATH order the bash
+    # launcher sets up (Git Bash prepends its own /usr/bin), so the real
+    # curl, and the network, are never reached.
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_bytes(
+        b'curl() { "$BASH" "$FAKE_CURL_SCRIPT" "$@"; }\n. "$KEEPALIVE_SCRIPT"\n'
+    )
+    args_file = tmp_path / "curl-args"
+    summary = tmp_path / "summary.md"
+
+    def run(status="200", *, url="https://proj.supabase.co/", key="svc", **extra):
+        env = {
+            **os.environ,
+            "FAKE_CURL_SCRIPT": fake_curl.as_posix(),
+            "KEEPALIVE_SCRIPT": script.as_posix(),
+            "CURL_ARGS_FILE": args_file.as_posix(),
+            "GITHUB_STEP_SUMMARY": summary.as_posix(),
+            "FAKE_STATUS": status,
+            "SUPABASE_URL": url,
+            "SUPABASE_SERVICE_KEY": key,
+            **extra,
+        }
+        # The flags GitHub Actions uses for `shell: bash`.
+        proc = subprocess.run(
+            [BASH, "--noprofile", "--norc", "-eo", "pipefail", wrapper.as_posix()],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return SimpleNamespace(
+            code=proc.returncode,
+            out=proc.stdout + proc.stderr,
+            curl_args=(
+                args_file.read_text().splitlines() if args_file.exists() else None
+            ),
+            summary=summary.read_text() if summary.exists() else "",
+        )
+
+    return run
+
+
+def test_keepalive_succeeds_on_2xx_and_strips_trailing_slash(run_keepalive):
+    r = run_keepalive("200")
+    assert r.code == 0, r.out
+    assert "succeeded (HTTP 200)" in r.out
+    assert "https://proj.supabase.co/rest/v1/runs?select=id&limit=1" in r.curl_args
+    assert r.summary == ""
+
+
+@pytest.mark.parametrize(
+    "url, key, named",
+    [
+        ("", "", "SUPABASE_URL SUPABASE_SERVICE_KEY."),
+        ("https://proj.supabase.co", "", "SUPABASE_SERVICE_KEY."),
+        ("", "svc", "SUPABASE_URL."),
+    ],
+)
+def test_keepalive_names_each_missing_secret(run_keepalive, url, key, named):
+    r = run_keepalive(url=url, key=key)
+    assert r.code == 1
+    assert "::error title=Supabase keep-alive failed::" in r.out
+    assert f"Repository secret(s) not set: {named}" in r.out
+    assert r.curl_args is None  # never pings with a missing secret
+    assert "Owner action" in r.summary and "DEPLOYMENT.md" in r.summary
+
+
+@pytest.mark.parametrize(
+    "status, hint",
+    [
+        ("401", "SUPABASE_SERVICE_KEY is wrong or was rotated"),
+        ("403", "SUPABASE_SERVICE_KEY is wrong or was rotated"),
+        ("404", "runs table was not found"),
+        ("503", "most likely paused"),
+        ("540", "most likely paused"),
+        # A redirect never reaches the database, so it is not a successful
+        # keep-alive (the previous script accepted any 3xx).
+        ("301", "unexpected response"),
+    ],
+)
+def test_keepalive_fails_with_the_http_status_and_a_cause(run_keepalive, status, hint):
+    r = run_keepalive(status, FAKE_BODY='{"message":"nope"}')
+    assert r.code == 1
+    assert (
+        "::error title=Supabase keep-alive failed::"
+        f"Supabase ping returned HTTP {status}: "
+    ) in r.out
+    assert hint in r.out
+    assert '{"message":"nope"}' in r.out  # response body shown for diagnosis
+    assert f"HTTP {status}" in r.summary
+
+
+def test_keepalive_reports_no_response_when_curl_cannot_connect(run_keepalive):
+    r = run_keepalive(
+        "000", FAKE_EXIT="6", FAKE_STDERR="curl: (6) Could not resolve host"
+    )
+    assert r.code == 1
+    assert "HTTP 000: no HTTP response" in r.out
+    assert "Could not resolve host" in r.out
