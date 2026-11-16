@@ -248,6 +248,23 @@ agent just wrote from an untrusted issue. Treat it as hostile.
   than any backtick run it contains, so it cannot inject Markdown or
   `@mentions`.
 
+### Red-team fixtures
+
+`backend/tests/redteam/` runs the real agent pipeline offline against three
+prompt-injection vectors (epic #411): a malicious issue body, instructions in
+the README and instructions in a code comment of the target file. A scripted
+model either obeys the payload (compliant attacker) or ignores it, under each
+`MERGE_POLICY`, with every other CI check green so `ci` would merge. The
+tests assert the deterministic layer that stops each attack: a
+`.github/workflows/` path is never chosen as a target (the run stops with
+`NO_TARGET_FILE`), a denied path such as `conftest.py` becomes a draft
+`needs-human` PR that is not merged, and the payload reaches prompts only
+inside escaped `<untrusted-data>` blocks. One known gap is a strict xfail: a
+compliant model's in-limits change to an unprotected file merges under `auto`,
+and under `ci` when the checks pass; only `human` prevents it. The
+`.github/workflows/redteam.yml` workflow runs them on every pull request that
+touches `backend/`.
+
 ## Docker sandbox backend
 
 `runners/docker_sandbox.py` is the shipped production backend. Each
