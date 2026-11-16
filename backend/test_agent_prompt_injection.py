@@ -112,6 +112,7 @@ async def test_implementer_wraps_maintainer_feedback(monkeypatch):
     repo.get_contents.return_value = SimpleNamespace(
         decoded_content=b"x = 1\n", sha="s"
     )
+    repo.get_contents.side_effect = _no_repo_config
     repo.create_pull.return_value = SimpleNamespace(number=1, html_url="u")
     monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: repo))
     seen = {}
@@ -183,3 +184,16 @@ async def test_architect_wraps_readme_and_file_list(monkeypatch, tmp_path):
     assert '<untrusted-data source="README">' in seen["user"]
     assert '<untrusted-data source="repository file list">\napp.py\n' in seen["user"]
     assert "&lt;/untrusted-data>" in seen["user"]
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

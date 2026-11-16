@@ -196,6 +196,24 @@ WRITE_ROLES = frozenset({"owner", "admin", "member"})
 ADMIN_ROLES = frozenset({"owner", "admin"})
 
 
+def github_login_of(user) -> Optional[str]:
+    """The GitHub login linked to a Supabase auth user, or None.
+
+    Read from the user's ``github`` identity, which Supabase fills from
+    GitHub OAuth at sign-in, never from ``user_metadata``, which the user
+    can change through the auth API. It is the actor the trusted-trigger
+    merge gate (trust.py) checks for runs this user starts.
+    """
+    for identity in getattr(user, "identities", None) or []:
+        if getattr(identity, "provider", None) != "github":
+            continue
+        data = getattr(identity, "identity_data", None) or {}
+        login = data.get("user_name") or data.get("preferred_username")
+        if isinstance(login, str) and login:
+            return login
+    return None
+
+
 # --- Dependency: Get current user/org from Supabase Auth ---
 async def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
@@ -253,7 +271,13 @@ async def get_current_user(
             detail="No organization membership found. Complete onboarding first.",
         )
 
-    return {"user_id": user.id, "org_id": org_id, "role": role, "email": user.email}
+    return {
+        "user_id": user.id,
+        "org_id": org_id,
+        "role": role,
+        "email": user.email,
+        "github_login": github_login_of(user),
+    }
 
 
 async def get_org_id(user: dict = Depends(get_current_user)) -> str:
@@ -724,11 +748,16 @@ async def start_agents(
     org_id: str = Depends(get_org_id),
     user_id: str = Depends(get_user_id),
     _role: str = Depends(require_write_role),
+    user: dict = Depends(get_current_user),
 ):
     """
     Start an agent run via Celery task queue.
     Returns immediately with run_id for polling.
     """
+    # The caller's linked GitHub login goes to the worker as the run's
+    # trigger (source "api"); MERGE_POLICY=ci/auto merge only when it can
+    # write to the repository (trust.py). A caller without one gets no
+    # automatic merge.
     from agents import supabase as agents_supabase
 
     sb = agents_supabase
@@ -789,7 +818,12 @@ async def start_agents(
                 repository_id,
                 github_installation_id,
             ],
-            kwargs={"target_issue_number": req.target_issue, "mode": req.mode},
+            kwargs={
+                "target_issue_number": req.target_issue,
+                "mode": req.mode,
+                "trigger_login": user.get("github_login"),
+                "trigger_source": "api",
+            },
             queue="agent_runs",
         )
 

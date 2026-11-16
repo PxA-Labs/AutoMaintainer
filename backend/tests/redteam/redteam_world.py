@@ -4,7 +4,8 @@ and a scripted LLM for running the real agent graph offline.
 The fixtures test the deterministic defences, not a model's willingness to
 resist: a COMPLIANT attacker model obeys every injected instruction, and the
 assertions check what the code still prevents (where the change may be
-written, draft/needs-human holds, merge gating, prompt escaping).
+written, what is never committed, the trusted-trigger merge gate, prompt
+escaping).
 
 The GitHub fakes extend the ones of test_agent_idempotency.py and
 test_agent_change_limits.py with per-commit statuses and check runs, so that
@@ -17,7 +18,13 @@ from types import SimpleNamespace
 
 import agents
 from test_agent_change_limits import GatedPR, GatedRepo
-from test_agent_idempotency import _role
+from test_agent_idempotency import WRITER, _role  # noqa: F401 (re-exported)
+
+# GitHub accounts of the fixture world (trust.py, #487). WRITER (re-exported)
+# has write permission on the repository; ATTACKER, like any outsider of a
+# public repository, has read. The collaborator-permission endpoint of the
+# fake answers for both.
+ATTACKER = "eve-attacker"
 
 WORKFLOW = ".github/workflows/ci.yml"
 # A denied path the target extractor does accept (no leading dot): a root
@@ -119,6 +126,7 @@ class RedTeamRepo(GatedRepo):
         super().__init__()
         self.readme = readme
         self.statuses = {}
+        self.permissions[ATTACKER] = "read"
 
     def get_readme(self):
         if self.readme is None:

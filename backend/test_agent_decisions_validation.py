@@ -208,6 +208,7 @@ def _repo_with_file(content: bytes):
     repo.get_contents.return_value = SimpleNamespace(
         decoded_content=content, sha="s", path="x"
     )
+    repo.get_contents.side_effect = _no_repo_config
     repo.create_pull.return_value = SimpleNamespace(number=1, html_url="u")
     return repo
 
@@ -290,3 +291,16 @@ async def test_implementer_commits_requested_removal(monkeypatch):
     )
     assert result["code"] == "def f0(x):\n    return x"
     repo.update_file.assert_called_once()
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

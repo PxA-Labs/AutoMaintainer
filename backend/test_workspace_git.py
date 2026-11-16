@@ -443,6 +443,7 @@ def test_implementer_leaves_default_branch_clone_clean(upstream, monkeypatch):
     existing = MagicMock()
     existing.decoded_content = b"v1\n"
     gh_repo.get_contents.return_value = existing
+    gh_repo.get_contents.side_effect = _no_repo_config
     gh_repo.create_pull.return_value = SimpleNamespace(number=1, html_url="u")
     monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: gh_repo))
 
@@ -457,3 +458,16 @@ def test_implementer_leaves_default_branch_clone_clean(upstream, monkeypatch):
     (upstream / "app.py").write_text("v2\n")
     git("commit", "-qam", "c2", cwd=upstream)
     assert git("pull", "--ff-only", cwd=repo_dir).returncode == 0
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

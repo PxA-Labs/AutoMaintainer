@@ -20,6 +20,8 @@ from events import NullEmitter
 RUN_ID = "3f2c9a1e-7b4d-4c8e-9a01-5d6e7f809abc"
 CODE = "x = 2\n"
 APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
+# The GitHub login that starts the runs: a writer of FakeRepo (trust.py, #487).
+WRITER = "octo-writer"
 
 
 class WorkerCrash(BaseException):
@@ -70,6 +72,10 @@ class FakeRepo:
         self.pulls = []
         self.merges = 0
         self.crash_after = None  # name of the call after which to "crash"
+        # GET .../collaborators/{login}/permission (trust.py, #487): a login's
+        # permission, or an exception to raise for it.
+        self.permissions = {WRITER: "write"}
+        self.permission_lookups = []
 
     def trip(self, step):
         if self.crash_after == step:
@@ -89,6 +95,13 @@ class FakeRepo:
 
     def get_readme(self):
         raise GithubException(404, {"message": "Not Found"}, None)
+
+    def get_collaborator_permission(self, login):
+        self.permission_lookups.append(login)
+        permission = self.permissions.get(login, "none")
+        if isinstance(permission, Exception):
+            raise permission
+        return permission
 
     def _commit(self, path, content, branch):
         self.files[(branch, path)] = content
@@ -111,6 +124,8 @@ class FakeRepo:
             assignees=[],
             comments=[],
             state="open",
+            # Issues the run opens are the App's; a test sets another author.
+            user=SimpleNamespace(login="automaintainer[bot]", type="Bot"),
         )
         issue.create_comment = issue.comments.append
         issue.edit = lambda state: setattr(issue, "state", state)
@@ -159,10 +174,12 @@ class FakeRepo:
 
 
 class FakeSupabase:
-    """The runs table only; other tables accept writes and return nothing."""
+    """The runs table, plus the merge_decisions rows inserted (merge_audit.py);
+    other tables accept writes and return nothing."""
 
     def __init__(self):
         self.runs = {}
+        self.decisions = []
 
     def table(self, name):
         return _Query(self, name)
@@ -191,17 +208,32 @@ class _Query:
         return self
 
     def insert(self, payload):
-        self.op = "insert"
+        self.op, self.payload = "insert", payload
         return self
 
-    def eq(self, _col, value):
+    def eq(self, col, value):
         self.id = value
+        self.filters = {**getattr(self, "filters", {}), col: value}
         return self
 
     def limit(self, _n):
         return self
 
+    def order(self, *_a, **_k):
+        return self
+
     def execute(self):
+        if self.table == "merge_decisions" and self.op == "insert":
+            self.db.decisions.append(self.payload)
+        if self.table == "merge_decisions" and self.op == "select":
+            filters = getattr(self, "filters", {})
+            return SimpleNamespace(
+                data=[
+                    dict(row)
+                    for row in self.db.decisions
+                    if all(row.get(k) == v for k, v in filters.items())
+                ]
+            )
         if self.table != "runs":
             return SimpleNamespace(data=[])
         row = self.db.runs.get(self.id)
@@ -279,8 +311,14 @@ def world(monkeypatch, tmp_path):
     return SimpleNamespace(repo=repo, db=db, calls=calls, crash_in=crash_in)
 
 
-async def _run():
-    return await agents.run_agent_loop("o/r", run_id=RUN_ID, emitter=NullEmitter())
+async def _run(trigger_login=WRITER):
+    return await agents.run_agent_loop(
+        "o/r",
+        run_id=RUN_ID,
+        emitter=NullEmitter(),
+        trigger_login=trigger_login,
+        trigger_source="api",
+    )
 
 
 async def _crash_then_rerun(world):

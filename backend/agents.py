@@ -77,6 +77,11 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 _run_github_credentials: ContextVar[Optional[GitHubCredentials]] = ContextVar(
     "run_github_credentials", default=None
 )
+# The trusted-trigger outcome of the current run (trust.py), looked up at most
+# once per run: run_agent_loop binds a fresh dict that maintainer_node fills.
+_run_trigger_trust: ContextVar[Optional[dict]] = ContextVar(
+    "run_trigger_trust", default=None
+)
 
 
 class _RunGithubClient:
@@ -1165,6 +1170,10 @@ class AgentState(TypedDict):
     # workspace.get_safe_repo_dir.
     repository_id: Optional[int]
     target_issue: int | None
+    # Who caused the run: {"source": "api", "login": <GitHub login or None>}.
+    # Set once by run_agent_loop and never written by a node; the merge gate
+    # (trust.py) checks it before any automatic merge.
+    trigger: Optional[dict]
     architect_directive: str
     idea: str
     pm_decision: str
@@ -2343,18 +2352,26 @@ def _read_base_file(gh_repo, path: str, ref: str) -> Optional[str]:
     return found.decoded_content.decode("utf-8")
 
 
-def _change_limit_violations(
+def _evaluate_change_limits(
     gh_repo, base_branch: str, path: str, code: str, base_content=None
-) -> list[str]:
-    """Limits (change_limits.py) that writing ``code`` to ``path`` exceeds,
-    measured against the base branch.
+) -> tuple[list[str], bool]:
+    """``(violations, may_commit)`` for writing ``code`` to ``path``:
+    the limits (change_limits.py) it exceeds, measured against the base
+    branch, and whether the path may be committed to the run branch at all.
 
     The limits are read from ``.automaintainer.yml`` on the BASE branch, so a
     change cannot relax its own limits. Anything that prevents evaluating
-    them fails closed: it is reported as a violation.
+    them fails closed: it is reported as a violation (a draft PR for a
+    human). When the configuration itself cannot be read or parsed (a 5xx or
+    rate-limit error from GitHub, invalid YAML), its ``deny`` entries are
+    unknown, so no path may be committed (#488): a transient error must not
+    let a path only the repository's own denylist protects (``scripts/**``)
+    reach the run branch. When only the base copy of ``path`` is unreadable,
+    the denylist is known and decides as usual.
     """
     import change_limits
 
+    limits = None
     try:
         limits = change_limits.limits_from_config(
             _read_base_file(gh_repo, change_limits.CONFIG_FILE, base_branch)
@@ -2362,26 +2379,42 @@ def _change_limit_violations(
         if base_content is None:
             base_content = _read_base_file(gh_repo, path, base_branch) or ""
     except change_limits.ChangeLimitsConfigError as e:
-        return [f"Invalid change limits on the base branch: {e}."]
+        violation = f"Invalid change limits on the base branch: {e}."
     except Exception as e:
         logger.warning("Could not evaluate change limits for %s: %s", path, e)
-        return [
+        violation = (
             f"The change limits could not be evaluated ({type(e).__name__}); "
             "treating the change as exceeding them."
-        ]
+        )
+    else:
+        violation = None
+    if violation is not None:
+        may_commit = (
+            limits is not None and change_limits.denied_by(path, limits) is None
+        )
+        return [violation], may_commit
     added, removed = change_limits.count_line_changes(base_content, code)
-    return change_limits.find_violations(
+    violations = change_limits.find_violations(
         [change_limits.FileChange(path, added, removed)], limits
     )
+    return violations, change_limits.denied_by(path, limits) is None
+
+
+def _change_limit_violations(
+    gh_repo, base_branch: str, path: str, code: str, base_content=None
+) -> list[str]:
+    """The violations of _evaluate_change_limits."""
+    return _evaluate_change_limits(gh_repo, base_branch, path, code, base_content)[0]
 
 
 async def _check_change_limits(
     gh_repo, state, checkpoint, base_branch, path, code, base_content=None
-) -> list[str]:
-    """Current violations, or the ones an earlier iteration or attempt of
-    the run recorded: a run that once exceeded a limit stays held."""
-    found = await asyncio.to_thread(
-        _change_limit_violations, gh_repo, base_branch, path, code, base_content
+) -> tuple[list[str], bool]:
+    """``(violations, may_commit)``: the current violations, or the ones an
+    earlier iteration or attempt of the run recorded (a run that once
+    exceeded a limit stays held), and whether ``path`` may be committed."""
+    found, may_commit = await asyncio.to_thread(
+        _evaluate_change_limits, gh_repo, base_branch, path, code, base_content
     )
     violations = (
         found
@@ -2392,7 +2425,38 @@ async def _check_change_limits(
         await _save_checkpoint(
             current_run_id.get(None), change_limit_violations=violations
         )
-    return violations
+    return violations, may_commit
+
+
+async def _refuse_protected_change(
+    gh_repo, path: str, violations: list[str], pr_number=None, iteration=0
+):
+    """Fail the run without committing ``path`` (#488): it is on the
+    denylist, or the denylist could not be read. Nothing reaches the run
+    branch, so no push-triggered workflow runs it. When the run already has
+    a PR (a later iteration), that PR is held for a human and a ``held``
+    merge_decisions row records why. Raises PipelineAbortError
+    (PROTECTED_PATH), a terminal run failure, so a redelivery is skipped."""
+    import merge_audit
+
+    message = (
+        f"Refusing to commit {path}: " + " ".join(violations) + " Nothing was "
+        "committed; a human has to make this change."
+    )
+    if pr_number:
+        pr = gh_repo.get_pull(pr_number)
+        _hold_pr_for_human(pr, violations)
+        await _record_merge_decision(
+            pr,
+            pr_number,
+            iteration,
+            get_merge_policy(),
+            merge_audit.HELD,
+            merge_audit.ACTOR_POLICY,
+            [merge_audit.REASON_CHANGE_LIMITS, merge_audit.REASON_NOT_COMMITTED],
+            None,
+        )
+    raise PipelineAbortError("PROTECTED_PATH", message, AgentPhase.IMPLEMENTER)
 
 
 def _hold_pr_for_human(pr, violations: list[str]) -> None:
@@ -2490,7 +2554,8 @@ async def implementer_node(state: AgentState):
         # pushed head; verify again so the PR still carries a fresh result.
         code = pushed.decoded_content.decode("utf-8")
         logs = [resume_log]
-        violations = await _check_change_limits(
+        # Already committed by the earlier attempt; only the hold applies.
+        violations, _ = await _check_change_limits(
             gh_repo, state, checkpoint, gh_repo.default_branch, path, code
         )
         if violations:
@@ -2606,6 +2671,21 @@ async def implementer_node(state: AgentState):
         )
 
     if iteration == 0:
+        # Before anything is written (#488): a denied path is never committed
+        # (the run fails with PROTECTED_PATH and opens no branch or PR); any
+        # other change over the limits becomes a draft PR for a human instead
+        # of a merge candidate.
+        violations, may_commit = await _check_change_limits(
+            gh_repo,
+            state,
+            checkpoint,
+            default_branch,
+            path,
+            code,
+            base_content=original_content if target_file_exists else "",
+        )
+        if not may_commit:
+            await _refuse_protected_change(gh_repo, path, violations)
         # Every step below first looks for what an earlier attempt of this run
         # left behind, so a redelivered task converges on one branch, one
         # commit and one PR.
@@ -2618,17 +2698,6 @@ async def implementer_node(state: AgentState):
             code,
             f"Implement fix for Issue #{issue_number}",
             branch_name,
-        )
-        # Before the PR is opened: a change over the limits becomes a draft PR
-        # for a human instead of a merge candidate.
-        violations = await _check_change_limits(
-            gh_repo,
-            state,
-            checkpoint,
-            default_branch,
-            path,
-            code,
-            base_content=original_content if target_file_exists else "",
         )
         pr = _find_pr_for_branch(gh_repo, branch_name)
         verb = "Reusing"
@@ -2665,6 +2734,13 @@ async def implementer_node(state: AgentState):
     else:
         branch_name = state["branch_name"]
         pr_number = state["pr_number"]
+        violations, may_commit = await _check_change_limits(
+            gh_repo, state, checkpoint, default_branch, path, code
+        )
+        if not may_commit:
+            await _refuse_protected_change(
+                gh_repo, path, violations, pr_number=pr_number, iteration=iteration
+            )
         committed = _commit_file_if_changed(
             gh_repo,
             path,
@@ -2676,9 +2752,6 @@ async def implementer_node(state: AgentState):
             gh_repo.get_pull(pr_number).create_issue_comment(
                 f"I pushed a fix for the Maintainer feedback (Iteration {iteration})."
             )
-        violations = await _check_change_limits(
-            gh_repo, state, checkpoint, default_branch, path, code
-        )
         if violations:
             _hold_pr_for_human(gh_repo.get_pull(pr_number), violations)
         await _save_checkpoint(run_id, implemented_iteration=iteration)
@@ -2870,6 +2943,69 @@ async def _record_merge_decision(
         pr_url=getattr(pr, "html_url", None),
         verification=verification,
     )
+
+
+def _earlier_trigger_hold(run_id):
+    """A TriggerTrust that keeps an earlier hold, when a merge_decisions row
+    of this run was held by the trigger gate; None otherwise.
+
+    A worker can crash after recording that hold and before saving the
+    checkpoint, so the redelivery reviews again. Without this, a permission
+    granted in between would let the redelivered run merge although the
+    original delivery held it (#487). Any held row of the run counts, not
+    only one for the current head SHA: the trigger is the same for every
+    iteration. Best effort: when the rows cannot be read, the fresh
+    permission lookup (itself fail-closed) decides alone."""
+    import merge_audit
+    import trust
+
+    if supabase is None or not run_id:
+        return None
+    gate_reasons = (
+        merge_audit.REASON_UNTRUSTED_TRIGGER,
+        merge_audit.REASON_TRIGGER_CHECK_FAILED,
+    )
+    try:
+        rows = (
+            supabase.table(merge_audit.AUDIT_TABLE)
+            .select("reasons")
+            .eq("run_id", run_id)
+            .eq("decision", merge_audit.HELD)
+            .execute()
+        ).data or []
+    except Exception as e:
+        logger.warning("Could not read earlier merge decisions of %s: %s", run_id, e)
+        return None
+    for row in rows:
+        reasons = row.get("reasons") or []
+        for reason in gate_reasons:
+            if reason in reasons:
+                return trust.TriggerTrust(
+                    False,
+                    reason,
+                    "an earlier delivery of this run held the PR; the hold is kept",
+                )
+    return None
+
+
+async def _trigger_trust(gh_repo, state):
+    """trust.check_trigger for this run, looked up once per run."""
+    import trust
+
+    cache = _run_trigger_trust.get()
+    if cache is not None and "result" in cache:
+        return cache["result"]
+    result = await asyncio.to_thread(_earlier_trigger_hold, current_run_id.get(None))
+    if result is None:
+        result = await asyncio.to_thread(
+            trust.check_trigger,
+            gh_repo,
+            state.get("trigger"),
+            state.get("target_issue"),
+        )
+    if cache is not None:
+        cache["result"] = result
+    return result
 
 
 MAINTAINER_VERIFICATION_INSTRUCTIONS = (
@@ -3105,6 +3241,14 @@ async def maintainer_node(state: AgentState):
                 # change_limits.py: over-limit changes are for a human only.
                 should_merge, reason = False, "the change exceeds the change limits"
                 audit_reasons.append("change limits exceeded")
+            if should_merge:
+                # Last, deterministic and outside the model's reach (#487):
+                # only a run caused by repository writers merges unattended.
+                trigger_trust = await _trigger_trust(gh_repo, state)
+                audit_reasons.append(trigger_trust.reason)
+                if not trigger_trust.trusted:
+                    should_merge = False
+                    reason = f"{trigger_trust.reason}: {trigger_trust.detail}"
 
             async def record(decision: str) -> None:
                 await _record_merge_decision(
@@ -3304,8 +3448,16 @@ async def run_agent_loop(
     emitter: Optional[EventEmitter] = None,
     github_installation_id: Optional[int] = None,
     repository_id: Optional[int] = None,
+    trigger_login: Optional[str] = None,
+    trigger_source: Optional[str] = None,
 ):
     """Run the agent graph for ``repo_name``.
+
+    ``trigger_login`` is the GitHub login of whoever caused the run and
+    ``trigger_source`` how (``api`` for POST /start). Under MERGE_POLICY=ci or
+    auto the PR is merged only when that login (and the author of
+    ``target_issue``, if any) can write to the repository (trust.py); without
+    a login nothing is merged automatically.
 
     ``github_installation_id`` is the GitHub App installation of the
     repository (``repositories.github_installation_id``); every GitHub call of
@@ -3326,6 +3478,7 @@ async def run_agent_loop(
 
         run_id = str(uuid.uuid4())
     current_run_id.set(run_id)
+    _run_trigger_trust.set({})
 
     if emitter is not None:
         current_emitter.set(emitter)
@@ -3386,6 +3539,7 @@ async def run_agent_loop(
         "repo_name": repo_name,
         "repository_id": repository_id,
         "target_issue": target_issue,
+        "trigger": {"source": trigger_source, "login": trigger_login},
         "architect_directive": "",
         "idea": "",
         "pm_decision": "",

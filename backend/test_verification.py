@@ -531,6 +531,8 @@ def _maintainer_setup(monkeypatch, statuses):
     repo.get_pull.return_value = pr
     repo.owner = SimpleNamespace(login="alice", type="User")
     repo.get_issue.return_value = SimpleNamespace(assignees=[])
+    # The run's trigger (_STATE) can write to the repository (trust.py).
+    repo.get_collaborator_permission.return_value = "write"
     commit = MagicMock()
     commit.get_combined_status.return_value = SimpleNamespace(
         statuses=[SimpleNamespace(context=c, state=s) for c, s in statuses]
@@ -554,6 +556,7 @@ _STATE = {
     "iteration": 0,
     "idea": "fix calc.py:1-1",
     "target_file_path": "calc.py",
+    "trigger": {"source": "api", "login": "alice"},
 }
 
 

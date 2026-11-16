@@ -558,6 +558,7 @@ async def test_agent_emitted_events_have_no_css_formatting():
     mock_file.decoded_content = b"original content"
     mock_file.sha = "filesha123"
     mock_gh_repo.get_contents.return_value = mock_file
+    mock_gh_repo.get_contents.side_effect = _no_repo_config
 
     with patch("agents.gh", mock_gh), patch(
         "agents.run_llm_with_tools", AsyncMock(return_value="print('test')")
@@ -598,3 +599,16 @@ async def test_agent_emitted_events_have_no_css_formatting():
             assert "text-purple" not in str(v)
             assert "<div" not in str(v)
             assert "<span" not in str(v)
+
+
+def _no_repo_config(path, *_args, **_kwargs):
+    """get_contents side effect: the repository has no .automaintainer.yml
+    (an unreadable or invalid one refuses every commit, #488); every other
+    path returns the mock's return_value."""
+    from unittest.mock import DEFAULT
+
+    from github import GithubException
+
+    if path == ".automaintainer.yml":
+        raise GithubException(404, {"message": "Not Found"}, None)
+    return DEFAULT

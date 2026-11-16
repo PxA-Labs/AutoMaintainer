@@ -28,10 +28,15 @@ def _capture_prompt(monkeypatch, content, iteration=0, review=""):
     repo.create_pull.return_value = SimpleNamespace(number=3, html_url="u")
     if content is None:
         # The first read (to build the prompt) 404s; later reads succeed.
-        repo.get_contents.side_effect = [
-            GithubException(404, {}, None),
-            SimpleNamespace(decoded_content=b"", sha="s", path=FILE),
-        ]
+        reads = iter([GithubException(404, {}, None)])
+
+        def get_contents(*_a, **_k):
+            error = next(reads, None)
+            if error is not None:
+                raise error
+            return SimpleNamespace(decoded_content=b"", sha="s", path=FILE)
+
+        repo.get_contents.side_effect = get_contents
     else:
         repo.get_contents.return_value = SimpleNamespace(
             decoded_content=content.encode(), sha="s", path=FILE
