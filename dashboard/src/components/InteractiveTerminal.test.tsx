@@ -137,8 +137,8 @@ describe("InteractiveTerminal", () => {
   });
 
   /** Close the first socket with `code`, then let any backoff run out. */
-  async function closeWith(code: number) {
-    const view = render(<InteractiveTerminal repoUrl="octo/hello" />);
+  async function closeWith(code: number, confirmLeave?: () => boolean) {
+    const view = render(<InteractiveTerminal repoUrl="octo/hello" confirmLeave={confirmLeave} />);
     await flush();
     act(() => FakeSocket.instances[0].onclose?.({ code }));
     await act(async () => {
@@ -149,12 +149,31 @@ describe("InteractiveTerminal", () => {
   }
 
   it("does not reconnect after 4401 and offers to sign in again", async () => {
+    signInWithGitHub.mockClear();
     const view = await closeWith(4401);
     expect(FakeSocket.instances).toHaveLength(1);
-    expect(terms[0].writes.join("")).toContain("Sign in again to use the terminal");
-    expect(view.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    const message = "Could not verify your session. Sign in again or check your organization access";
+    expect(terms[0].writes.join("")).toContain(message);
+    // Announced, not only written into the xterm buffer.
+    expect(view.getByRole("status").textContent).toBe(message);
     act(() => view.getByRole("button", { name: "Sign in" }).click());
     expect(signInWithGitHub).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a manual Reconnect after 4401 (the cause may be transient)", async () => {
+    const view = await closeWith(4401);
+    act(() => view.getByRole("button", { name: "Reconnect" }).click());
+    await flush();
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it("does not leave for sign-in when confirmLeave declines", async () => {
+    signInWithGitHub.mockClear();
+    const confirmLeave = vi.fn(() => false);
+    const view = await closeWith(4401, confirmLeave);
+    act(() => view.getByRole("button", { name: "Sign in" }).click());
+    expect(confirmLeave).toHaveBeenCalledTimes(1);
+    expect(signInWithGitHub).not.toHaveBeenCalled();
   });
 
   it("does not reconnect after 4403 and says the terminal is not allowed", async () => {
@@ -164,6 +183,9 @@ describe("InteractiveTerminal", () => {
       "Terminal disabled or not allowed for this repository"
     );
     expect(view.getByText("Terminal unavailable")).toBeTruthy();
+    expect(view.getByRole("status").textContent).toBe(
+      "Terminal disabled or not allowed for this repository"
+    );
     // Final: neither an automatic nor an offered retry.
     expect(view.queryByRole("button", { name: "Reconnect" })).toBeNull();
     expect(view.queryByRole("button", { name: "Sign in" })).toBeNull();
@@ -178,8 +200,15 @@ describe("InteractiveTerminal", () => {
       [2, 4000],
     ]) {
       act(() => FakeSocket.instances[index].onclose?.({ code: 1006 }));
+      // Not before the backoff has passed...
       await act(async () => {
-        vi.advanceTimersByTime(delay);
+        vi.advanceTimersByTime(delay - 1);
+      });
+      await flush();
+      expect(FakeSocket.instances).toHaveLength(index + 1);
+      // ...and right when it has.
+      await act(async () => {
+        vi.advanceTimersByTime(1);
       });
       await flush();
       expect(FakeSocket.instances).toHaveLength(index + 2);

@@ -18,17 +18,26 @@ import "xterm/css/xterm.css";
 
 interface InteractiveTerminalProps {
   repoUrl?: string;
+  /**
+   * Asked before "Sign in" leaves the page for OAuth; return false to stay
+   * (for example, the Web IDE has unsaved edits and the user cancels).
+   */
+  confirmLeave?: () => boolean;
 }
 
 /** Wait this long after the repository changes before opening a new shell. */
 const REPO_DEBOUNCE_MS = 500;
 
-export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProps) {
+export default function InteractiveTerminal({ repoUrl, confirmLeave }: InteractiveTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The full explanation behind `error`, announced to screen readers (the
+  // xterm buffer is not, and the chip only shows a short label).
+  const [notice, setNotice] = useState("");
   // What the user can do about `error`: reconnect by hand, sign in again
-  // (4401), or nothing (4403: retrying gets the same answer).
+  // (4401; Reconnect is offered too), or nothing (4403: retrying gets the
+  // same answer).
   const [recovery, setRecovery] = useState<"reconnect" | "signin" | "none">("reconnect");
   const [reconnectKey, setReconnectKey] = useState(0);
   const { signInWithGitHub } = useAuth();
@@ -81,24 +90,32 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
     };
     window.addEventListener("resize", handleResize);
 
+    /** Show `message` in the terminal and announce it. */
+    const report = (label: string, message: string, color: "31" | "33" = "31") => {
+      setError(label);
+      setNotice(message);
+      write(`\r\n\x1b[${color}m[${message}]\x1b[0m\r\n`);
+    };
+
     const requireSignIn = (message: string) => {
       setRecovery("signin");
-      setError("Sign in required");
-      write(`\r\n\x1b[31m[${message}]\x1b[0m\r\n`);
+      report("Sign in required", message);
     };
 
     const scheduleReconnect = () => {
       if (disposed) return;
       setRecovery("reconnect");
       if (attempts >= RECONNECT_MAX_ATTEMPTS) {
-        setError("Disconnected");
-        write("\r\n\x1b[31m[Connection lost. Use Reconnect to try again.]\x1b[0m\r\n");
+        report("Disconnected", "Connection lost. Use Reconnect to try again.");
         return;
       }
       const delay = reconnectDelay(attempts);
       attempts += 1;
-      setError("Reconnecting");
-      write(`\r\n\x1b[33m[Connection closed. Reconnecting in ${Math.round(delay / 1000)}s...]\x1b[0m\r\n`);
+      report(
+        "Reconnecting",
+        `Connection closed. Reconnecting in ${Math.round(delay / 1000)}s...`,
+        "33"
+      );
       retryTimer = setTimeout(() => {
         retryTimer = null;
         void connect();
@@ -126,6 +143,7 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
         attempts = 0;
         setIsConnected(true);
         setError(null);
+        setNotice("Terminal connected");
         opened.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
       };
 
@@ -143,23 +161,24 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
         setIsConnected(false);
         // The backend refuses a handshake with 4401 (no valid session) or
         // 4403 (terminal disabled, user not allowed, or not this org's
-        // repository); older backends sent 1008 for both. Retrying cannot
-        // help, so only other closes (1006 and the like) reconnect.
+        // repository); older backends sent 1008 for both. Retrying
+        // automatically cannot help, so only other closes (1006 and the like)
+        // reconnect. The backend also sends 4401 when the user is not an org
+        // member or its session check failed transiently, so the wording
+        // stays neutral and a manual Reconnect is kept next to Sign in.
         switch (classifyTerminalClose(event.code)) {
           case "signin":
-            requireSignIn("Your session has expired. Sign in again to use the terminal");
+            requireSignIn(
+              "Could not verify your session. Sign in again or check your organization access"
+            );
             return;
           case "forbidden":
             setRecovery("none");
-            setError("Terminal unavailable");
-            write(
-              "\r\n\x1b[31m[Terminal disabled or not allowed for this repository]\x1b[0m\r\n"
-            );
+            report("Terminal unavailable", "Terminal disabled or not allowed for this repository");
             return;
           case "policy":
             setRecovery("reconnect");
-            setError("Not authorized");
-            write("\r\n\x1b[31m[Connection refused: not authorized for this terminal]\x1b[0m\r\n");
+            report("Not authorized", "Connection refused: not authorized for this terminal");
             return;
           case "retry":
             scheduleReconnect();
@@ -195,6 +214,9 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
           <span className="uppercase font-semibold tracking-wider">Terminal</span>
         </div>
         <div className="flex items-center gap-2">
+          <span role="status" aria-live="polite" className="sr-only">
+            {notice}
+          </span>
           {isConnected ? (
             <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> Connected</span>
           ) : error === "Reconnecting" ? (
@@ -202,12 +224,22 @@ export default function InteractiveTerminal({ repoUrl }: InteractiveTerminalProp
           ) : error ? (
             <>
               <span className="flex items-center gap-1.5 text-red-400"><span className="w-2 h-2 rounded-full bg-red-500"></span> {error}</span>
-              {recovery === "signin" ? (
-                // Returns to this page after OAuth (lib/auth-return).
-                <button onClick={() => void signInWithGitHub()} className="ml-2 px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors border border-zinc-700">Sign in</button>
-              ) : recovery === "reconnect" ? (
+              {recovery === "signin" && (
+                // Returns to this page after OAuth (lib/auth-return); leaving
+                // drops unsaved Web IDE edits, so the caller may veto it.
+                <button
+                  onClick={() => {
+                    if (confirmLeave && !confirmLeave()) return;
+                    void signInWithGitHub();
+                  }}
+                  className="ml-2 px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors border border-zinc-700"
+                >
+                  Sign in
+                </button>
+              )}
+              {recovery !== "none" && (
                 <button onClick={() => setReconnectKey(k => k + 1)} className="ml-2 px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition-colors border border-zinc-700">Reconnect</button>
-              ) : null}
+              )}
             </>
           ) : (
             <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-zinc-500"></span> Connecting...</span>

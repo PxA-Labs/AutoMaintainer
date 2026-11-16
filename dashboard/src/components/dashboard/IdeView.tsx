@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, Code } from "lucide-react";
 import WebIDE from "@/components/WebIDE";
 import dynamic from "next/dynamic";
@@ -25,6 +25,24 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
   const logScrollRef = useRef<HTMLDivElement>(null);
   // Follow new log lines unless the user scrolled up to read older ones.
   const stickToBottomRef = useRef(true);
+  // Unsaved Web IDE edits, so the terminal's "Sign in" (which leaves the page
+  // for OAuth) can ask before discarding them.
+  const ideDirtyRef = useRef(false);
+  const handleDirtyChange = useCallback(
+    (dirty: boolean) => {
+      ideDirtyRef.current = dirty;
+      onDirtyChange?.(dirty);
+    },
+    [onDirtyChange]
+  );
+  const confirmLeave = useCallback(
+    () =>
+      !ideDirtyRef.current ||
+      window.confirm(
+        "The editor has unsaved changes that will be lost when you leave to sign in. Continue?"
+      ),
+    []
+  );
 
   useEffect(() => {
     const el = logScrollRef.current;
@@ -38,7 +56,7 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
       {/* Monaco WebIDE container */}
       <div className="flex-1 min-h-0">
         {user ? (
-          <WebIDE repoUrl={repoUrl} onDirtyChange={onDirtyChange} />
+          <WebIDE repoUrl={repoUrl} onDirtyChange={handleDirtyChange} />
         ) : (
           <div className="flex items-center justify-center h-full bg-zinc-950 text-muted text-sm">
             Sign in to access the Web IDE
@@ -104,7 +122,7 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
         ) : (
           <div className="flex-1 min-h-0">
             {user ? (
-              <InteractiveTerminal repoUrl={repoUrl} />
+              <InteractiveTerminal repoUrl={repoUrl} confirmLeave={confirmLeave} />
             ) : (
               <div className="flex items-center justify-center h-full text-muted text-xs">
                 Sign in to access the Interactive Terminal
