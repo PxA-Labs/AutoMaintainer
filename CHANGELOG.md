@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- Per-repository merge policy under the MERGE_POLICY ceiling ([#495](https://github.com/PxA-Labs/AutoMaintainer/pull/495)) - @purvanshjoshi
 - **agents**: Record a merge_decisions audit row per merge decision ([#486](https://github.com/PxA-Labs/AutoMaintainer/pull/486)) - @purvanshjoshi
 - **verification**: Record an audit row per verification ([#483](https://github.com/PxA-Labs/AutoMaintainer/pull/483)) - @purvanshjoshi
 - **agents**: Show verification results to the Maintainer and hold over-limit changes for a human ([#478](https://github.com/PxA-Labs/AutoMaintainer/pull/478)) - @purvanshjoshi
