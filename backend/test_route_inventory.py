@@ -27,10 +27,12 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocketDisconnect
 
 import agents
@@ -340,9 +342,11 @@ MISSING = SimpleNamespace(repo="nobody/missing", repository_id=999, run=RUN_MISS
 def discovered_routes() -> set:
     found = set()
     for route in app.routes:
-        if isinstance(route, Mount):
-            # The static dashboard export at "/": compiled UI and public
-            # NEXT_PUBLIC_* settings only (see ARCHITECTURE.md).
+        if isinstance(route, Mount) and isinstance(route.app, StaticFiles):
+            # The static dashboard export: compiled UI and public
+            # NEXT_PUBLIC_* settings only (see ARCHITECTURE.md). Any other
+            # Mount (a sub-application with its own routes) falls through
+            # to UNKNOWN below and must be classified.
             continue
         if isinstance(route, (APIWebSocketRoute, WebSocketRoute)):
             found.add(("WS", route.path))
@@ -501,14 +505,54 @@ def terminal(monkeypatch):
     return spawned
 
 
+WS_PROBE_TIMEOUT_S = 5.0
+
+
+class _AcceptedAndWaited(Exception):
+    pass
+
+
+def _receive_or_fail(ws) -> str:
+    """ws.receive_text() with a deadline.
+
+    A route that accepts without authenticating and then waits for client
+    input would otherwise block the probe forever instead of failing it. Uses
+    the session's private stream because Starlette's TestClient has no
+    receive timeout.
+    """
+
+    async def receive():
+        with anyio.fail_after(WS_PROBE_TIMEOUT_S):
+            return await ws._send_rx.receive()
+
+    try:
+        message = ws.portal.call(receive)
+    except TimeoutError:
+        raise _AcceptedAndWaited from None
+    ws._raise_on_close(message)
+    return message["text"]
+
+
 def ws_close_code(url, subprotocols=None) -> int:
+    # Closing the session makes such a route raise its own
+    # WebSocketDisconnect(1000) on teardown, which would replace an exception
+    # raised inside the block; record the timeout and fail after the block.
+    waited = False
     with pytest.raises(WebSocketDisconnect) as excinfo:
         with client.websocket_connect(
             url,
             headers={"origin": "http://localhost:3000"},
             subprotocols=subprotocols,
         ) as ws:
-            ws.receive_text()
+            try:
+                _receive_or_fail(ws)
+            except _AcceptedAndWaited:
+                waited = True
+    if waited:
+        pytest.fail(
+            f"{url} accepted the handshake and waited for input instead of "
+            "closing: it does not authenticate before accept()"
+        )
     return excinfo.value.code
 
 
