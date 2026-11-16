@@ -41,7 +41,11 @@ jobs:
       
     - name: Run Linter
       run: npm run lint
-      
+
+    # Vitest + React Testing Library unit tests (src/**/*.test.ts[x]).
+    - name: Run unit tests
+      run: npm test
+
     - name: Build Next.js App
       env:
         NEXT_PUBLIC_SUPABASE_URL: "https://mock.supabase.co"

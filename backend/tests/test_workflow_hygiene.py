@@ -7,9 +7,11 @@ These guard CI hygiene that used to regress silently:
 - every ``github/codeql-action`` step runs the same SHA (mismatched init and
   analyze versions made CodeQL fail on main);
 - the top-level token permissions are read-only, and write scopes are
-  granted only to the jobs that need them.
+  granted only to the jobs that need them;
+- the dashboard CI runs its unit tests (``npm test``), not only lint and build.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -106,6 +108,20 @@ def test_top_level_permissions_are_read_only():
     for wf in WORKFLOWS:
         perms = _load(wf).get("permissions")
         assert perms in ({"contents": "read"}, {}), f"{wf.name}: {perms!r}"
+
+
+def _run_commands(job):
+    return [step.get("run", "").strip() for step in job["steps"]]
+
+
+def test_frontend_ci_runs_lint_unit_tests_build_and_e2e():
+    wf = _load(WORKFLOWS_DIR / "ci-frontend.yml")
+    commands = [c for job in wf["jobs"].values() for c in _run_commands(job)]
+    for required in ("npm run lint", "npm test", "npm run build", "npm run test:e2e"):
+        assert required in commands, required
+    # The dashboard's "test" script is what the step above runs.
+    pkg = json.loads((REPO_ROOT / "dashboard" / "package.json").read_text("utf-8"))
+    assert pkg["scripts"]["test"].startswith("vitest run")
 
 
 def test_no_job_uses_blanket_permissions():
