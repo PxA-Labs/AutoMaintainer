@@ -166,6 +166,45 @@ def test_default_denylist_leaves_test_files_alone(path):
     assert _violations([FileChange(path, 1)]) == []
 
 
+# The default verification command is ``python -m pytest`` run from the
+# repository root, and ``-m`` puts the working directory first on sys.path,
+# so a root ``pytest.py`` or ``pytest/`` package replaces pytest itself and
+# can print a pass without running anything. npm reads the project ``.npmrc``
+# when it runs ``npm test`` (``script-shell=true`` skips the script).
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("pytest.py", "pytest.py"),
+        ("PYTEST.PY", "pytest.py"),
+        ("backend/pytest.py", "pytest.py"),
+        ("pytest/__main__.py", "**/pytest/**"),
+        ("pytest/__init__.py", "**/pytest/**"),
+        ("backend/pytest/__main__.py", "**/pytest/**"),
+        ("_pytest/main.py", "**/_pytest/**"),
+        ("src/_pytest/config/__init__.py", "**/_pytest/**"),
+        (".npmrc", ".npmrc"),
+        ("web/.npmrc", ".npmrc"),
+    ],
+)
+def test_default_denylist_holds_test_runner_shadows(path, pattern):
+    assert cl.denied_by(path, cl.default_limits()) == pattern
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/pytest_helpers.py",
+        "src/my_pytest.py",
+        "src/pytest_plugin/hooks.py",
+        "docs/pytest.md",
+        "tests/test_pytest.py",
+        "npmrc.example",
+    ],
+)
+def test_default_denylist_leaves_similar_names_alone(path):
+    assert _violations([FileChange(path, 1)]) == []
+
+
 @pytest.mark.parametrize(
     "path, pattern, expected",
     [

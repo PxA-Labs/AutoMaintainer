@@ -424,19 +424,31 @@ remote sandbox host setup).
   `noxfile.py`, `setup.cfg`, `pyproject.toml`, `package.json`,
   `jest.config.*`, `vitest.config.*`, `vitest.workspace.*`,
   `vitest.projects.*`, `vite.config.*` (Vitest falls back to its `test`
-  block), `.mocharc*`, `karma.conf.*` and `playwright.config.*`. A change to
+  block), `.mocharc*`, `karma.conf.*` and `playwright.config.*`. It also
+  holds files that replace the runner: the detected pytest command is
+  `python -m pytest` run from the repository root, and `-m` puts that
+  directory first on `sys.path`, so a root `pytest.py` or `pytest/` package
+  would run instead of pytest and could print a pass; `pytest.py`,
+  `pytest/**` and `_pytest/**` are denied at any depth. npm reads the
+  project `.npmrc` when it runs `npm test` (`script-shell=true` would make it
+  exit 0 without running the script), so `.npmrc` is denied too. A change to
   one of them gets a draft `needs-human` PR and is never merged, even when
   verification passes. Test files themselves (`tests/**`, `test_*.py`,
   `*.test.*`) are **not** denied, because writing and fixing tests is part of
   the agent's job. Nor is any other file the tests load: setup files
   (`jest.setup.js`, `tests/__init__.py`), helpers and the source under test
   can monkeypatch the runner much as `conftest.py` can, and setup-file names
-  are configurable, so denying by name is a partial guard. A change can
-  still weaken, skip or delete assertions in such a file it edits and make
-  verification pass. A repository with a custom `test_command` (a script,
-  `make test`, `tox`) is protected only if its entry point is denied: add it
-  to `change_limits.deny` on the base branch, e.g.
-  `deny: ["scripts/test.sh", "Makefile"]`. The Maintainer now sees the
+  are configurable, so denying by name is a partial guard. The same goes for
+  build configuration the runner applies, such as `babel.config.js` or
+  `tsconfig.json`. A root module named after one of pytest's own
+  dependencies (`pluggy`, `iniconfig`, `packaging`) still shadows it under
+  `python -m pytest`; running `python -P -m pytest` (Python 3.11+, which
+  leaves the working directory off `sys.path`) would close that gap and is a
+  recommended follow-up in `backend/verification.py`. A change can still
+  weaken, skip or delete assertions in a test file it edits and make
+  verification pass. No default entry protects a custom `test_command` (a
+  script, `make test`, `tox`): add its entry point to `change_limits.deny`
+  on the base branch, e.g. `deny: ["scripts/test.sh", "Makefile"]`. The Maintainer now sees the
   verification output (see [Maintainer input](#maintainer-input)), but that
   is a model reading untrusted output, not a guarantee. Human review, or
   required CI that the change cannot modify, remains necessary for

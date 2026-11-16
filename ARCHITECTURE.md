@@ -201,11 +201,16 @@ at any depth, `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
 `jest.config.*`, `vitest.config.*`, `vitest.workspace.*`, `vitest.projects.*`,
 `vite.config.*`, `.mocharc*`, `karma.conf.*`, `playwright.config.*`) is
 denied because a change to it can skip or short-circuit the tests that
-verification runs and turn a failing change into a passing one (#480). Test
-files, setup files and other modules the tests load are not denied: the agent
-writes tests, so a change can still weaken a test or a module it edits
-(docs/VERIFICATION.md, Limitations). A repository with a custom `test_command`
-should add its entry point (a script, a `Makefile`) to `deny`. A glob without `/` matches
+verification runs and turn a failing change into a passing one (#480). So are
+`pytest.py`, `pytest/**` and `_pytest/**` at any depth, because
+`python -m pytest` from the repository root imports a root module of that
+name instead of pytest, and `.npmrc`, which configures how `npm test` runs.
+Test files, setup files and other modules the tests load are not denied: the
+agent writes tests, so a change can still weaken a test or a module it edits,
+and a root module shadowing a pytest dependency (`pluggy`, `packaging`) is
+not caught by name (docs/VERIFICATION.md, Limitations). No default entry
+protects a custom `test_command`; a repository that sets one should add its
+entry point (a script, a `Makefile`) to `deny`. A glob without `/` matches
 the file name in any directory; one with `/` is anchored at the repository
 root. A repository can override them in the `change_limits`
 section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,

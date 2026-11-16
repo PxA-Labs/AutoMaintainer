@@ -54,13 +54,23 @@ DEFAULT_MAX_LINES = 500
 # Test-runner configuration is denied because a change to it can skip or
 # short-circuit the tests that verification runs (``addopts``, a conftest
 # hook, a ``test`` script) and so turn a failing change into a passing one
-# (#480). Test files themselves are not denied: writing tests is part of the
-# agent's job, and the Maintainer sees the verification output instead. Nor
-# are setup files or other modules the tests load, whose names are
-# configurable, so this is a partial guard. A repository with a custom
-# ``test_command`` should deny its entry point (a script, a Makefile) with
-# ``change_limits.deny``. A repository that wants the agent to edit one of these files lists it under
-# ``change_limits.allow`` in its base-branch ``.automaintainer.yml``.
+# (#480). So are modules that replace the runner: the detected pytest command
+# is ``python -m pytest`` from the repository root, and ``-m`` puts that
+# directory first on ``sys.path``, so a root ``pytest.py`` or ``pytest/``
+# package runs instead of pytest. npm reads the project ``.npmrc`` (its
+# ``script-shell`` decides what runs ``npm test``).
+#
+# This is a partial guard. Test files are not denied: writing tests is part
+# of the agent's job, and the Maintainer sees the verification output
+# instead. Nor are setup files or other modules the tests load (their names
+# are configurable), nor a root module shadowing one of pytest's own
+# dependencies (``pluggy``, ``iniconfig``, ``packaging``); running
+# ``python -P -m pytest`` in verification would close that last gap. No
+# default protects a custom ``test_command``: a repository that sets one
+# should deny its entry point (a script, a Makefile) with
+# ``change_limits.deny``. A repository that wants the agent to edit one of
+# these files lists it under ``change_limits.allow`` in its base-branch
+# ``.automaintainer.yml``.
 DEFAULT_DENYLIST = (
     ".github/workflows/**",
     "Dockerfile*",
@@ -101,6 +111,13 @@ DEFAULT_DENYLIST = (
     ".mocharc*",
     "karma.conf.*",
     "playwright.config.*",
+    # Modules that replace the runner itself when the tests run from the
+    # repository root (``python -m pytest``), and npm's project settings.
+    # Denied at any depth: a custom test command may run from a subdirectory.
+    "pytest.py",
+    "**/pytest/**",
+    "**/_pytest/**",
+    ".npmrc",
     CONFIG_FILE,
 )
 # Denied whatever the denylist or allowlist say.
