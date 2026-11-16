@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **agents**: Show verification results to the Maintainer and hold over-limit changes for a human ([#478](https://github.com/PxA-Labs/AutoMaintainer/pull/478)) - @purvanshjoshi
 - **dashboard**: Wire the GitHub App install flow into the UI and fix IDE accessibility ([#477](https://github.com/PxA-Labs/AutoMaintainer/pull/477)) (closes [#471](https://github.com/PxA-Labs/AutoMaintainer/issues/471)) - @purvanshjoshi
 - **verification**: Add a Docker sandbox backend for change verification ([#476](https://github.com/PxA-Labs/AutoMaintainer/pull/476)) - @purvanshjoshi
 - **evals**: Grow the Implementer eval set from 10 to 30 tasks with categories and leak guards ([#469](https://github.com/PxA-Labs/AutoMaintainer/pull/469)) (closes [#414](https://github.com/PxA-Labs/AutoMaintainer/issues/414)) - @purvanshjoshi
