@@ -54,7 +54,14 @@ cannot let the repository's other CI merge an unverified head. Because the
 status is bound to a SHA, a later push to the branch is never merged on an
 older result.
 
-If the status cannot be posted while `MERGE_POLICY=ci` (GitHub refuses the
+The policy that gates a run is the **effective** one: `MERGE_POLICY` lowered
+by the repository's own `merge_policy` setting, if it set a stricter one
+(ARCHITECTURE.md, "Merge policy"). A repository set to `ci` under an `auto`
+deployment is gated exactly as described here; one set to `human` never
+merges. If the setting cannot be read, or the run's repository row is
+missing, the run is treated as `human`.
+
+If the status cannot be posted while the effective policy is `ci` (GitHub refuses the
 write, or the PR head could not be resolved at all), the run stops with
 `VERIFICATION_STATUS_FAILED`; the PR stays open. Under `human` (the default)
 and `auto`, a failure to post is logged and the run continues.
@@ -74,7 +81,8 @@ permission.
 Green checks are not enough for an automatic merge, because a
 prompt-injected run controls both the change and the tests it adds. Under
 `ci` and `auto` the merge also needs a **trusted trigger** (`backend/trust.py`,
-#487): the caller who started the run (their linked GitHub login) and the
+#487): the caller who started the run (identified by the GitHub user id of
+the identity they signed in with, resolved to the current login, #491) and the
 author of the issue it targets, if any, must each have `write`, `maintain` or
 `admin` permission on the repository. The lookup is deterministic, made once
 per run through the run's installation token, and fails closed: an unknown or

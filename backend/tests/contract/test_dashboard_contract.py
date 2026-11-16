@@ -126,6 +126,15 @@ DASHBOARD_CALLS = {
     # lib/github-app.ts requestInstallUrl() (no body; the GitHub user token
     # goes in the X-GitHub-User-Token header, which this table does not model)
     ("POST", "/github/app/install-url"): Call(reads=frozenset({"install_url"})),
+    # lib/merge-policy.ts fetchMergePolicy(), typed as RepositoryMergePolicy
+    ("GET", "/repositories/{}/merge-policy"): Call(
+        reads=frozenset({"setting", "ceiling", "effective", "can_edit"})
+    ),
+    # lib/merge-policy.ts updateMergePolicy()
+    ("PUT", "/repositories/{}/merge-policy"): Call(
+        body={"merge_policy": None},
+        reads=frozenset({"setting", "ceiling", "effective", "can_edit"}),
+    ),
     # lib/terminal.ts buildTerminalWsUrl() (WebSockets are not in OpenAPI)
     ("WEBSOCKET", "/api/terminal/ws"): Call(query=frozenset({"repo_url"})),
 }

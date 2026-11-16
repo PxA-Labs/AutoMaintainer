@@ -157,7 +157,23 @@ resumes as a rejection.
 ### Merge policy
 
 `MERGE_POLICY` (`get_merge_policy`) controls what happens after the
-Maintainer approves a PR:
+Maintainer approves a PR. It is the deployment's **ceiling**: a repository
+can make it stricter (`human` < `ci` < `auto`) through
+`repositories.merge_policy` (NULL inherits), set by org owners and admins in
+the dashboard or with `PUT /repositories/{id}/merge-policy`, which refuses a
+value looser than the ceiling (422). The run uses the stricter of the two,
+read at the merge decision (`backend/merge_policy.py`). It fails closed: if
+the setting cannot be read the run uses `human` and records
+`repository merge policy unreadable (fail closed)`, and if the run's `runs`
+or `repositories` row is missing (PostgREST returns a row hidden by RLS, a
+wrong key or a deleted row as an empty result, which could hide a stricter
+setting) it records `repository merge policy row missing (fail closed)`.
+Only an existing repository row whose `merge_policy` is NULL inherits the
+ceiling. `MERGE_POLICY` must be the same on the API (which shows the ceiling
+and validates `PUT`) and on every `agent_runs` worker (which enforces it).
+`merge_decisions.policy`
+is this effective policy, with a `repository policy <p> (ceiling <c>)`
+reason when the repository lowered it:
 
 | Value | Behaviour |
 | --- | --- |
@@ -322,7 +338,7 @@ lock.
 
 | Artifact | How a re-run finds it instead of creating it again |
 | --- | --- |
-| Issue | A hidden `<!-- automaintainer-run: <run_id> -->` marker in the body. The node scans the 100 newest issues for it. |
+| Issue | A hidden `<!-- automaintainer-run: <run_id> -->` marker in the body. The node scans the 100 newest issues for it and reuses one only if the run's own account (the App bot, or the PAT user) opened it (#490). |
 | Branch | A deterministic name derived from the run id (`run_branch_name`). |
 | PR | Looked up by head branch. |
 | Commit | Skipped when the file on the branch already has that content. |

@@ -11,6 +11,8 @@ import { AuthGate } from "./AuthGate";
 import { ResumeRunBanner } from "./ResumeRunBanner";
 import { GitHubAppSection } from "./GitHubAppSection";
 import { GitHubSetupBanner } from "./GitHubSetupBanner";
+import { MergePolicyControl } from "./MergePolicyControl";
+import { findOrgRepository } from "@/lib/merge-policy";
 import { useGitHubApp } from "@/lib/hooks/use-github-app";
 import { useAuth } from "@/lib/auth";
 import { useAgentRun, type LogEntry } from "@/lib/hooks/use-agent-run";
@@ -186,6 +188,13 @@ export function DashboardShell() {
         onTargetIssueChange={runActions.setTargetIssue}
         agentStatus={agentStatus}
         githubApp={user ? <GitHubAppSection {...githubApp} /> : null}
+        mergePolicy={
+          user ? (
+            <MergePolicyControl
+              repository={findOrgRepository(githubApp.state?.repositories, runState.repoUrl)}
+            />
+          ) : null
+        }
       />
 
       {/* Main Content Viewport */}

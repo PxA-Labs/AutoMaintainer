@@ -59,10 +59,10 @@ CATALOG = {
     " FROM pg_policies WHERE schemaname = 'public' ORDER BY 1, 2",
     "functions": "SELECT p.proname, pg_get_functiondef(p.oid) FROM pg_proc p"
     " JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'"
-    " ORDER BY 1",
+    " ORDER BY 1, 2",
     "triggers": "SELECT t.tgname, pg_get_triggerdef(t.oid) FROM pg_trigger t"
     " JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
-    " WHERE n.nspname = 'public' AND NOT t.tgisinternal ORDER BY 1",
+    " WHERE n.nspname = 'public' AND NOT t.tgisinternal ORDER BY 1, 2",
     "indexes": "SELECT indexname, indexdef FROM pg_indexes"
     " WHERE schemaname = 'public' ORDER BY 1",
     "constraints": "SELECT conrelid::regclass::text, conname, pg_get_constraintdef(oid)"
