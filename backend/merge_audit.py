@@ -26,6 +26,14 @@ NOT_MERGED = "not_merged"  # The Maintainer rejected it, or GitHub refused.
 ACTOR_AGENT = "agent"  # The Maintainer's verdict decided (actor_role names it).
 ACTOR_POLICY = "policy"  # MERGE_POLICY or a safety gate decided after approval.
 
+# reasons recorded by the trusted-trigger gate (trust.py, #487) and the
+# protected-path refusal before a commit (#488).
+REASON_TRUSTED_TRIGGER = "trusted trigger"
+REASON_UNTRUSTED_TRIGGER = "untrusted trigger"
+REASON_TRIGGER_CHECK_FAILED = "trigger permission check failed"
+REASON_CHANGE_LIMITS = "change limits exceeded"
+REASON_NOT_COMMITTED = "protected change not committed"
+
 # Caps below the table's CHECKs (20 reasons, 4000 characters of JSON each for
 # reasons and evidence), so a long CI detail can never make the insert fail.
 MAX_REASONS = 10

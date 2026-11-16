@@ -13,6 +13,10 @@ VERIFIED = ("automaintainer/verification", "success")
 
 APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 
+# The run's trigger (#487): a repository writer, so the trusted-trigger gate
+# keeps the behaviour these tests pin. test_trust.py covers the gate itself.
+WRITER = "octo-writer"
+
 
 def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()):
     monkeypatch.setattr(agents, "supabase", None)
@@ -29,6 +33,9 @@ def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()
     repo = MagicMock()
     repo.get_pull.return_value = pr
     repo.owner = SimpleNamespace(login="alice", type="User")
+    repo.get_collaborator_permission.side_effect = lambda login: (
+        "write" if login == WRITER else "none"
+    )
     repo.get_issue.return_value = SimpleNamespace(
         assignees=[SimpleNamespace(login=a) for a in assignees]
     )
@@ -60,6 +67,7 @@ def _state():
         "iteration": 0,
         "idea": "Targeted Issue #3: set x to 2 in app.py:1-1",
         "target_file_path": "app.py",
+        "trigger": {"source": "api", "login": WRITER},
     }
 
 

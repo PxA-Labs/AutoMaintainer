@@ -372,13 +372,21 @@ async def test_maintainer_json_approval_merges_under_auto_policy(monkeypatch, re
     pr = repo.get_pull.return_value
     pr.get_files.return_value = []
     pr.merged = False
+    # A run started by a repository writer (trusted-trigger gate, trust.py).
+    repo.get_collaborator_permission.return_value = "write"
     monkeypatch.setattr(
         agents,
         "run_llm_with_tools",
         _scripted_llm(['```json\n{"verdict": "approve", "reasons": ["ok"]}\n```'], []),
     )
     result = await agents.maintainer_node(
-        {"code": "x", "repo_name": "o/r", "pr_number": 7, "iteration": 0}
+        {
+            "code": "x",
+            "repo_name": "o/r",
+            "pr_number": 7,
+            "iteration": 0,
+            "trigger": {"source": "api", "login": "alice"},
+        }
     )
 
     assert result["merge_status"] == "merged"

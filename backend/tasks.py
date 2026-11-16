@@ -261,10 +261,17 @@ def run_agent_loop_task(
     github_installation_id: int,
     target_issue_number: Optional[int] = None,
     mode: str = "autonomous",
+    trigger_login: Optional[str] = None,
+    trigger_source: Optional[str] = None,
 ):
     """
     Celery task to run the agent loop.
     This replaces the in-memory asyncio.Task approach.
+
+    ``trigger_login`` / ``trigger_source``: the GitHub login of whoever
+    started the run and how (``api``), for the trusted-trigger merge gate
+    (trust.py). A message without them (queued by an older API) runs with an
+    unknown trigger, so it is never merged automatically.
     """
     return _execute_agent_run(
         self,
@@ -276,6 +283,8 @@ def run_agent_loop_task(
         github_installation_id=github_installation_id,
         target_issue_number=target_issue_number,
         mode=mode,
+        trigger_login=trigger_login,
+        trigger_source=trigger_source,
     )
 
 
@@ -289,6 +298,8 @@ def _execute_agent_run(
     github_installation_id: int,
     target_issue_number: Optional[int] = None,
     mode: str = "autonomous",
+    trigger_login: Optional[str] = None,
+    trigger_source: Optional[str] = None,
 ):
     """
     Body of run_agent_loop_task. Takes the bound Celery task explicitly so
@@ -399,6 +410,8 @@ def _execute_agent_run(
                     run_id=run_id,
                     github_installation_id=github_installation_id,
                     repository_id=repository_id,
+                    trigger_login=trigger_login,
+                    trigger_source=trigger_source,
                 )
             )
         )
@@ -766,7 +779,8 @@ def start_agent_task(run_id: str, config_payload: dict) -> dict:
 
     config_payload is expected to contain: repo_name, org_id, user_id,
     repository_id, github_installation_id, and optionally
-    target_issue_number, mode.
+    target_issue_number, mode, trigger_login (the caller's GitHub login)
+    and trigger_source.
 
     Decoupling from the FastAPI handler: when Redis is configured and
     reachable, this enqueues onto the agent_runs queue and returns
@@ -785,6 +799,8 @@ def start_agent_task(run_id: str, config_payload: dict) -> dict:
         github_installation_id=config_payload["github_installation_id"],
         target_issue_number=config_payload.get("target_issue_number"),
         mode=config_payload.get("mode", "autonomous"),
+        trigger_login=config_payload.get("trigger_login"),
+        trigger_source=config_payload.get("trigger_source"),
     )
 
     if CELERY_AVAILABLE and is_redis_available():
