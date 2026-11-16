@@ -15,7 +15,7 @@ from github import Github
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Literal
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
 import json
@@ -1047,12 +1047,11 @@ async def list_run_merge_decisions(
 
 
 # --- Per-repository merge policy (epic #411, merge_policy.py) ---------------
-from typing import Literal as _Literal  # noqa: E402
 
 
 class MergePolicyUpdate(BaseModel):
     # Required (no default); null means "inherit MERGE_POLICY".
-    merge_policy: Optional[_Literal["human", "ci", "auto"]]
+    merge_policy: Optional[Literal["human", "ci", "auto"]]
 
 
 async def _org_repository(sb, repository_id: int, org_id: str) -> dict:
