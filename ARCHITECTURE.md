@@ -484,7 +484,9 @@ Source: `backend/main.py`, `dashboard/src/components/WebIDE.tsx`.
   omitted, to the caller's working branch `automaintainer/ide-<hash>`
   (created from the default branch on first use). They **never** commit to
   the default branch or a protected branch (409) (#139), and never write the
-  shared clone. `/repo/{name}/tree`, `/search` and `GET /file` read the
+  shared clone. An explicit `branch` under `automaintainer/ide-` other than
+  the caller's own working branch is refused (403), so nobody can put code
+  into another user's working branch and from there into their Propose. `/repo/{name}/tree`, `/search` and `GET /file` read the
   caller's own **view** (#505): a git worktree of the shared clone under
   `<workspace>/_ide_views/`, checked out at the caller's working branch, or
   at the default branch when they have none. `tree` (opening the IDE) and
@@ -497,8 +499,13 @@ Source: `backend/main.py`, `dashboard/src/components/WebIDE.tsx`.
   are evicted after `IDE_VIEW_TTL_HOURS` unused and beyond `IDE_VIEW_MAX`
   (least recently used first). `GET /repo/{name}/working-changes` lists the
   files the caller's working branch changes against the default branch;
-  the dashboard restores its staged list from it after a reload.
-  `POST /repo/{name}/propose-changes` creates a new branch, commits the
+  the dashboard restores its staged list from it after a reload. View git
+  commands run with hooks and fsmonitor disabled and do not write the
+  clone's `FETCH_HEAD`. The views isolate the IDE routes only: the web
+  terminal (below) still opens in the shared clone, whose
+  `refs/automaintainer-ide/<key>/{base,head}` pin every IDE user's last
+  fetched branch, so a terminal user can read those commits (they are on
+  GitHub as branches anyway). `POST /repo/{name}/propose-changes` creates a new branch, commits the
   staged files there and opens a PR. The editor is Monaco.
 - **Inline assist**: `POST /assist/inline` streams an LLM completion as
   server-sent events. It is limited per user and per organization

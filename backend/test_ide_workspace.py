@@ -486,6 +486,77 @@ def test_view_git_pointer_is_not_listed_or_searched(world):
     assert r.json()["results"] == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX symlinks")
+def test_committed_symlinks_do_not_escape_the_view(world):
+    """A symlink on the user's branch pointing at another user's view or
+    outside the workspace is not followed by file, tree or search."""
+    create(BOB, "b.py", "bob secret\n")
+    outside = world.tmp / "outside.txt"
+    outside.write_text("outside secret\n", encoding="utf-8")
+    bob_key = workspace.ide_user_key(ORG, BOB)
+    s = world.gh.scratch
+    git(s, "fetch", "-q", "origin")
+    git(s, "checkout", "-q", "-B", "tmp", "origin/main")
+    os.symlink(f"../{bob_key}/b.py", s / "to_bob")
+    os.symlink(str(outside), s / "to_outside")
+    git(s, "add", "-A")
+    git(s, "commit", "-q", "-m", "links")
+    branch = main._ide_working_branch(ORG, ALICE)
+    git(s, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
+
+    tree = tree_paths(ALICE)
+    for link in ("to_bob", "to_outside"):
+        r = read(ALICE, link)
+        assert r.status_code != 200 or "secret" not in r.text
+    as_user(ALICE)
+    hits = client.get(f"/repo/{REPO}/search", params={"q": "secret"}).json()
+    assert hits["results"] == []
+    assert "a.py" in tree
+
+
+def test_view_git_ignores_hooks_and_leaves_fetch_head_alone(world):
+    """Whatever can write the shared clone's .git must not run code in the
+    API process, and a view fetch must not move the clone's FETCH_HEAD,
+    which sync_repo_clone resets to."""
+    marker = world.tmp / "hook-ran"
+    hooks = world.clone / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    for name in ("post-checkout", "reference-transaction"):
+        hook = hooks / name
+        hook.write_text(
+            f"#!/bin/sh\necho {name} >> '{marker.as_posix()}'\n", encoding="utf-8"
+        )
+        hook.chmod(0o755)
+    fetch_head = world.clone / ".git" / "FETCH_HEAD"
+    assert not fetch_head.exists()
+
+    save(ALICE, "a.py", "alice\n")
+    assert read(BOB, "a.py").json() == {"content": "original\n"}
+
+    assert not marker.exists()
+    assert not fetch_head.exists()
+
+
+def test_malformed_view_limits_fall_back_to_the_defaults(monkeypatch):
+    monkeypatch.setenv("IDE_VIEW_MAX", "lots")
+    monkeypatch.setenv("IDE_VIEW_TTL_HOURS", "a day")
+    assert workspace.ide_view_max() == 50
+    assert workspace.ide_view_ttl_seconds() == 24 * 3600
+    monkeypatch.setenv("IDE_VIEW_MAX", "3")
+    monkeypatch.setenv("IDE_VIEW_TTL_HOURS", "1.5")
+    assert workspace.ide_view_max() == 3
+    assert workspace.ide_view_ttl_seconds() == 1.5 * 3600
+
+
+def test_no_branch_cache_drops_expired_entries(monkeypatch):
+    old = time.monotonic() - workspace.NO_BRANCH_CACHE_SECONDS - 1
+    monkeypatch.setattr(workspace, "_no_branch_seen", {("c", "old"): old})
+
+    workspace._note_no_branch(Path("c"), "new")
+
+    assert list(workspace._no_branch_seen) == [(str(Path("c")), "new")]
+
+
 def test_view_keys_are_validated(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path))
     clone = workspace.get_safe_repo_dir(REPO)

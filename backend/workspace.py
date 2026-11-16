@@ -412,12 +412,25 @@ def github_remote_url(repo_name: str) -> str:
     return f"{_GITHUB_URL_PREFIX}{repo_name}.git"
 
 
+def _env_number(name: str, default, cast):
+    """``cast(os.environ[name])``, or ``default`` (with a warning) when it is
+    unset or malformed: a typo must not turn every IDE read into a 500."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+
+
 def ide_view_ttl_seconds() -> float:
-    return float(os.getenv("IDE_VIEW_TTL_HOURS", "24")) * 3600
+    return _env_number("IDE_VIEW_TTL_HOURS", 24.0, float) * 3600
 
 
 def ide_view_max() -> int:
-    return int(os.getenv("IDE_VIEW_MAX", "50"))
+    return _env_number("IDE_VIEW_MAX", 50, int)
 
 
 def _views_root() -> Path:
@@ -460,15 +473,23 @@ def _clone_lock(clone_dir: Path) -> threading.Lock:
         return _clone_locks.setdefault(key, threading.Lock())
 
 
+# Command-line config wins over the clone's .git/config. Anything that can
+# write the shared clone's .git (the web terminal, a LocalRunner running repo
+# code) must not gain code execution in the API process through the view
+# operations: no hooks (worktree add runs post-checkout, fetch and update-ref
+# run reference-transaction) and no fsmonitor command.
+_SAFE_GIT_CONFIG = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
+
+
 def _git(args: list, cwd: Path, env: Optional[dict] = None, timeout: float = 60):
     """Run git synchronously and return (exit code, stdout).
 
     A git failure is not an exception; a timeout or a missing git binary is
-    exit code None.
+    exit code None. Hooks and fsmonitor are disabled (_SAFE_GIT_CONFIG).
     """
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *_SAFE_GIT_CONFIG, *args],
             cwd=str(cwd),
             env=env or {**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             capture_output=True,
@@ -557,8 +578,12 @@ def _ls_remote(clone_dir: Path, remote: str, branch: str, env: dict, timeout: fl
 
 
 def _fetch(clone_dir: Path, remote: str, refspecs: list, env: dict, timeout: float):
+    # --no-write-fetch-head: the shared clone's FETCH_HEAD belongs to
+    # sync_repo_clone (fetch HEAD, then reset --hard FETCH_HEAD), which does
+    # not hold the clone lock; a view fetch must not change what it resets to.
     rc, _ = _git(
-        ["fetch", "--quiet", "--no-tags", "--", remote, *refspecs],
+        ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--"]
+        + [remote, *refspecs],
         clone_dir,
         env,
         timeout,
@@ -584,6 +609,18 @@ def _offline_view_locked(clone_dir: Path, key: str) -> Optional[Path]:
     if not _rev(clone_dir, ref):
         ref = "HEAD"
     return default if _checkout_view_locked(clone_dir, default, ref) else None
+
+
+def _note_no_branch(clone_dir: Path, key: str) -> None:
+    """Remember that ``key`` has no working branch; expired entries are
+    dropped here, so the cache stays bounded by recent readers."""
+    now = time.monotonic()
+    with _locks_guard:
+        for k in [
+            k for k, t in _no_branch_seen.items() if now - t >= NO_BRANCH_CACHE_SECONDS
+        ]:
+            del _no_branch_seen[k]
+        _no_branch_seen[(str(clone_dir), key)] = now
 
 
 def _refresh_locked(clone_dir, key, branch, remote, env, timeout, remote_state):
@@ -613,7 +650,7 @@ def _refresh_locked(clone_dir, key, branch, remote, env, timeout, remote_state):
 
     # No working branch (never created, or deleted once its pull request
     # merged): drop any stale view of it and serve the default branch.
-    _no_branch_seen[(str(clone_dir), key)] = time.monotonic()
+    _note_no_branch(clone_dir, key)
     stale = ide_view_dir(clone_dir, key)
     if stale.exists() or _rev(clone_dir, _view_ref(key, "head")):
         _remove_view_locked(clone_dir, stale, key)
