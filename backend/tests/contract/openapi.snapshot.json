@@ -1185,6 +1185,60 @@
         "summary": "Get Repo Tree"
       }
     },
+    "/repo/{repo_name}/working-changes": {
+      "get": {
+        "description": "Files the caller's IDE working branch changes against the default branch.\n\nThe dashboard restores its staged list from this after a reload (#505).\nOnly the caller's own branch is ever diffed: the branch comes from the\nauthenticated org and user, never from the request.",
+        "operationId": "get_working_changes_repo__repo_name__working_changes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repo_name",
+            "required": true,
+            "schema": {
+              "title": "Repo Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Working Changes"
+      }
+    },
     "/repositories/{repository_id}/merge-policy": {
       "get": {
         "description": "A repository's merge policy: its stored setting (null = inherit), the\ndeployment ceiling (MERGE_POLICY), the effective policy and the settings\nan admin may choose. Any member of the repository's org may read it.",

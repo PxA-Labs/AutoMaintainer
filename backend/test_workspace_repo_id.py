@@ -129,7 +129,10 @@ async def test_terminal_cwd_is_the_agents_clone(monkeypatch):
     assert cwd == main.os.path.realpath(agent_dir)
 
 
-def test_file_write_mirrors_into_the_id_keyed_clone(monkeypatch):
+def test_file_write_never_touches_the_shared_clone(monkeypatch):
+    """IDE writes used to be mirrored into the shared clone, where every other
+    user of the repository read them (#505). They now only reach GitHub; the
+    writer's own view is refreshed from there (test_ide_workspace.py)."""
     use_repositories(monkeypatch, repo_row("o/r", 101))
     monkeypatch.setenv("GITHUB_AUTH_MODE", "pat")
     monkeypatch.setenv("GITHUB_TOKEN", "pat-token")
@@ -147,16 +150,17 @@ def test_file_write_mirrors_into_the_id_keyed_clone(monkeypatch):
     )
     clone = workspace.get_safe_repo_dir("o/r", 101)
     clone.mkdir(parents=True, exist_ok=True)
+    (clone / "app.py").write_text("x", encoding="utf-8")
 
     r = client.post("/repo/o/r/file", json={"file_path": "app.py", "content": "y"})
     assert r.status_code == 200
-    assert (clone / "app.py").read_text(encoding="utf-8") == "y"
+    assert (clone / "app.py").read_text(encoding="utf-8") == "x"
     r = client.post(
         "/repo/o/r/file/create", json={"file_path": "new.py", "content": "z"}
     )
     assert r.status_code == 200
-    assert (clone / "new.py").read_text(encoding="utf-8") == "z"
-    # Nothing went to the name-keyed directory.
+    assert not (clone / "new.py").exists()
+    # Nothing went to the name-keyed directory either.
     assert not workspace.get_safe_repo_dir("o/r").joinpath("app.py").exists()
 
 
@@ -206,6 +210,7 @@ async def test_without_an_id_both_sides_keep_the_name_hash_directory(monkeypatch
     assert await agent_clone_dir(monkeypatch, "o/r", None) == str(name_dir)
 
     # A route whose require_repo_access did not run has no id either.
+    as_member()
     app.dependency_overrides[main.require_repo_access] = lambda: ORG
     name_dir.mkdir(parents=True, exist_ok=True)
     (name_dir / "app.py").write_text("named\n", encoding="utf-8")
