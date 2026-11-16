@@ -1,0 +1,70 @@
+name: Red-team fixtures
+
+# Prompt-injection red-team fixtures (epic #411, docs/VERIFICATION.md):
+# a malicious issue body, instructions in a README and instructions in a
+# code comment run through the real agent pipeline with a scripted LLM and an
+# in-memory GitHub. Fully offline: no secrets, no GitHub/Groq/Supabase calls
+# (only the dependency install uses the network). The backend CI also runs
+# these tests; this separate job gives them their own required check.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/redteam.yml'
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/redteam.yml'
+
+permissions:
+  contents: read
+
+# Same uv version as ci-backend.yml (keep in step with the Dockerfile).
+env:
+  UV_VERSION: "0.13.8"
+  UV_PYTHON: "3.11"
+  UV_PYTHON_DOWNLOADS: never
+
+concurrency:
+  group: redteam-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  redteam:
+    name: Prompt-injection red-team fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
+      run: uv sync --frozen --group dev
+
+    - name: Run red-team fixtures
+      # Known gaps are strict xfails: if a defence starts holding, the xfail
+      # turns into a failure so the marker is removed deliberately.
+      run: uv run --frozen pytest tests/redteam -v -rxX
