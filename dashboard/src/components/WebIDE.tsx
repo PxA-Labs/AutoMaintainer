@@ -610,6 +610,8 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
 
   // Preview/PR Flow State
   const [stagedChanges, setStagedChanges] = useState<FileChange[]>([]);
+  // The working branch the last Save/Create committed to (from the API).
+  const [savedBranch, setSavedBranch] = useState<string | null>(null);
   const [showProposeModal, setShowProposeModal] = useState(false);
   const [proposing, setProposing] = useState(false);
   const [proposedChanges, setProposedChanges] = useState<ProposedChange[]>([]);
@@ -998,12 +1000,12 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
         body: JSON.stringify({ file_path: activeTab, content })
       });
       if (!res.ok) throw new Error("Failed to save");
+      const data: { branch?: unknown } = await res.json().catch(() => ({}));
       setFileContents(prev => ({...prev, [activeTab]: content}));
-      // Update original content after successful save to main branch
-      setOriginalContents(prev => ({...prev, [activeTab]: content}));
-
-      // Remove from staged changes since it's now saved to main
-      setStagedChanges(prev => prev.filter(c => c.path !== activeTab));
+      // Save commits to the caller's IDE working branch, never the default
+      // branch (#139). The file stays staged against its original content so
+      // the next Propose carries the saved edit into a pull request.
+      if (typeof data.branch === "string") setSavedBranch(data.branch);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       alert("Failed to save file: " + msg);
@@ -1015,8 +1017,11 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
   const handleContentChange = (path: string, newContent: string) => {
     setEditedContents(prev => ({...prev, [path]: newContent}));
 
-    // Track staged changes
-    const original = originalContents[path] || "";
+    // Track staged changes. A staged entry keeps the content the file had
+    // before the first edit, so a saved-then-reopened file still diffs
+    // against that baseline rather than its saved version.
+    const staged = stagedChanges.find(c => c.path === path);
+    const original = staged ? staged.oldContent : originalContents[path] || "";
     if (newContent !== original) {
       setStagedChanges(prev => {
         const existing = prev.findIndex(c => c.path === path);
@@ -1051,6 +1056,17 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
         body: JSON.stringify({ file_path: newPath, is_dir: isDir, content: "" })
       });
       if (!res.ok) throw new Error("Failed to create");
+      const data: { branch?: unknown } = await res.json().catch(() => ({}));
+      if (typeof data.branch === "string") setSavedBranch(data.branch);
+      if (!isDir) {
+        // The new file lives only on the working branch; stage it so the
+        // next Propose includes it.
+        setStagedChanges(prev =>
+          prev.some(c => c.path === newPath)
+            ? prev
+            : [...prev, { path: newPath, oldContent: "", newContent: "", status: 'created' }]
+        );
+      }
       await fetchTree();
       if (!isDir) openFile(newPath);
     } catch (err: unknown) {
@@ -1158,6 +1174,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
 
       // Clear staged changes
       setStagedChanges([]);
+      setSavedBranch(null);
       setOriginalContents({});
       setEditedContents({});
       setFileContents({});
@@ -1467,6 +1484,13 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
                 )}
               </div>
             </div>
+
+            {savedBranch && (
+              <div role="status" className="px-4 py-1 text-xs text-[#cccccc] bg-[#252526] border-b border-zinc-800 shrink-0">
+                Saved to working branch <code className="text-emerald-400">{savedBranch}</code>, not the default branch.
+                Saved files stay staged: use Propose to open a pull request.
+              </div>
+            )}
 
             {/* Code Content */}
             <div ref={editorContainerRef} className="flex-1 overflow-hidden bg-[#1e1e1e] relative">
