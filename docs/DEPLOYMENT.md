@@ -50,6 +50,17 @@ the API's IDE routes and terminal read them back from it. If they do not share
 it, the IDE returns `404 Repository not cloned yet` for repos the agent has
 just processed. Maintenance and beat never touch clones.
 
+This still holds with per-user IDE views (#505, PR #507, not merged when this
+was written): each user's view is a git worktree of the shared clone, and the
+API refreshes it from GitHub with `ls-remote`/`fetch` into that clone. The API
+never creates the clone itself; only an agent run on the worker does. On an
+API host without the worker's clone, the IDE routes answer `404` and the
+terminal opens without a repository. Separating the two needs the API to
+clone on demand or read through the GitHub API (epic #418).
+
+Redis is the only channel between the API and the workers, so every process
+must use the same `REDIS_URL`.
+
 ## Database
 
 The schema is a set of versioned migrations in
@@ -183,9 +194,15 @@ Docker Compose v2.24 or later.
 `api`, `worker` and `beat` start only after Redis answers `redis-cli ping`
 (`depends_on: condition: service_healthy`). The worker's healthcheck is a
 `celery inspect ping` of its own node. If the worker is down, `POST /start`
-answers `503` ("No agent worker is available") instead of queueing a run
-nobody consumes; Redis itself keeps queued tasks (`appendonly yes`,
-`noeviction`) across restarts.
+answers `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and creates no run,
+instead of queueing a run nobody consumes (`AGENT_WORKER_CHECK`, below). Redis
+itself keeps queued tasks (`appendonly yes`, `noeviction`) across restarts.
+Only `api` publishes a port; Redis is reachable only inside the Compose
+network.
+
+Secrets come from `backend/.env`, which is git-ignored and excluded from the
+image by `.dockerignore`. [`backend/.env.example`](../backend/.env.example)
+lists the variable names to fill in.
 
 ### Smoke test
 
@@ -265,9 +282,13 @@ correct layout. It has three consequences:
   service. SIGTERM is forwarded to both processes, and Celery's `acks_late`
   requeues an interrupted run.
 
-The long-term fix, which lets workers scale independently, is for the IDE
-routes to read files through the GitHub API instead of local clones (epic
-#418).
+Both services get `REDIS_URL` from the same `automaintainer-redis` instance
+(`fromService ... connectionURL`), so the API enqueues where the workers
+consume. Per-user IDE views (PR #507) do not remove the need to co-locate: the
+views are worktrees of the clone the agent worker makes (see
+[Topology](#topology)). The long-term fix, which lets workers scale
+independently, is for the API to clone on demand or read files through the
+GitHub API (epic #418).
 
 **Migrating from the old blueprint:** delete the old
 `automaintainer-celery-worker` service if a Blueprint sync leaves it in place.
@@ -289,8 +310,16 @@ docker run -p 7860:7860 --init \
   ghcr.io/pxa-labs/automaintainer:latest automaintainer-api-and-worker
 ```
 
-If you run the API without any worker, `POST /start` enqueues runs that stay
-`queued` forever. Periodic maintenance (stale-run cleanup, repo sync) also
+If you run the API without any worker, `POST /start` answers `503`
+(`AGENT_WORKER_UNAVAILABLE`) and creates no run. A Hugging Face Docker Space
+runs the image's default command, which is the API alone, and the repository
+has no Space start script (the sync workflow is
+`.github/workflows/hf-sync.yml.disabled`). Such a Space therefore needs a
+worker elsewhere on the same Redis, which also means its IDE has no clones.
+The default command is not the launcher: without a reachable Redis the
+launcher's worker retries the broker and then exits, which takes the API down
+with it and would restart-loop a container meant to run the API alone.
+Periodic maintenance (stale-run cleanup, repo sync) also
 needs a beat process. On a single container, add `CELERY_QUEUES=agent_runs,maintenance,github_sync`
 and run `celery -A celery_app beat -s /tmp/celerybeat-schedule` somewhere, for
 example as a second Space.
@@ -348,7 +377,8 @@ example as a second Space.
 | `TERMINAL_ADMIN_USER_IDS` | unset (nobody) | Comma-separated Supabase user IDs allowed to open the terminal when `ENABLE_TERMINAL=true`. It fails closed: empty means nobody. The check also applies under `AUTH_DEV_BYPASS`, so the dev user ID must be listed for local terminal use. |
 | `GITHUB_AUTH_MODE` | `app` if App credentials are set, else `pat` | `app`: every run and IDE route acts with the GitHub App **installation token** of the repository's installation (cached, refreshed 5 minutes before expiry); a run or route with no known installation is refused, never silently downgraded to a PAT. `pat`: single-tenant mode using `GITHUB_TOKEN` for everything (a warning is logged at startup). Any other value is a startup error. |
 | `ASSIST_RATE_PER_MINUTE` / `ASSIST_ORG_RATE_PER_MINUTE` / `ASSIST_DAILY_REQUESTS_PER_ORG` | `20` / `60` / `1000` | Quotas for `/assist/inline` (per user per minute, per org per minute, per org per UTC day). Exceeding one returns `429` with `Retry-After`. Counters live in Redis; without Redis they fall back to per-process memory, so limits are then per API process rather than global. |
-| `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | `/start` pings the Celery workers first and returns `503` when none answer within the timeout, instead of queueing a run nobody will pick up. The result is cached for the given number of seconds. |
+| `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | Before creating a run, `/start` asks the Celery workers which queues they consume (`inspect active_queues`) and returns `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and a `Retry-After` header when none consuming `agent_runs` answers within the timeout, or the broker cannot be reached. No run row is created. A maintenance-only worker does not count. The answer, positive or negative, is cached for the given number of seconds. |
+| `AGENT_WORKER_CHECK` | `true` | Set to `false` (or `0`, `no`, `off`) to skip that check, for local development or tests without a broker. Runs are then queued even if no worker will consume them. Any other value keeps the check on. Leave it unset in deployments. |
 | `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. Timeouts, output limits and per-repository `.automaintainer.yml` are described in [VERIFICATION.md](./VERIFICATION.md). Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
 | `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, ...) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
 | `CHANGE_LIMIT_MAX_FILES` / `CHANGE_LIMIT_MAX_LINES` / `CHANGE_LIMIT_DENYLIST` | `10` / `500` / built-in list | An agent change over the file or line limit is opened as a **draft** PR with the `needs-human` label and a "Change limits exceeded" section, and the run never merges it under any `MERGE_POLICY`. A change to a **denied path** is refused before it is committed (#488): nothing reaches the run branch, no PR is opened, and the run fails with `PROTECTED_PATH`. That failure is terminal (a redelivery does not retry it), so a human makes the change or reruns by hand; only a run that already has a PR from an earlier iteration also gets that PR held as a draft `needs-human` PR. If the base branch's `.automaintainer.yml` cannot be read (any error but a 404, such as a GitHub 5xx or a rate limit) or parsed, its `deny` entries are unknown and **every** commit is refused the same way (`PROTECTED_PATH`, terminal, manual rerun), so a transient GitHub error ends the run. `CHANGE_LIMIT_DENYLIST` is a comma-separated list of globs that **replaces** the built-in one (workflows, Dockerfiles, compose files, lockfiles, `.env*`, `*.pem`, `*.key`, and test-runner configuration such as `conftest.py`, `pytest.toml`, `pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `package.json`, `jest`/`vitest`/`vite`/`playwright` configs, `.npmrc`, and `pytest.py`/`pytest/`/`_pytest/` modules that would replace pytest; `.automaintainer.yml` is always denied). A deployment that sets `CHANGE_LIMIT_DENYLIST` keeps its own list after upgrading and gets **none** of the new test-runner entries; add them to it, or unset it to use the built-in list. Repositories can tighten or relax them with a `change_limits` mapping in `.automaintainer.yml`, read from the base branch (e.g. `allow: ["pyproject.toml"]`). Existing deployments start seeing draft `needs-human` PRs for large changes after upgrading, and `PROTECTED_PATH` failures once test-runner configuration is denied: every fix that edits `pyproject.toml` or `package.json` (a dependency bump, a tool setting) is now refused and left for a human; see [ARCHITECTURE.md](../ARCHITECTURE.md#change-limits). |

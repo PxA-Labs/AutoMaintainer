@@ -166,8 +166,10 @@ services:
   #
   # Scaling agent capacity: raise CELERY_CONCURRENCY on the backend service or
   # move to a larger plan. Running agent workers in separate services requires
-  # the IDE routes to stop reading local clones (fetch via the GitHub API
-  # instead) - tracked in the deployment epic (#418).
+  # the API to stop depending on the worker's clones (clone on demand, or read
+  # via the GitHub API) - tracked in the deployment epic (#418). Per-user IDE
+  # views (PR #507) do not change this: they are git worktrees of the clone
+  # the agent worker creates, which the API only refreshes from GitHub.
   #
   # Migrating from the previous blueprint: the standalone
   # `automaintainer-celery-worker` service was removed (its job now runs inside
