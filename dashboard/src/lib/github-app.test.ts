@@ -142,11 +142,11 @@ describe("isOrgAdmin / isGitHubInstallUrl", () => {
 });
 
 describe("requestInstallUrl", () => {
-  it("POSTs with the bearer and GitHub user tokens and returns the install URL", async () => {
+  it("POSTs with only the Supabase bearer token and returns the install URL", async () => {
     const fetchMock = vi.fn(async () => respond(200, { install_url: INSTALL_URL, expires_in: 600 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(requestInstallUrl("gho_user")).resolves.toBe(INSTALL_URL);
+    await expect(requestInstallUrl()).resolves.toBe(INSTALL_URL);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
@@ -154,19 +154,23 @@ describe("requestInstallUrl", () => {
     expect(init.method).toBe("POST");
     const headers = new Headers(init.headers);
     expect(headers.get("Authorization")).toBe("Bearer supabase-token");
-    expect(headers.get("X-GitHub-User-Token")).toBe("gho_user");
+    // #481: no GitHub token is sent (Supabase drops provider_token on refresh).
+    expect(headers.get("X-GitHub-User-Token")).toBeNull();
+    expect([...headers.keys()].filter((name) => name.includes("github"))).toEqual([]);
   });
 
-  it("asks to sign in again, without calling the API, when there is no GitHub token", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(requestInstallUrl(null)).rejects.toThrow(/sign in with GitHub again/);
-    expect(fetchMock).not.toHaveBeenCalled();
+  it("asks to sign in again on a 401 (expired Supabase session)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => respond(401, { detail: "Invalid or expired access token" })));
+    await expect(requestInstallUrl()).rejects.toThrow(/session has expired. Sign in again/);
   });
 
-  it("asks to sign in again on a 401 (expired session or GitHub token)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => respond(401, { detail: "GitHub user token is invalid or expired" })));
-    await expect(requestInstallUrl("gho_old")).rejects.toThrow(/sign in with GitHub again/);
+  it("explains a missing GitHub identity (409)", async () => {
+    const detail = "Your account has no linked GitHub identity. Sign in with GitHub, then install the App.";
+    vi.stubGlobal("fetch", vi.fn(async () => respond(409, { detail })));
+    await expect(requestInstallUrl()).rejects.toThrow(detail);
+
+    vi.stubGlobal("fetch", vi.fn(async () => respond(409, {})));
+    await expect(requestInstallUrl()).rejects.toThrow(/no linked GitHub identity/);
   });
 
   it("explains a 403 and a 503", async () => {
@@ -174,25 +178,25 @@ describe("requestInstallUrl", () => {
       "fetch",
       vi.fn(async () => respond(403, { detail: "Only organization owners and admins can install the GitHub App" }))
     );
-    await expect(requestInstallUrl("gho")).rejects.toThrow("Only organization owners and admins");
+    await expect(requestInstallUrl()).rejects.toThrow("Only organization owners and admins");
 
     vi.stubGlobal("fetch", vi.fn(async () => respond(503, { detail: "not configured" })));
-    await expect(requestInstallUrl("gho")).rejects.toThrow(/not configured on the server/);
+    await expect(requestInstallUrl()).rejects.toThrow(/not configured on the server/);
   });
 
-  it("suggests a retry or a new sign-in when GitHub cannot identify the user (502)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => respond(502, { detail: "Could not identify the GitHub user" })));
-    await expect(requestInstallUrl("gho")).rejects.toThrow(/Try again in a moment.*sign in with GitHub again/);
+  it("reports other server errors with their status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => respond(500, {})));
+    await expect(requestInstallUrl()).rejects.toThrow("Could not start the install (HTTP 500).");
   });
 
   it("refuses to follow a URL that is not GitHub's install page", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => respond(200, { install_url: "https://evil.test/apps/x" })));
-    await expect(requestInstallUrl("gho")).rejects.toThrow(/valid GitHub install link/);
+    await expect(requestInstallUrl()).rejects.toThrow(/valid GitHub install link/);
   });
 
   it("reports a network failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
-    await expect(requestInstallUrl("gho")).rejects.toThrow(/Could not reach the server/);
+    await expect(requestInstallUrl()).rejects.toThrow(/Could not reach the server/);
   });
 });
 

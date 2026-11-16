@@ -3,11 +3,13 @@
  * GET /github/app/setup, see docs/DEPLOYMENT.md "Install flow").
  *
  * 1. An org owner/admin asks the backend for an install URL. The request
- *    carries the Supabase bearer token and the user's GitHub OAuth token in
- *    X-GitHub-User-Token; the backend binds a signed, expiring `state` to
- *    (user, org, GitHub user id) and returns the GitHub install URL.
+ *    carries only the Supabase bearer token (no GitHub token: Supabase drops
+ *    `provider_token` when it refreshes the session, #481). The backend
+ *    binds a signed, expiring, single-use `state` to (user, org, the user's
+ *    GitHub identity in Supabase Auth) and returns the GitHub install URL.
  * 2. After the install, GitHub calls the backend's setup route, which
- *    verifies everything and redirects back to the dashboard with
+ *    verifies everything (including the installer's own GitHub OAuth code,
+ *    exchanged server-side) and redirects back to the dashboard with
  *    `github_setup=<outcome>` and, when linked, `github_installation_id`.
  * 3. The dashboard reads (and then removes) those parameters, reports the
  *    outcome and reloads the org's installations and repositories.
@@ -52,7 +54,8 @@ const OUTCOME_MESSAGES: Record<string, { tone: SetupResult["tone"]; message: str
   },
   expired: {
     tone: "error",
-    message: "The install link expired (it is valid for 10 minutes), so nothing was linked. Start the install again.",
+    message:
+      "The install link expired (it is valid for 10 minutes and can be used once), so nothing was linked. Start the install again.",
   },
   forbidden: {
     tone: "error",
@@ -127,8 +130,7 @@ export class InstallUrlError extends Error {
   }
 }
 
-const SIGN_IN_AGAIN =
-  "Your GitHub sign-in has expired or is not available. Sign out, sign in with GitHub again, then retry.";
+const SIGN_IN_AGAIN = "Your session has expired. Sign in again, then retry.";
 
 async function readDetail(res: Response): Promise<string | null> {
   try {
@@ -158,23 +160,16 @@ export function isGitHubInstallUrl(value: unknown): value is string {
 /**
  * Ask the backend for a GitHub App install URL.
  *
- * `githubToken` is the user's GitHub OAuth token (Supabase
- * `session.provider_token`). Supabase only has it right after a GitHub
- * sign-in and drops it when it refreshes the session, so a missing token
- * asks the user to sign in again rather than calling the API.
+ * Only the Supabase session is sent. No GitHub token is read, sent or
+ * stored: the backend binds the install to the user's GitHub identity and
+ * verifies ownership with the installer's OAuth code when GitHub calls back,
+ * so the action keeps working after a reload or a session refresh.
  */
-export async function requestInstallUrl(githubToken: string | null | undefined): Promise<string> {
-  if (!githubToken) throw new InstallUrlError(SIGN_IN_AGAIN);
-
+export async function requestInstallUrl(): Promise<string> {
   let res: Response;
   try {
-    res = await authedFetch("/github/app/install-url", {
-      method: "POST",
-      headers: { "X-GitHub-User-Token": githubToken },
-    });
+    res = await authedFetch("/github/app/install-url", { method: "POST" });
   } catch (err) {
-    // A 401 here is either the Supabase session or the GitHub token (the
-    // route returns 401 for both); signing in again renews both.
     if (err instanceof UnauthenticatedError) throw new InstallUrlError(SIGN_IN_AGAIN);
     throw new InstallUrlError("Could not reach the server to start the install. Try again.");
   }
@@ -189,11 +184,10 @@ export async function requestInstallUrl(githubToken: string | null | undefined):
         "The GitHub App install flow is not configured on the server. Ask your administrator to set it up."
       );
     }
-    if (res.status === 502) {
-      // The backend could not look up the GitHub user behind the token:
-      // usually a GitHub outage or a token revoked on GitHub's side.
+    if (res.status === 409) {
+      // No GitHub identity is linked to this account (e.g. an email sign-in).
       throw new InstallUrlError(
-        "GitHub could not confirm your account. Try again in a moment; if it keeps failing, sign out and sign in with GitHub again."
+        detail ?? "Your account has no linked GitHub identity. Sign in with GitHub, then install the App."
       );
     }
     throw new InstallUrlError(
