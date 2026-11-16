@@ -1207,6 +1207,61 @@
         "summary": "List Runs"
       }
     },
+    "/runs/{run_id}/decisions": {
+      "get": {
+        "description": "Merge decision audit rows of a run in the caller's organization, newest\nfirst (docs/VERIFICATION.md, \"Merge decisions audit\").",
+        "operationId": "list_run_merge_decisions_runs__run_id__decisions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Run Merge Decisions"
+      }
+    },
     "/runs/{run_id}/verifications": {
       "get": {
         "description": "Verification audit rows of a run in the caller's organization, newest\nfirst (docs/VERIFICATION.md, \"Audit trail\").",

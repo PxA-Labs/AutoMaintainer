@@ -136,6 +136,38 @@ INSERT, UPDATE or DELETE policy for `anon` or `authenticated`. The table is
 not in the `supabase_realtime` publication, because the dashboard does not
 subscribe to it. Rows are deleted with their run or organization.
 
+### Merge decisions audit
+
+Each Maintainer review of a PR ends in a decision, and `maintainer_node`
+records it as one `merge_decisions` row (migration
+`supabase/migrations/20261116180000_merge_decisions.sql`, hook
+`merge_audit.record_decision`) with the run context, the reviewed `head_sha`,
+the `iteration`, the `policy` in force (`human`, `ci`, `auto`; an unknown
+`MERGE_POLICY` is recorded as `human`) and:
+
+| Branch | `decision` | `actor` | Reason recorded |
+|---|---|---|---|
+| Maintainer rejects (or its reply is invalid) | `not_merged` | `agent`, `actor_role` `Maintainer` | `maintainer rejected` |
+| `MERGE_POLICY=human` | `held` | `policy` | `policy human` |
+| `ci`: verification or checks not green | `held` | `policy` | `ci status not success: ...` |
+| Review comment not posted / diff incomplete / change limits | `held` | `policy` | `review comment not posted`, `reviewed diff incomplete`, `change limits exceeded` |
+| `auto`, or `ci` with green checks | `merged` | `policy` | `policy auto` / `ci checks passed: ...` |
+| GitHub refuses the merge (the run then fails) | `not_merged` | `policy` | `github did not merge the pr` |
+
+`reasons` lists the gates in the order they ran (at most 10, 200 characters
+each). `evidence` holds the PR link, the reviewed commit's page (where the
+`automaintainer/verification` status is listed; it has no `target_url`), the
+verification result the Maintainer saw and the id of the newest
+`verification_results` row for that head. `actor` `human` is allowed by the
+table but not written yet. A run without a PR writes no row.
+
+A redelivered run that replays a review from its checkpoint writes nothing.
+One that reviews again (it crashed before saving the checkpoint) made a new
+decision and writes a new row; if the first attempt had already merged, the
+reason `already merged by an earlier attempt` says so. Writing is best effort
+and has the same guarantees, RLS and read access as verification rows:
+`GET /runs/{run_id}/decisions`, newest first, at most 100.
+
 ### Effect on existing deployments
 
 - With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image
