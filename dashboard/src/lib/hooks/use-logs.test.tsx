@@ -53,6 +53,40 @@ describe("useLogs", () => {
     expect(result.current.activity).toHaveLength(MAX_ACTIVITY_ENTRIES);
   });
 
+  it("labels ErrorEvent rows by code and marks non-fatal ones as warnings", async () => {
+    const { result } = renderHook(() => useLogs("run-2"));
+    await waitFor(() => expect(realtime.push).toBeDefined());
+    await act(async () => {});
+
+    await act(async () => {
+      realtime.push!({
+        id: "e1",
+        log_type: "error",
+        agent_name: "architect",
+        message: "Error [REPO_SYNC_FAILED]: using the cached copy",
+        metadata: { error_code: "REPO_SYNC_FAILED", message: "using the cached copy", fatal: false },
+      });
+      realtime.push!({
+        id: "e2",
+        log_type: "error",
+        agent_name: "system",
+        message: "Error [SOMETHING_NEW]: boom",
+        metadata: { error_code: "SOMETHING_NEW", message: "boom", fatal: true },
+      });
+    });
+
+    const [sync, unknown] = result.current.logs.slice(-2);
+    expect(sync).toMatchObject({
+      msg: "Warning: Repository update failed [REPO_SYNC_FAILED]: using the cached copy",
+      color: "text-amber-400",
+    });
+    expect(sync.help).toMatch(/Not a run failure/);
+    expect(unknown).toMatchObject({
+      msg: "Unrecognised error [SOMETHING_NEW]: boom",
+      color: "text-red-400",
+    });
+  });
+
   it("caps locally added logs", () => {
     const { result } = renderHook(() => useLogs(null));
     act(() => {

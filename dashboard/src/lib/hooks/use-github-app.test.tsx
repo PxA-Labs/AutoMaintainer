@@ -34,7 +34,7 @@ describe("useGitHubApp", () => {
   it("reads the setup redirect, clears its parameters and reloads the lists", async () => {
     window.history.replaceState(null, "", "/?run=r1&github_setup=linked&github_installation_id=42");
 
-    const { result } = renderHook(() => useGitHubApp("user-1", "gho"));
+    const { result } = renderHook(() => useGitHubApp("user-1"));
 
     await waitFor(() => expect(result.current.setupResult?.outcome).toBe("linked"));
     expect(window.location.search).toBe("?run=r1");
@@ -47,7 +47,7 @@ describe("useGitHubApp", () => {
   });
 
   it("does not load anything when signed out", async () => {
-    const { result } = renderHook(() => useGitHubApp(null, null));
+    const { result } = renderHook(() => useGitHubApp(null));
     await act(async () => {});
     expect(fetchGitHubAppState).not.toHaveBeenCalled();
     expect(result.current.state).toBeNull();
@@ -56,35 +56,35 @@ describe("useGitHubApp", () => {
 
   it("is not admin for a member", async () => {
     fetchGitHubAppState.mockResolvedValue({ ...ADMIN_STATE, role: "member" });
-    const { result } = renderHook(() => useGitHubApp("user-1", "gho"));
+    const { result } = renderHook(() => useGitHubApp("user-1"));
     await waitFor(() => expect(result.current.state?.role).toBe("member"));
     expect(result.current.isAdmin).toBe(false);
   });
 
   it("reports a load error", async () => {
     fetchGitHubAppState.mockRejectedValue(new Error("permission denied"));
-    const { result } = renderHook(() => useGitHubApp("user-1", "gho"));
+    const { result } = renderHook(() => useGitHubApp("user-1"));
     await waitFor(() => expect(result.current.loadError).toBe("permission denied"));
   });
 
-  it("install sends the GitHub token and navigates to the returned URL", async () => {
+  it("install needs no GitHub token and navigates to the returned URL", async () => {
     const assign = vi.fn();
     vi.spyOn(window, "location", "get").mockReturnValue({ ...window.location, assign } as Location);
     requestInstallUrl.mockResolvedValue("https://github.com/apps/x/installations/new?state=s");
-    const { result } = renderHook(() => useGitHubApp("user-1", "gho_token"));
+    const { result } = renderHook(() => useGitHubApp("user-1"));
 
     await act(async () => {
       await result.current.install();
     });
 
-    expect(requestInstallUrl).toHaveBeenCalledWith("gho_token");
+    expect(requestInstallUrl).toHaveBeenCalledWith();
     expect(assign).toHaveBeenCalledWith("https://github.com/apps/x/installations/new?state=s");
     expect(result.current.installing).toBe(true);
   });
 
   it("install failure is shown and the action re-enabled", async () => {
     requestInstallUrl.mockRejectedValue(new InstallUrlError("Only organization owners and admins can install"));
-    const { result } = renderHook(() => useGitHubApp("user-1", null));
+    const { result } = renderHook(() => useGitHubApp("user-1"));
 
     await act(async () => {
       await result.current.install();

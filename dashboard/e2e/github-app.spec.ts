@@ -46,7 +46,9 @@ async function mockGitHubRoundTrip(
 }
 
 test("an admin installs the App and comes back to a linked installation", async ({ page, context }) => {
-  const token = await signIn(page, { providerToken: GITHUB_TOKEN });
+  // A restored session without provider_token, as after a reload or a
+  // session refresh (#481): the install still starts without a new sign-in.
+  const token = await signIn(page);
   // Nothing is linked until the setup route has run.
   let linked = false;
   const counts = await mockGitHubAppTables(context, () => (linked ? LINKED : { role: "owner" }));
@@ -67,10 +69,10 @@ test("an admin installs the App and comes back to a linked installation", async 
 
   await page.getByRole("button", { name: "Install GitHub App" }).click();
 
-  // The request carried both credentials the route requires.
+  // The request carried only the Supabase session.
   await expect(page.getByRole("status").filter({ hasText: "GitHub App installed" })).toBeVisible();
   expect(installHeaders["authorization"]).toBe(`Bearer ${token}`);
-  expect(installHeaders["x-github-user-token"]).toBe(GITHUB_TOKEN);
+  expect(installHeaders["x-github-user-token"]).toBeUndefined();
   expect(visited).toEqual([INSTALL_URL]);
 
   // Back on the dashboard: the outcome is announced, the parameters are
@@ -85,9 +87,15 @@ test("an admin installs the App and comes back to a linked installation", async 
 });
 
 test("a failed setup redirect shows the reason as an alert", async ({ page, context }) => {
+  // Right after a GitHub sign-in Supabase still has provider_token; the
+  // install action must not forward it.
   await signIn(page, { providerToken: GITHUB_TOKEN });
   await mockGitHubAppTables(context, { role: "admin" });
-  await context.route(API.githubInstallUrl, (route) => json(route, { install_url: INSTALL_URL }));
+  let installHeaders: Record<string, string> = {};
+  await context.route(API.githubInstallUrl, (route) => {
+    installHeaders = route.request().headers();
+    return json(route, { install_url: INSTALL_URL });
+  });
   await mockGitHubRoundTrip(context, "github_setup=expired");
 
   await page.goto("/");
@@ -95,6 +103,8 @@ test("a failed setup redirect shows the reason as an alert", async ({ page, cont
 
   const alert = page.getByRole("alert").filter({ hasText: "GitHub App not linked" });
   await expect(alert).toContainText("The install link expired");
+  expect(installHeaders["x-github-user-token"]).toBeUndefined();
+  expect(JSON.stringify(installHeaders)).not.toContain(GITHUB_TOKEN);
   await expect(page).not.toHaveURL(/github_setup/);
   await expect(page.getByText("No GitHub App installation is linked to your organization.")).toBeVisible();
   await expectNoA11yViolations(page, "GitHub App setup failure");
@@ -104,7 +114,7 @@ test("a failed setup redirect shows the reason as an alert", async ({ page, cont
 });
 
 test("members do not get the install action, and an install error is announced", async ({ page, context }) => {
-  await signIn(page, { providerToken: GITHUB_TOKEN });
+  await signIn(page);
   let role = "member";
   await mockGitHubAppTables(context, () => ({ ...LINKED, role }));
   const installCalls = recordRequests(page, (r) => r.url() === API.githubInstallUrl);

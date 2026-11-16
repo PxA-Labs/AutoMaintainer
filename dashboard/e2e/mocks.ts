@@ -203,8 +203,8 @@ export async function signIn(page: Page, { providerToken }: { providerToken?: st
     expires_in: 3600,
     expires_at: expiresAt,
     user: TEST_USER,
-    // The GitHub OAuth token Supabase keeps after a GitHub sign-in; the
-    // install flow sends it as X-GitHub-User-Token.
+    // The GitHub OAuth token Supabase keeps right after a GitHub sign-in
+    // (dropped on refresh). The install flow must not read or send it.
     ...(providerToken ? { provider_token: providerToken } : {}),
   };
   await page.addInitScript(
