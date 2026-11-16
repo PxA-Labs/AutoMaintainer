@@ -1883,15 +1883,85 @@ async def _save_checkpoint(run_id: str | None, **updates) -> None:
         logger.warning("Could not save checkpoint of run %s: %s", run_id, e)
 
 
-def _find_run_issue(gh_repo, run_id: str):
-    """The issue this run already opened (identified by its marker), or None."""
+# Slug of the GitHub App (app mode), read once per process from GET /app.
+_github_app_slug_cache: dict = {}
+
+
+def _github_app_slug() -> Optional[str]:
+    """The App's slug: GitHub's GET /app (App JWT), else GITHUB_APP_SLUG.
+
+    GET /app is authoritative and needs only the App id and private key that
+    app mode requires anyway; a successful answer is cached for the process.
+    GITHUB_APP_SLUG (set for the install flow) is the fallback when that call
+    fails. None when neither is available.
+    """
+    if "slug" in _github_app_slug_cache:
+        return _github_app_slug_cache["slug"]
+    try:
+        from github_app import get_github_integration
+
+        slug = get_github_integration().get_app().slug
+        if isinstance(slug, str) and slug:
+            _github_app_slug_cache["slug"] = slug
+            return slug
+    except Exception as e:
+        logger.warning("Could not read the GitHub App slug (GET /app): %s", e)
+    slug = (os.getenv("GITHUB_APP_SLUG") or "").strip()
+    return slug or None
+
+
+def _run_issue_author() -> Optional[str]:
+    """GitHub login the current run opens issues as, or None if unknown.
+
+    ``app`` mode: the installation's bot account, ``<app-slug>[bot]``. An
+    installation token cannot call GET /user, so the slug comes from
+    _github_app_slug. ``pat`` mode: the PAT's own user (GET /user). Any error
+    gives None, and then no existing issue counts as the run's.
+    """
+    creds = _run_github_credentials.get()
+    try:
+        mode = creds.mode if creds is not None else get_auth_mode()
+        if mode == AUTH_MODE_APP:
+            slug = _github_app_slug()
+            return f"{slug}[bot]" if slug else None
+        login = gh.get_user().login
+    except Exception as e:
+        logger.warning("Could not resolve the run's GitHub identity: %s", e)
+        return None
+    return login if isinstance(login, str) and login else None
+
+
+def _find_run_issue(gh_repo, run_id: str, author: Optional[str]):
+    """The issue this run already opened, or None (#490).
+
+    An issue counts only when it carries this run's marker AND was opened by
+    ``author``, the identity the run itself acts as (_run_issue_author). The
+    marker alone proves nothing: the run's issues are public, so anyone can
+    copy it into an issue of their own, and the issue returned here is the
+    task the models then follow. Without a known ``author`` nothing is reused
+    (fail closed): the caller opens a new issue, at worst a duplicate after a
+    redelivery. Only the author and repository writers can edit an issue
+    body, so a matching issue's text is the run's own or a writer's.
+    """
+    if not author:
+        return None
     marker = run_marker(run_id)
     issues = gh_repo.get_issues(state="all", sort="created", direction="desc")
     for issue in itertools.islice(iter(issues), RUN_ISSUE_SCAN_LIMIT):
         if getattr(issue, "pull_request", None) is not None:
             continue  # the issues API also lists pull requests
-        if marker in (issue.body or ""):
-            return issue
+        if marker not in (issue.body or ""):
+            continue
+        if getattr(getattr(issue, "user", None), "login", None) != author:
+            logger.warning(
+                "Ignoring issue #%s: it carries the marker of run %s but was "
+                "not opened by %s",
+                getattr(issue, "number", "?"),
+                run_id,
+                author,
+            )
+            continue
+        return issue
     return None
 
 
@@ -2062,7 +2132,12 @@ async def brainstormer_node(state: AgentState):
             gh_repo = gh.get_repo(repo)
             # Reuse the issue an earlier attempt of this run opened (its
             # checkpoint write may have been lost) instead of opening another.
-            issue = _find_run_issue(gh_repo, run_id) if run_id else None
+            issue = None
+            if run_id:
+                author = await asyncio.to_thread(_run_issue_author)
+                issue = await asyncio.to_thread(
+                    _find_run_issue, gh_repo, run_id, author
+                )
             if issue is not None:
                 # Keep the idea the issue describes; this attempt's
                 # brainstorm differs from it.
