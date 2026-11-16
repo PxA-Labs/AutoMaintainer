@@ -1,11 +1,13 @@
-"""Regression tests for #138: a failed repository clone must end the run with a
-clear error code instead of continuing on an empty working copy."""
+"""Regression tests for #138 (failed repository clone) and #142 (failed fetch of
+the targeted issue): both must end the run with a clear error code instead of
+continuing on an empty working copy or an empty directive."""
 
 import asyncio
 import os
 from unittest.mock import MagicMock
 
 import pytest
+from github import GithubException, RateLimitExceededException
 
 import agents
 import workspace
@@ -196,3 +198,62 @@ def test_redact_credentials_masks_token_and_url_userinfo():
     out = agents._redact_credentials(text, TOKEN)
     assert out == "x *** https://***@github.com/o/r.git http://***@h/p"
     assert agents._redact_credentials("plain", None) == "plain"
+
+
+# --- #142: a failed fetch of the targeted issue ends the run ------------------
+
+
+def _target_state(number=42):
+    return {"repo_name": "o/r", "target_issue": number}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 410])
+async def test_missing_target_issue_is_invalid(offline, status):
+    offline.get_issue.side_effect = GithubException(status, {"message": "x"}, None)
+
+    with pytest.raises(agents.PipelineAbortError) as exc:
+        await agents.architect_node(_target_state())
+
+    assert exc.value.error_code == "INVALID_TARGET_ISSUE"
+    assert "#42" in str(exc.value)
+    assert offline.llm_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        GithubException(502, {"message": "Bad Gateway"}, None),
+        RateLimitExceededException(403, {"message": "API rate limit exceeded"}, None),
+    ],
+    ids=["5xx", "rate-limit"],
+)
+async def test_transient_issue_fetch_failure_fails_run(offline, error):
+    offline.get_issue.side_effect = error
+    collector = Collector()
+
+    result = await agents.run_agent_loop(
+        "o/r", target_issue=42, run_id="r142", emitter=collector
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "FETCH_ISSUE_FAILED"
+    assert f"returned {error.status}" in result["error"]
+    # Never proceeds with an empty directive.
+    assert offline.llm_calls == []
+    offline.create_issue.assert_not_called()
+    offline.create_git_ref.assert_not_called()
+    fatal = [e for e in _errors(collector) if e.fatal]
+    assert [e.error_code for e in fatal] == ["FETCH_ISSUE_FAILED"]
+
+
+@pytest.mark.asyncio
+async def test_non_github_issue_fetch_error_fails_run(offline):
+    offline.get_issue.side_effect = ConnectionError("connection reset")
+
+    with pytest.raises(agents.PipelineAbortError) as exc:
+        await agents.architect_node(_target_state())
+
+    assert exc.value.error_code == "FETCH_ISSUE_FAILED"
+    assert offline.llm_calls == []

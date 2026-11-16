@@ -386,7 +386,7 @@ async def test_missing_target_issue_aborts(offline, monkeypatch):
     monkeypatch.setattr(agents, "run_llm_with_tools", llm)
     result = await agents.run_agent_loop("o/r", target_issue=99999, run_id="r")
     assert result["status"] == "failed"
-    assert result["error_code"] == "FETCH_ISSUE_FAILED"
+    assert result["error_code"] == "INVALID_TARGET_ISSUE"
     offline.create_git_ref.assert_not_called()
     assert not offline.get_pull.return_value.merge.called
 

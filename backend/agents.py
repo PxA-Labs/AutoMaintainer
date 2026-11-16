@@ -1583,6 +1583,25 @@ async def architect_node(state: AgentState):
             issue = gh_repo.get_issue(number=target_issue)
             issue_title = issue.title or ""
             issue_body = issue.body or ""
+        except GithubException as e:
+            if e.status in (404, 410):
+                # Missing, deleted, or not visible to the run's credentials:
+                # re-running cannot help until the target is corrected.
+                raise PipelineAbortError(
+                    "INVALID_TARGET_ISSUE",
+                    f"Issue #{target_issue} does not exist in {repo} or is "
+                    "not accessible.",
+                    AgentPhase.ARCHITECT,
+                ) from e
+            # 5xx, rate limits, auth errors. Terminal like every failure after
+            # the run has started (tasks.py never retries past that point); the
+            # code tells the user that starting the run again may succeed.
+            raise PipelineAbortError(
+                "FETCH_ISSUE_FAILED",
+                f"Failed to fetch issue #{target_issue} (GitHub returned "
+                f"{e.status}); try the run again later.",
+                AgentPhase.ARCHITECT,
+            ) from e
         except Exception as e:
             raise PipelineAbortError(
                 "FETCH_ISSUE_FAILED",
