@@ -31,6 +31,8 @@ interface SidebarProps {
   agentStatus: Record<string, string>;
   /** GitHub App status and install action (signed-in users only). */
   githubApp?: ReactNode;
+  /** The selected repository's merge policy control (signed-in users only). */
+  mergePolicy?: ReactNode;
 }
 
 const CREW = [
@@ -102,6 +104,7 @@ export function Sidebar({
   onTargetIssueChange,
   agentStatus,
   githubApp,
+  mergePolicy,
 }: SidebarProps) {
   const navItems = [
     {
@@ -232,6 +235,8 @@ export function Sidebar({
                 placeholder="#123 or blank"
               />
             </div>
+
+            {mergePolicy}
           </div>
         </div>
 

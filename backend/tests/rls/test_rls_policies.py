@@ -886,3 +886,103 @@ def test_merge_decisions_are_not_published_to_realtime(db):
         )
         assert cur.fetchone() == (0,)
     db.rollback()
+
+
+# --------------------------------------------------------------------------
+# repositories.merge_policy (epic #411, backend/merge_policy.py)
+# --------------------------------------------------------------------------
+
+
+def _set_merge_policy(value, tenant=TENANT_A):
+    return (
+        "UPDATE repositories SET merge_policy = %s WHERE id = %s",
+        (value, tenant.repository_id),
+    )
+
+
+def _merge_policy_of(cur, tenant=TENANT_A):
+    cur.execute(
+        "SELECT merge_policy FROM repositories WHERE id = %s",
+        (tenant.repository_id,),
+    )
+    return cur.fetchall()
+
+
+def test_members_read_their_repositories_merge_policy(db):
+    with session(db, "service_role") as cur:
+        cur.execute(*_set_merge_policy("ci"))
+        cur.execute("SET LOCAL ROLE authenticated")
+        _set_user(cur, USER_A)
+        assert _merge_policy_of(cur) == [("ci",)]
+        for user in (USER_B, USER_C):  # another org; a pending invite to org A
+            _set_user(cur, user)
+            assert _merge_policy_of(cur) == []
+
+
+def test_org_owner_cannot_write_merge_policy_directly(db):
+    """Only the backend writes it (PUT /repositories/{id}/merge-policy checks
+    the org role); PostgREST requests as authenticated change nothing."""
+    with session(db, "authenticated", USER_A) as cur:
+        assert attempt(cur, *_set_merge_policy("auto")) == 0
+        assert attempt(cur, *_set_merge_policy("auto", TENANT_B)) == 0
+        cur.execute("RESET ROLE")
+        assert _merge_policy_of(cur) == [(None,)]
+        assert _merge_policy_of(cur, TENANT_B) == [(None,)]
+
+
+def test_merge_policy_stays_service_only_if_an_update_policy_is_added(db):
+    """Defense in depth: a future client UPDATE policy on repositories (for
+    another column) must not make merge_policy client-writable."""
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "CREATE POLICY repos_update_test ON repositories FOR UPDATE"
+                " TO authenticated USING (true) WITH CHECK (true)"
+            )
+            cur.execute("SET LOCAL ROLE authenticated")
+            _set_user(cur, USER_A)
+            assert attempt(cur, *_set_merge_policy("human")) == "denied"
+            # The trigger guards merge_policy only.
+            touched = attempt(
+                cur,
+                "UPDATE repositories SET description = 'x' WHERE id = %s",
+                (TENANT_A.repository_id,),
+            )
+            assert touched == 1
+    finally:
+        db.rollback()
+
+
+def test_service_role_sets_and_clears_merge_policy(db):
+    with session(db, "service_role") as cur:
+        for value in ("human", "ci", "auto", None):
+            assert attempt(cur, *_set_merge_policy(value)) == 1
+            assert _merge_policy_of(cur) == [(value,)]
+
+
+@pytest.mark.parametrize("value", ["yolo", "HUMAN", ""])
+def test_merge_policy_rejects_unknown_values(db, value):
+    with session(db, "service_role") as cur:
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            cur.execute(*_set_merge_policy(value))
+
+
+def test_repository_sync_upsert_keeps_merge_policy(db):
+    """github_app.sync_installation_repositories upserts rows without the
+    column; an existing setting must survive a re-sync."""
+    with session(db, "service_role") as cur:
+        cur.execute(*_set_merge_policy("human"))
+        cur.execute(
+            "INSERT INTO repositories (id, org_id, github_installation_id, full_name,"
+            " name, owner_login, owner_type) VALUES (%s, %s, %s, %s, 'repo', %s,"
+            " 'Organization') ON CONFLICT (id) DO UPDATE SET"
+            " full_name = EXCLUDED.full_name, synced_at = now()",
+            (
+                TENANT_A.repository_id,
+                str(ORG_A),
+                TENANT_A.installation_id,
+                f"{TENANT_A.login}/repo",
+                TENANT_A.login,
+            ),
+        )
+        assert _merge_policy_of(cur) == [("human",)]

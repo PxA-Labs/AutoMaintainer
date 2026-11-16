@@ -1170,9 +1170,10 @@ class AgentState(TypedDict):
     # workspace.get_safe_repo_dir.
     repository_id: Optional[int]
     target_issue: int | None
-    # Who caused the run: {"source": "api", "login": <GitHub login or None>}.
-    # Set once by run_agent_loop and never written by a node; the merge gate
-    # (trust.py) checks it before any automatic merge.
+    # Who caused the run: {"source": "api", "github_id": <GitHub user id or
+    # None>, "login": <login stored with it, or None>}. Set once by
+    # run_agent_loop and never written by a node; the merge gate (trust.py)
+    # checks the id (resolved to its current login) before any automatic merge.
     trigger: Optional[dict]
     architect_directive: str
     idea: str
@@ -1883,15 +1884,85 @@ async def _save_checkpoint(run_id: str | None, **updates) -> None:
         logger.warning("Could not save checkpoint of run %s: %s", run_id, e)
 
 
-def _find_run_issue(gh_repo, run_id: str):
-    """The issue this run already opened (identified by its marker), or None."""
+# Slug of the GitHub App (app mode), read once per process from GET /app.
+_github_app_slug_cache: dict = {}
+
+
+def _github_app_slug() -> Optional[str]:
+    """The App's slug: GitHub's GET /app (App JWT), else GITHUB_APP_SLUG.
+
+    GET /app is authoritative and needs only the App id and private key that
+    app mode requires anyway; a successful answer is cached for the process.
+    GITHUB_APP_SLUG (set for the install flow) is the fallback when that call
+    fails. None when neither is available.
+    """
+    if "slug" in _github_app_slug_cache:
+        return _github_app_slug_cache["slug"]
+    try:
+        from github_app import get_github_integration
+
+        slug = get_github_integration().get_app().slug
+        if isinstance(slug, str) and slug:
+            _github_app_slug_cache["slug"] = slug
+            return slug
+    except Exception as e:
+        logger.warning("Could not read the GitHub App slug (GET /app): %s", e)
+    slug = (os.getenv("GITHUB_APP_SLUG") or "").strip()
+    return slug or None
+
+
+def _run_issue_author() -> Optional[str]:
+    """GitHub login the current run opens issues as, or None if unknown.
+
+    ``app`` mode: the installation's bot account, ``<app-slug>[bot]``. An
+    installation token cannot call GET /user, so the slug comes from
+    _github_app_slug. ``pat`` mode: the PAT's own user (GET /user). Any error
+    gives None, and then no existing issue counts as the run's.
+    """
+    creds = _run_github_credentials.get()
+    try:
+        mode = creds.mode if creds is not None else get_auth_mode()
+        if mode == AUTH_MODE_APP:
+            slug = _github_app_slug()
+            return f"{slug}[bot]" if slug else None
+        login = gh.get_user().login
+    except Exception as e:
+        logger.warning("Could not resolve the run's GitHub identity: %s", e)
+        return None
+    return login if isinstance(login, str) and login else None
+
+
+def _find_run_issue(gh_repo, run_id: str, author: Optional[str]):
+    """The issue this run already opened, or None (#490).
+
+    An issue counts only when it carries this run's marker AND was opened by
+    ``author``, the identity the run itself acts as (_run_issue_author). The
+    marker alone proves nothing: the run's issues are public, so anyone can
+    copy it into an issue of their own, and the issue returned here is the
+    task the models then follow. Without a known ``author`` nothing is reused
+    (fail closed): the caller opens a new issue, at worst a duplicate after a
+    redelivery. Only the author and repository writers can edit an issue
+    body, so a matching issue's text is the run's own or a writer's.
+    """
+    if not author:
+        return None
     marker = run_marker(run_id)
     issues = gh_repo.get_issues(state="all", sort="created", direction="desc")
     for issue in itertools.islice(iter(issues), RUN_ISSUE_SCAN_LIMIT):
         if getattr(issue, "pull_request", None) is not None:
             continue  # the issues API also lists pull requests
-        if marker in (issue.body or ""):
-            return issue
+        if marker not in (issue.body or ""):
+            continue
+        if getattr(getattr(issue, "user", None), "login", None) != author:
+            logger.warning(
+                "Ignoring issue #%s: it carries the marker of run %s but was "
+                "not opened by %s",
+                getattr(issue, "number", "?"),
+                run_id,
+                author,
+            )
+            continue
+        return issue
     return None
 
 
@@ -2062,7 +2133,12 @@ async def brainstormer_node(state: AgentState):
             gh_repo = gh.get_repo(repo)
             # Reuse the issue an earlier attempt of this run opened (its
             # checkpoint write may have been lost) instead of opening another.
-            issue = _find_run_issue(gh_repo, run_id) if run_id else None
+            issue = None
+            if run_id:
+                author = await asyncio.to_thread(_run_issue_author)
+                issue = await asyncio.to_thread(
+                    _find_run_issue, gh_repo, run_id, author
+                )
             if issue is not None:
                 # Keep the idea the issue describes; this attempt's
                 # brainstorm differs from it.
@@ -2316,7 +2392,7 @@ async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: st
     else:
         status_error = "the PR head commit could not be resolved"
     if status_error is not None:
-        if get_merge_policy() == "ci":
+        if (await _effective_merge_policy()).policy == "ci":
             raise PipelineAbortError(
                 "VERIFICATION_STATUS_FAILED",
                 f"Could not record the verification status on PR #{pr_number}: "
@@ -2450,7 +2526,7 @@ async def _refuse_protected_change(
             pr,
             pr_number,
             iteration,
-            get_merge_policy(),
+            (await _effective_merge_policy()).policy,
             merge_audit.HELD,
             merge_audit.ACTOR_POLICY,
             [merge_audit.REASON_CHANGE_LIMITS, merge_audit.REASON_NOT_COMMITTED],
@@ -2798,17 +2874,40 @@ async def implementer_node(state: AgentState):
 #                     head passed, at least one check exists and the
 #                     automaintainer/verification status is present and green.
 #   auto            - legacy behaviour: merge on approval alone.
+# MERGE_POLICY is the deployment's ceiling; a repository can only tighten it
+# (repositories.merge_policy, merge_policy.py). _effective_merge_policy() is
+# what a run acts on.
 MERGE_POLICIES = ("human", "ci", "auto")
 MAX_REVIEW_DIFF_CHARS = 20000
 _PASSING_CHECK_STATES = {"success", "neutral", "skipped"}
 
 
 def get_merge_policy() -> str:
-    policy = (os.getenv("MERGE_POLICY") or "human").strip().lower()
-    if policy not in MERGE_POLICIES:
-        logger.warning("Unknown MERGE_POLICY %r; falling back to 'human'.", policy)
-        return "human"
-    return policy
+    """The deployment ceiling: MERGE_POLICY, unknown values mean human."""
+    import merge_policy
+
+    return merge_policy.deployment_ceiling()
+
+
+async def _effective_merge_policy():
+    """The merge_policy.Resolution of the current run: the stricter of
+    MERGE_POLICY and its repository's setting, read now. Never raises; an
+    unreadable setting or a missing run/repository row means human for the
+    run (fail closed).
+
+    It is read at each decision that depends on it (the status-post abort in
+    _verify_and_report, the protected-path hold, the merge decision) rather
+    than once per run, so a setting changed mid-run can differ between those
+    decisions. That is harmless: every read is fail-closed and the merge
+    decision always acts on, and records, the value it read itself."""
+    import merge_policy
+
+    return await asyncio.to_thread(
+        merge_policy.resolve_for_run,
+        supabase,
+        current_run_id.get(None),
+        get_merge_policy(),
+    )
 
 
 _NO_PATCH_NOTE = "(binary file or diff too large to display)"
@@ -3002,6 +3101,7 @@ async def _trigger_trust(gh_repo, state):
             gh_repo,
             state.get("trigger"),
             state.get("target_issue"),
+            gh,
         )
     if cache is not None:
         cache["result"] = result
@@ -3198,7 +3298,12 @@ async def maintainer_node(state: AgentState):
                     )
                 )
 
-        policy = get_merge_policy()
+        # The effective policy (merge_policy.py): MERGE_POLICY lowered by the
+        # repository's setting, or human when that cannot be read. It is what
+        # merge_decisions.policy records; policy_reasons say why it is below
+        # MERGE_POLICY.
+        resolution = await _effective_merge_policy()
+        policy, policy_reasons = resolution.policy, list(resolution.reasons)
         if not is_approved:
             await _record_merge_decision(
                 pr,
@@ -3208,14 +3313,18 @@ async def maintainer_node(state: AgentState):
                 "not_merged",
                 "agent",
                 ["maintainer rejected"]
-                + (["maintainer reply invalid (fail closed)"] if parse_error else []),
+                + (["maintainer reply invalid (fail closed)"] if parse_error else [])
+                + policy_reasons,
                 state.get("verification"),
             )
         else:
             head_sha = pr.head.sha
             should_merge, reason = policy == "auto", "MERGE_POLICY=auto"
             # Audit reasons (merge_audit.py), in the order the gates ran.
-            audit_reasons = ["maintainer approved", f"policy {policy}"]
+            audit_reasons = [
+                "maintainer approved",
+                f"policy {policy}",
+            ] + policy_reasons
             if policy == "ci":
                 should_merge, reason = _ci_checks_passed(gh_repo, head_sha)
                 audit_reasons.append(
@@ -3297,11 +3406,10 @@ async def maintainer_node(state: AgentState):
                 await record("held")
                 merge_status = "awaiting_human_review"
                 reviewers = _request_human_review(gh_repo, pr, issue_number)
-                why = (
-                    "MERGE_POLICY=human"
-                    if policy == "human"
-                    else f"not auto-merged: {reason}"
-                )
+                if policy == "human":
+                    why = policy_reasons[0] if policy_reasons else "MERGE_POLICY=human"
+                else:
+                    why = f"not auto-merged: {reason}"
                 new_logs.append(
                     {
                         "agent": "System",
@@ -3450,14 +3558,16 @@ async def run_agent_loop(
     repository_id: Optional[int] = None,
     trigger_login: Optional[str] = None,
     trigger_source: Optional[str] = None,
+    trigger_github_id: Optional[int] = None,
 ):
     """Run the agent graph for ``repo_name``.
 
-    ``trigger_login`` is the GitHub login of whoever caused the run and
-    ``trigger_source`` how (``api`` for POST /start). Under MERGE_POLICY=ci or
-    auto the PR is merged only when that login (and the author of
+    ``trigger_github_id`` is the numeric GitHub user id of whoever caused the
+    run, ``trigger_login`` the login stored with it and ``trigger_source``
+    how (``api`` for POST /start). Under MERGE_POLICY=ci or auto the PR is
+    merged only when that user's current login (and the author of
     ``target_issue``, if any) can write to the repository (trust.py); without
-    a login nothing is merged automatically.
+    an id nothing is merged automatically.
 
     ``github_installation_id`` is the GitHub App installation of the
     repository (``repositories.github_installation_id``); every GitHub call of
@@ -3539,7 +3649,11 @@ async def run_agent_loop(
         "repo_name": repo_name,
         "repository_id": repository_id,
         "target_issue": target_issue,
-        "trigger": {"source": trigger_source, "login": trigger_login},
+        "trigger": {
+            "source": trigger_source,
+            "login": trigger_login,
+            "github_id": trigger_github_id,
+        },
         "architect_directive": "",
         "idea": "",
         "pm_decision": "",

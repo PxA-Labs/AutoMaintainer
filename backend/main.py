@@ -15,7 +15,7 @@ from github import Github
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Literal
 from workspace import get_safe_repo_dir, get_safe_target_path, get_base_workspace_dir
 import asyncio
 import json
@@ -196,22 +196,57 @@ WRITE_ROLES = frozenset({"owner", "admin", "member"})
 ADMIN_ROLES = frozenset({"owner", "admin"})
 
 
+def _github_identity(user):
+    """The user's ``github`` identity, or None."""
+    for identity in getattr(user, "identities", None) or []:
+        if getattr(identity, "provider", None) == "github":
+            return identity
+    return None
+
+
 def github_login_of(user) -> Optional[str]:
     """The GitHub login linked to a Supabase auth user, or None.
 
     Read from the user's ``github`` identity, which Supabase fills from
     GitHub OAuth at sign-in, never from ``user_metadata``, which the user
-    can change through the auth API. It is the actor the trusted-trigger
-    merge gate (trust.py) checks for runs this user starts.
+    can change through the auth API. It is the login as of the last sign-in,
+    so it can be stale; the trusted-trigger gate (trust.py) decides by
+    github_id_of and only logs this one.
     """
-    for identity in getattr(user, "identities", None) or []:
-        if getattr(identity, "provider", None) != "github":
-            continue
-        data = getattr(identity, "identity_data", None) or {}
-        login = data.get("user_name") or data.get("preferred_username")
-        if isinstance(login, str) and login:
-            return login
+    identity = _github_identity(user)
+    data = getattr(identity, "identity_data", None) or {}
+    login = data.get("user_name") or data.get("preferred_username")
+    return login if isinstance(login, str) and login else None
+
+
+def _numeric_id(value) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value) or None
     return None
+
+
+def github_id_of(user) -> Optional[int]:
+    """The numeric GitHub user id linked to a Supabase auth user, or None.
+
+    Supabase Auth (GoTrue) keys an identity by ``provider_id``, which its
+    GitHub provider sets to the GitHub user id (the ``sub`` claim) and
+    exposes as the identity's ``id``; ``identity_data.sub`` holds the same
+    value. Neither can be changed through the auth API (``user_metadata``
+    can, so it is never read). Unlike the login, the id survives a rename;
+    the trusted-trigger gate (trust.py) checks the caller by it.
+    """
+    identity = _github_identity(user)
+    if identity is None:
+        return None
+    found = _numeric_id(getattr(identity, "id", None))
+    if found is None:
+        data = getattr(identity, "identity_data", None) or {}
+        found = _numeric_id(data.get("sub"))
+    return found
 
 
 # --- Dependency: Get current user/org from Supabase Auth ---
@@ -277,6 +312,7 @@ async def get_current_user(
         "role": role,
         "email": user.email,
         "github_login": github_login_of(user),
+        "github_id": github_id_of(user),
     }
 
 
@@ -822,6 +858,7 @@ async def start_agents(
                 "target_issue_number": req.target_issue,
                 "mode": req.mode,
                 "trigger_login": user.get("github_login"),
+                "trigger_github_id": user.get("github_id"),
                 "trigger_source": "api",
             },
             queue="agent_runs",
@@ -1007,6 +1044,124 @@ async def list_run_merge_decisions(
         .execute()
     )
     return {"run_id": run_key, "decisions": result.data or []}
+
+
+# --- Per-repository merge policy (epic #411, merge_policy.py) ---------------
+
+
+class MergePolicyUpdate(BaseModel):
+    # Required (no default); null means "inherit MERGE_POLICY".
+    merge_policy: Optional[Literal["human", "ci", "auto"]]
+
+
+async def _org_repository(sb, repository_id: int, org_id: str) -> dict:
+    """The caller's org's repositories row (id, full_name, merge_policy), or
+    404 -- another org's repository is indistinguishable from a missing one."""
+    found = await asyncio.to_thread(
+        lambda: sb.table("repositories")
+        .select("id, full_name, merge_policy")
+        .eq("id", repository_id)
+        .eq("org_id", org_id)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    repository = _row_or_none(found)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    return repository
+
+
+def _merge_policy_view(repository: dict, role: Optional[str]) -> dict:
+    import merge_policy
+
+    ceiling = merge_policy.deployment_ceiling()
+    setting = repository.get("merge_policy")
+    return {
+        "repository_id": repository["id"],
+        "full_name": repository.get("full_name"),
+        "setting": setting,
+        "ceiling": ceiling,
+        "effective": merge_policy.effective(ceiling, setting),
+        "allowed": merge_policy.allowed_settings(ceiling),
+        "can_edit": role in ADMIN_ROLES,
+    }
+
+
+@app.get("/repositories/{repository_id}/merge-policy")
+async def get_repository_merge_policy(
+    repository_id: int, user: dict = Depends(get_current_user)
+):
+    """A repository's merge policy: its stored setting (null = inherit), the
+    deployment ceiling (MERGE_POLICY), the effective policy and the settings
+    an admin may choose. Any member of the repository's org may read it."""
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    repository = await _org_repository(sb, repository_id, user["org_id"])
+    return _merge_policy_view(repository, user.get("role"))
+
+
+@app.put("/repositories/{repository_id}/merge-policy")
+async def put_repository_merge_policy(
+    repository_id: int,
+    payload: MergePolicyUpdate,
+    user: dict = Depends(get_current_user),
+):
+    """Set a repository's merge policy (org owners and admins only). A
+    repository may only be stricter than or equal to MERGE_POLICY: a looser
+    value is refused with 422 instead of being stored as an intent that never
+    takes effect. Written with the service role; clients cannot write the
+    column themselves (RLS, migration *_repository_merge_policy.sql)."""
+    import merge_policy
+
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    # Checked before the lookup, so a non-admin learns nothing about ids.
+    if user.get("role") not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only organization owners and admins can change the merge policy",
+        )
+    org_id = user["org_id"]
+    await _org_repository(sb, repository_id, org_id)
+
+    ceiling = merge_policy.deployment_ceiling()
+    if not merge_policy.is_allowed(payload.merge_policy, ceiling):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"merge_policy {payload.merge_policy!r} is looser than this "
+                f"deployment's MERGE_POLICY ({ceiling}); allowed: "
+                + ", ".join(merge_policy.allowed_settings(ceiling))
+                + " or null (inherit)"
+            ),
+        )
+
+    updated = await asyncio.to_thread(
+        lambda: sb.table("repositories")
+        .update({"merge_policy": payload.merge_policy})
+        .eq("id", repository_id)
+        .eq("org_id", org_id)
+        .execute()
+    )
+    rows = getattr(updated, "data", None)
+    if not isinstance(rows, list) or not rows:
+        # Deleted between the lookup and the update.
+        raise HTTPException(status_code=404, detail="Repository not found")
+    logger.info(
+        "Merge policy of repository %s in org %s set to %s by user %s",
+        repository_id,
+        org_id,
+        payload.merge_policy or "inherit",
+        user.get("user_id"),
+    )
+    return _merge_policy_view(rows[0], user.get("role"))
 
 
 @app.post("/stop")

@@ -2,6 +2,7 @@
 fail closed (#403)."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -372,8 +373,12 @@ async def test_maintainer_json_approval_merges_under_auto_policy(monkeypatch, re
     pr = repo.get_pull.return_value
     pr.get_files.return_value = []
     pr.merged = False
-    # A run started by a repository writer (trusted-trigger gate, trust.py).
+    # A run started by a repository writer (trusted-trigger gate, trust.py),
+    # identified by GitHub user id (#491).
     repo.get_collaborator_permission.return_value = "write"
+    agents.gh.get_user_by_id.return_value = SimpleNamespace(
+        id=4242, login="alice", type="User"
+    )
     monkeypatch.setattr(
         agents,
         "run_llm_with_tools",
@@ -385,7 +390,7 @@ async def test_maintainer_json_approval_merges_under_auto_policy(monkeypatch, re
             "repo_name": "o/r",
             "pr_number": 7,
             "iteration": 0,
-            "trigger": {"source": "api", "login": "alice"},
+            "trigger": {"source": "api", "login": "alice", "github_id": 4242},
         }
     )
 

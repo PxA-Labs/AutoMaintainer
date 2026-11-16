@@ -22,6 +22,50 @@ CODE = "x = 2\n"
 APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 # The GitHub login that starts the runs: a writer of FakeRepo (trust.py, #487).
 WRITER = "octo-writer"
+# The identity the runs act as: FakeRepo opens issues as this login, and the
+# fake client's GET /user returns it (agents._run_issue_author, #490).
+RUN_IDENTITY = "automaintainer[bot]"
+
+
+def run_client(repo, users=None):
+    """A stand-in for agents.gh, authenticated as RUN_IDENTITY, that also
+    resolves user ids (GET /user/{account_id}) through FakeUsers."""
+    return MagicMock(
+        get_repo=lambda _: repo,
+        get_user=lambda: SimpleNamespace(login=RUN_IDENTITY),
+        get_user_by_id=(users or FakeUsers()).get_user_by_id,
+    )
+
+
+# Numeric GitHub user ids of the fixture accounts (trust.py, #491): the gate
+# resolves an id to its current login before the permission lookup.
+_USER_IDS: dict = {}
+
+
+def user_id(login):
+    """The fixed GitHub user id of fixture account ``login``."""
+    return _USER_IDS.setdefault(login, 1000 + len(_USER_IDS))
+
+
+class FakeUsers:
+    """``Github.get_user_by_id`` (GET /user/{account_id}). By default every
+    fixture id resolves to its login; ``logins`` overrides an id's current
+    login (a rename) or makes its lookup raise."""
+
+    def __init__(self, logins=None):
+        self.logins = dict(logins or {})
+        self.lookups = []
+
+    def get_user_by_id(self, github_id):
+        self.lookups.append(github_id)
+        login = self.logins.get(github_id)
+        if login is None:
+            login = next((n for n, i in _USER_IDS.items() if i == github_id), None)
+        if isinstance(login, Exception):
+            raise login
+        if login is None:
+            raise GithubException(404, {"message": "Not Found"}, None)
+        return SimpleNamespace(id=github_id, login=login, type="User")
 
 
 class WorkerCrash(BaseException):
@@ -125,7 +169,7 @@ class FakeRepo:
             comments=[],
             state="open",
             # Issues the run opens are the App's; a test sets another author.
-            user=SimpleNamespace(login="automaintainer[bot]", type="Bot"),
+            user=SimpleNamespace(login=RUN_IDENTITY, type="Bot"),
         )
         issue.create_comment = issue.comments.append
         issue.edit = lambda state: setattr(issue, "state", state)
@@ -174,12 +218,29 @@ class FakeRepo:
 
 
 class FakeSupabase:
-    """The runs table, plus the merge_decisions rows inserted (merge_audit.py);
-    other tables accept writes and return nothing."""
+    """The runs and repositories tables, plus the merge_decisions rows
+    inserted (merge_audit.py); other tables accept writes and return nothing."""
 
     def __init__(self):
         self.runs = {}
+        self.repositories = {}
         self.decisions = []
+
+    def add_run(self, run_id, org_id, repository_id=1, merge_policy=None, **row):
+        """A runs row and its repository, as /start creates them. The
+        repository's merge_policy is read at the merge decision
+        (merge_policy.py); a missing row would fail closed to human."""
+        self.runs[run_id] = {
+            "id": run_id,
+            "org_id": org_id,
+            "repository_id": repository_id,
+            **row,
+        }
+        self.repositories[repository_id] = {
+            "id": repository_id,
+            "org_id": org_id,
+            "merge_policy": merge_policy,
+        }
 
     def table(self, name):
         return _Query(self, name)
@@ -234,6 +295,11 @@ class _Query:
                     if all(row.get(k) == v for k, v in filters.items())
                 ]
             )
+        if self.table == "repositories" and self.op == "select":
+            filters = getattr(self, "filters", {})
+            row = self.db.repositories.get(filters.get("id"))
+            match = row and all(row.get(k) == v for k, v in filters.items())
+            return SimpleNamespace(data=[dict(row)] if match else [])
         if self.table != "runs":
             return SimpleNamespace(data=[])
         row = self.db.runs.get(self.id)
@@ -286,8 +352,9 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
     repo = FakeRepo()
-    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=lambda _: repo))
+    monkeypatch.setattr(agents, "gh", run_client(repo))
     db = FakeSupabase()
+    db.add_run(RUN_ID, "org-1")  # as /start creates it
     monkeypatch.setattr(agents, "supabase", db)
 
     calls = []
@@ -317,6 +384,7 @@ async def _run(trigger_login=WRITER):
         run_id=RUN_ID,
         emitter=NullEmitter(),
         trigger_login=trigger_login,
+        trigger_github_id=user_id(trigger_login) if trigger_login else None,
         trigger_source="api",
     )
 
@@ -480,8 +548,140 @@ def test_run_issue_lookup_ignores_pull_requests_and_other_runs():
     pr_like.pull_request = object()
     repo.issues.reverse()  # newest first would be the PR-like entry
 
-    assert agents._find_run_issue(repo, RUN_ID) is mine
-    assert agents._find_run_issue(repo, "unknown-run") is None
+    assert agents._find_run_issue(repo, RUN_ID, RUN_IDENTITY) is mine
+    assert agents._find_run_issue(repo, "unknown-run", RUN_IDENTITY) is None
+
+
+def _planted(repo, body, login="eve-attacker"):
+    issue = repo.create_issue("planted", body)
+    issue.user = SimpleNamespace(login=login, type="User")
+    return issue
+
+
+def test_run_issue_lookup_skips_a_newer_copy_of_the_marker_by_another_author():
+    """#490: the marker is public once the run's issue exists; an outsider
+    who copies it into a newer issue does not take the run's place."""
+    repo = FakeRepo()
+    mine = repo.create_issue("mine", "body\n\n" + agents.run_marker(RUN_ID))
+    _planted(repo, "evil\n\n" + agents.run_marker(RUN_ID))
+
+    assert agents._find_run_issue(repo, RUN_ID, RUN_IDENTITY) is mine
+
+
+def test_run_issue_lookup_never_returns_another_authors_issue():
+    repo = FakeRepo()
+    _planted(repo, "evil\n\n" + agents.run_marker(RUN_ID))
+    # A login that only resembles the identity, or no user, does not match.
+    _planted(repo, agents.run_marker(RUN_ID), login="automaintainer")
+    repo.create_issue("x", agents.run_marker(RUN_ID)).user = None
+
+    assert agents._find_run_issue(repo, RUN_ID, RUN_IDENTITY) is None
+
+
+@pytest.mark.parametrize("author", [None, ""])
+def test_run_issue_lookup_without_an_identity_reuses_nothing(author):
+    """Fail closed: the run's own issue is not reused either."""
+    repo = FakeRepo()
+    repo.create_issue("mine", agents.run_marker(RUN_ID))
+
+    assert agents._find_run_issue(repo, RUN_ID, author) is None
+
+
+@pytest.fixture
+def run_creds():
+    """Bind fake run credentials of a given mode for the current context."""
+    tokens = []
+
+    def bind(mode):
+        tokens.append(agents._run_github_credentials.set(SimpleNamespace(mode=mode)))
+
+    yield bind
+    for token in reversed(tokens):
+        agents._run_github_credentials.reset(token)
+
+
+def test_run_issue_author_in_pat_mode_is_the_token_user(monkeypatch, run_creds):
+    run_creds("pat")
+    monkeypatch.setattr(
+        agents, "gh", MagicMock(get_user=lambda: SimpleNamespace(login="pat-user"))
+    )
+    assert agents._run_issue_author() == "pat-user"
+
+
+@pytest.mark.parametrize(
+    "get_user",
+    [
+        MagicMock(side_effect=GithubException(401, {"message": "Bad"}, None)),
+        MagicMock(return_value=SimpleNamespace(login=None)),
+    ],
+    ids=["api-error", "no-login"],
+)
+def test_run_issue_author_in_pat_mode_fails_closed(monkeypatch, run_creds, get_user):
+    run_creds("pat")
+    monkeypatch.setattr(agents, "gh", MagicMock(get_user=get_user))
+    assert agents._run_issue_author() is None
+
+
+def _app_integration(monkeypatch, slug=None, error=None):
+    import github_app
+
+    calls = []
+
+    def integration():
+        calls.append(1)
+        if error:
+            raise error
+        return MagicMock(get_app=lambda: SimpleNamespace(slug=slug))
+
+    monkeypatch.setattr(github_app, "get_github_integration", integration)
+    monkeypatch.setattr(agents, "_github_app_slug_cache", {})
+    return calls
+
+
+def test_run_issue_author_in_app_mode_is_the_app_bot(monkeypatch, run_creds):
+    run_creds("app")
+    monkeypatch.setenv("GITHUB_APP_SLUG", "configured-slug")
+    calls = _app_integration(monkeypatch, slug="auto-maintainer")
+
+    assert agents._run_issue_author() == "auto-maintainer[bot]"
+    assert agents._run_issue_author() == "auto-maintainer[bot]"
+    assert len(calls) == 1  # GET /app once per process, and it wins
+
+
+def test_run_issue_author_in_app_mode_falls_back_to_the_slug_setting(
+    monkeypatch, run_creds
+):
+    run_creds("app")
+    monkeypatch.setenv("GITHUB_APP_SLUG", "auto-maintainer")
+    calls = _app_integration(monkeypatch, error=RuntimeError("no network"))
+
+    assert agents._run_issue_author() == "auto-maintainer[bot]"
+    # A failure is not cached; the next run asks GitHub again.
+    assert agents._run_issue_author() == "auto-maintainer[bot]"
+    assert len(calls) == 2
+
+
+def test_run_issue_author_in_app_mode_without_a_slug_is_unknown(monkeypatch, run_creds):
+    run_creds("app")
+    monkeypatch.delenv("GITHUB_APP_SLUG", raising=False)
+    _app_integration(monkeypatch, error=ValueError("GITHUB_APP_ID not configured"))
+
+    assert agents._run_issue_author() is None
+
+
+async def test_rerun_without_a_run_identity_opens_a_new_issue(world, monkeypatch):
+    """When the run cannot tell which issues are its own, it reuses none: a
+    duplicate issue, never someone else's."""
+    world.repo.crash_after = "create_issue"
+    with pytest.raises(WorkerCrash):
+        await _run()
+    agents.gh.get_user = MagicMock(side_effect=GithubException(502, {}, None))
+
+    result = await _run()
+
+    assert result["status"] == "completed"
+    assert len(world.repo.issues) == 2
+    assert result["issue_number"] == world.repo.issues[1].number
 
 
 def test_idea_is_recovered_from_run_issue_body():

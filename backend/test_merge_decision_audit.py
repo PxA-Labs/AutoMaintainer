@@ -59,6 +59,15 @@ class FakeTable:
         if self.name == "runs":
             rows = [r for r in self.client.runs if r["id"] == self.filters.get("id")]
             return SimpleNamespace(data=rows)
+        if self.name == "repositories":
+            # The run's repository, inheriting MERGE_POLICY (merge_policy.py).
+            rows = [
+                {"id": r["repository_id"], "org_id": r["org_id"], "merge_policy": None}
+                for r in self.client.runs
+                if r.get("repository_id") == self.filters.get("id")
+                and r.get("org_id") == self.filters.get("org_id")
+            ]
+            return SimpleNamespace(data=rows[:1])
         if self.name == "verification_results":
             rows = [
                 r

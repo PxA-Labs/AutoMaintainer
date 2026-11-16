@@ -7,6 +7,7 @@ import pytest
 from github import GithubException
 
 import agents
+from test_agent_idempotency import FakeUsers, user_id
 
 # MERGE_POLICY=ci also requires a passed change verification (verification.py).
 VERIFIED = ("automaintainer/verification", "success")
@@ -16,6 +17,7 @@ APPROVE = '{"verdict": "approve", "reasons": ["Looks correct."]}'
 # The run's trigger (#487): a repository writer, so the trusted-trigger gate
 # keeps the behaviour these tests pin. test_trust.py covers the gate itself.
 WRITER = "octo-writer"
+WRITER_ID = user_id(WRITER)
 
 
 def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()):
@@ -47,7 +49,14 @@ def _setup(monkeypatch, review=APPROVE, statuses=(), check_runs=(), assignees=()
         SimpleNamespace(name=n, status=st, conclusion=c) for n, st, c in check_runs
     ]
     repo.get_commit.return_value = commit
-    monkeypatch.setattr(agents, "gh", MagicMock(get_repo=MagicMock(return_value=repo)))
+    users = FakeUsers()
+    monkeypatch.setattr(
+        agents,
+        "gh",
+        MagicMock(
+            get_repo=MagicMock(return_value=repo), get_user_by_id=users.get_user_by_id
+        ),
+    )
     seen = {}
 
     async def llm(system, user):
@@ -67,7 +76,7 @@ def _state():
         "iteration": 0,
         "idea": "Targeted Issue #3: set x to 2 in app.py:1-1",
         "target_file_path": "app.py",
-        "trigger": {"source": "api", "login": WRITER},
+        "trigger": {"source": "api", "login": WRITER, "github_id": WRITER_ID},
     }
 
 
