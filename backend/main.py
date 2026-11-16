@@ -898,6 +898,44 @@ async def list_runs(
     }
 
 
+@app.get("/runs/{run_id}/verifications")
+async def list_run_verifications(run_id: uuid.UUID, org_id: str = Depends(get_org_id)):
+    """Verification audit rows of a run in the caller's organization, newest
+    first (docs/VERIFICATION.md, "Audit trail")."""
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    run_key = str(run_id)
+    # Same check as /status: another org's run is indistinguishable from a
+    # missing one.
+    owned = await asyncio.to_thread(
+        lambda: sb.table("runs")
+        .select("id")
+        .eq("id", run_key)
+        .eq("org_id", org_id)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    if not _row_or_none(owned):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    # org_id again so a row can never leak even if it disagreed with its run.
+    result = await asyncio.to_thread(
+        lambda: sb.table("verification_results")
+        .select("*")
+        .eq("run_id", run_key)
+        .eq("org_id", org_id)
+        .order("created_at", desc=True)
+        .limit(100)
+        .execute()
+    )
+    return {"run_id": run_key, "verifications": result.data or []}
+
+
 @app.post("/stop")
 async def stop_agents(
     req: Optional[StopRequest] = None,
