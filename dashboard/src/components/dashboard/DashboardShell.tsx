@@ -9,6 +9,9 @@ import { RunHistory } from "./RunHistory";
 import { CodeGraph } from "./CodeGraph";
 import { AuthGate } from "./AuthGate";
 import { ResumeRunBanner } from "./ResumeRunBanner";
+import { GitHubAppSection } from "./GitHubAppSection";
+import { GitHubSetupBanner } from "./GitHubSetupBanner";
+import { useGitHubApp } from "@/lib/hooks/use-github-app";
 import { useAuth } from "@/lib/auth";
 import { useAgentRun, type LogEntry } from "@/lib/hooks/use-agent-run";
 import { useLogs } from "@/lib/hooks/use-logs";
@@ -32,6 +35,9 @@ export function DashboardShell() {
   const handleIdeDirtyChange = useCallback((dirty: boolean) => {
     ideDirtyRef.current = dirty;
   }, []);
+
+  // GitHub App installations, the install action and the setup redirect.
+  const githubApp = useGitHubApp(user?.id ?? null, session?.provider_token);
 
   // Health check for Supabase persistence
   const isSupabaseUnreachable = useSupabaseHealth();
@@ -179,6 +185,7 @@ export function DashboardShell() {
         targetIssue={runState.targetIssue}
         onTargetIssueChange={runActions.setTargetIssue}
         agentStatus={agentStatus}
+        githubApp={user ? <GitHubAppSection {...githubApp} /> : null}
       />
 
       {/* Main Content Viewport */}
@@ -194,6 +201,13 @@ export function DashboardShell() {
               Supabase database is currently unreachable or paused. Historical logs and persistence are disabled.
             </span>
           </div>
+        )}
+
+        {githubApp.setupResult && (
+          <GitHubSetupBanner
+            result={githubApp.setupResult}
+            onDismiss={githubApp.dismissSetupResult}
+          />
         )}
 
         {offeredRun && (

@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { extname, join, normalize, sep } from "node:path";
 import type { BrowserContext, Page, Request, Route } from "@playwright/test";
 import { E2E_ORIGIN, E2E_SUPABASE_URL, SUPABASE_STORAGE_KEY } from "./env";
 
@@ -9,6 +11,8 @@ export const API = {
   health: `${E2E_ORIGIN}/healthz/supabase`,
   adminMetrics: `${E2E_ORIGIN}/admin/metrics`,
   adminRuns: `${E2E_ORIGIN}/admin/runs`,
+  githubInstallUrl: `${E2E_ORIGIN}/github/app/install-url`,
+  repo: (repo: string, rest: string) => `${E2E_ORIGIN}/repo/${encodeURIComponent(repo)}/${rest}`,
 };
 
 const CORS_HEADERS = {
@@ -45,6 +49,95 @@ export async function isolateNetwork(context: BrowserContext) {
   // and a healthy Supabase so the shell renders without error banners.
   await context.route(API.health, (route) => json(route, { status: "ok" }));
   await context.route(API.runs, (route) => json(route, { runs: [] }));
+  // The GitHub App section reads these under RLS; default to "no org".
+  await mockGitHubAppTables(context, { role: null });
+}
+
+export interface GitHubAppTables {
+  /** Org role of the signed-in user; null means no accepted membership. */
+  role: string | null;
+  installations?: { id: number; account_login: string; suspended_at: string | null }[];
+  repositories?: { id: number; full_name: string; github_installation_id: number }[];
+}
+
+/**
+ * Mock the PostgREST queries of fetchGitHubAppState() (lib/github-app.ts).
+ * `tables` may be a function so a test can change the data mid-test (for
+ * example after the setup redirect has linked an installation). Returns the
+ * number of installation-list queries made so far.
+ */
+export async function mockGitHubAppTables(
+  context: BrowserContext,
+  tables: GitHubAppTables | (() => GitHubAppTables)
+) {
+  const current = () => (typeof tables === "function" ? tables() : tables);
+  const counts = { installations: 0 };
+  const table = (name: string, rows: () => unknown[]) =>
+    context.route(`${E2E_SUPABASE_URL}/rest/v1/${name}?**`, (route) => {
+      if (route.request().method() === "OPTIONS") {
+        return route.fulfill({ status: 204, headers: CORS_HEADERS });
+      }
+      if (name === "github_installations") counts.installations += 1;
+      return json(route, rows());
+    });
+  await table("organization_members", () => {
+    const { role } = current();
+    return role ? [{ org_id: "org-1", role }] : [];
+  });
+  await table("github_installations", () => current().installations ?? []);
+  await table("repositories", () => current().repositories ?? []);
+  return counts;
+}
+
+// Monaco is loaded by @monaco-editor/loader from jsdelivr at runtime. The
+// network is fenced off, so serve the same files from the locally installed
+// monaco-editor package. That package is a pinned devDependency at the
+// version the loader requests; serveMonacoFromNodeModules checks both, so a
+// loader or monaco bump fails loudly here instead of serving other files.
+const MONACO_ROOT = join(__dirname, "..", "node_modules", "monaco-editor");
+const MONACO_VS = join(MONACO_ROOT, "min", "vs");
+const LOADER_CONFIG = join(__dirname, "..", "node_modules", "@monaco-editor", "loader", "lib", "es", "config", "index.js");
+const MONACO_TYPES: Record<string, string> = {
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".ttf": "font/ttf",
+  ".json": "application/json; charset=utf-8",
+};
+
+/** The monaco-editor version @monaco-editor/loader fetches from jsdelivr. */
+async function loaderMonacoVersion(): Promise<string> {
+  const config = await readFile(LOADER_CONFIG, "utf-8");
+  const match = /cdn\.jsdelivr\.net\/npm\/monaco-editor@([0-9A-Za-z.-]+)\/min\/vs/.exec(config);
+  if (!match) throw new Error(`No monaco-editor CDN version found in ${LOADER_CONFIG}`);
+  return match[1];
+}
+
+export async function serveMonacoFromNodeModules(context: BrowserContext) {
+  const requested = await loaderMonacoVersion();
+  const installed: string = JSON.parse(await readFile(join(MONACO_ROOT, "package.json"), "utf-8")).version;
+  if (requested !== installed) {
+    throw new Error(
+      `@monaco-editor/loader requests monaco-editor@${requested} but ${installed} is installed; ` +
+        `pin the monaco-editor devDependency to ${requested}.`
+    );
+  }
+  const prefix = `https://cdn.jsdelivr.net/npm/monaco-editor@${requested}/min/vs/`;
+  await context.route((url) => url.href.startsWith(prefix), async (route) => {
+    const rel = decodeURIComponent(new URL(route.request().url()).pathname.replace(/^.*\/min\/vs\//, ""));
+    const file = normalize(join(MONACO_VS, rel));
+    if (!file.startsWith(MONACO_VS + sep)) return route.abort("blockedbyclient");
+    try {
+      const body = await readFile(file);
+      return route.fulfill({
+        status: 200,
+        headers: { "Access-Control-Allow-Origin": "*" },
+        contentType: MONACO_TYPES[extname(file)] ?? "application/octet-stream",
+        body,
+      });
+    } catch {
+      return route.fulfill({ status: 404, body: "" });
+    }
+  });
 }
 
 export interface LogRow {
@@ -96,7 +189,7 @@ export const TEST_USER = {
  * expiry an hour out no token refresh (network call) is attempted. The
  * token is a well-formed but unsigned JWT; nothing verifies it here.
  */
-export async function signIn(page: Page) {
+export async function signIn(page: Page, { providerToken }: { providerToken?: string } = {}) {
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
   const accessToken = [
     base64url({ alg: "HS256", typ: "JWT" }),
@@ -110,6 +203,9 @@ export async function signIn(page: Page) {
     expires_in: 3600,
     expires_at: expiresAt,
     user: TEST_USER,
+    // The GitHub OAuth token Supabase keeps after a GitHub sign-in; the
+    // install flow sends it as X-GitHub-User-Token.
+    ...(providerToken ? { provider_token: providerToken } : {}),
   };
   await page.addInitScript(
     ([key, value]) => window.localStorage.setItem(key, value),

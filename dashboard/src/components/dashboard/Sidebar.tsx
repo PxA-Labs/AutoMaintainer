@@ -10,7 +10,7 @@ import {
   Search,
   Shield,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { UserMenu } from "@/components/ui/UserMenu";
 import { StatusDot } from "@/components/ui/StatusDot";
@@ -29,6 +29,8 @@ interface SidebarProps {
   targetIssue: string;
   onTargetIssueChange: (issue: string) => void;
   agentStatus: Record<string, string>;
+  /** GitHub App status and install action (signed-in users only). */
+  githubApp?: ReactNode;
 }
 
 const CREW = [
@@ -99,6 +101,7 @@ export function Sidebar({
   targetIssue,
   onTargetIssueChange,
   agentStatus,
+  githubApp,
 }: SidebarProps) {
   const navItems = [
     {
@@ -231,6 +234,8 @@ export function Sidebar({
             </div>
           </div>
         </div>
+
+        {githubApp}
 
         {/* Crew Roster Status */}
         <div className="space-y-2 pt-3 border-t border-zinc-800/40">

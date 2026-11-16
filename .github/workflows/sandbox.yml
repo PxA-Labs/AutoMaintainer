@@ -1,0 +1,130 @@
+name: Sandbox Integration
+
+# Runs the Docker sandbox backend (backend/runners/docker_sandbox.py) against
+# a real Docker daemon: passing, failing and hanging repositories, and a
+# repository whose tests try the network and a host environment variable,
+# once against the runner's daemon and once against a separate daemon that
+# shares no filesystem with the worker.
+# The unit tests in Backend CI mock the docker CLI; this is the real check.
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'backend/runners/**'
+      - 'backend/verification.py'
+      - 'backend/test_docker_sandbox*.py'
+      - '.github/workflows/sandbox.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'backend/runners/**'
+      - 'backend/verification.py'
+      - 'backend/test_docker_sandbox*.py'
+      - '.github/workflows/sandbox.yml'
+
+permissions:
+  contents: read
+
+# Keep in step with ci-backend.yml.
+env:
+  UV_VERSION: "0.13.8"
+  SANDBOX_IMAGE: "python:3.12-slim"
+  DIND_IMAGE: "docker:27-dind"
+  REMOTE_DOCKER_HOST: "tcp://127.0.0.1:2375"
+
+jobs:
+  docker-sandbox:
+    name: Docker sandbox (real containers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+    env:
+      UV_PYTHON: "3.12"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
+      run: uv sync --frozen --group dev
+
+    - name: Pull the sandbox image
+      run: |
+        docker version
+        docker pull "$SANDBOX_IMAGE"
+
+    - name: Run sandbox tests against Docker
+      env:
+        DOCKER_SANDBOX_TESTS: "1"
+        # Present on the host on purpose: the sandboxed tests assert it is absent.
+        GITHUB_TOKEN: "not-a-real-token"
+      run: |
+        uv run --frozen pytest -v -rs -p no:cacheprovider \
+          test_docker_sandbox.py test_docker_sandbox_integration.py 2>&1 | tee "$RUNNER_TEMP/sandbox.log"
+        # A skipped integration test means Docker was not used: fail loudly.
+        if grep -q "SKIPPED.*test_docker_sandbox_integration" "$RUNNER_TEMP/sandbox.log"; then
+          echo "::error::Docker sandbox integration tests were skipped"
+          exit 1
+        fi
+
+    # A second daemon with its own filesystem, reached over TCP: the setup of
+    # a worker talking to a dedicated sandbox host (or a containerised worker
+    # talking to a daemon outside it). A worker path handed to this daemon
+    # (e.g. as a bind mount source) would not exist there.
+    - name: Start a separate Docker daemon (Docker-in-Docker)
+      run: |
+        docker run -d --privileged --name sandbox-dind \
+          -p 127.0.0.1:2375:2375 -e DOCKER_TLS_CERTDIR= "$DIND_IMAGE"
+        for _ in $(seq 1 60); do
+          DOCKER_HOST="$REMOTE_DOCKER_HOST" docker info >/dev/null 2>&1 && break
+          sleep 2
+        done
+        DOCKER_HOST="$REMOTE_DOCKER_HOST" docker info --format '{{.OSType}} {{.Name}}'
+        DOCKER_HOST="$REMOTE_DOCKER_HOST" docker pull "$SANDBOX_IMAGE"
+
+    - name: Run sandbox integration tests against the separate daemon
+      env:
+        DOCKER_SANDBOX_TESTS: "1"
+        DOCKER_HOST: ${{ env.REMOTE_DOCKER_HOST }}
+        GITHUB_TOKEN: "not-a-real-token"
+      run: |
+        uv run --frozen pytest -v -rs -p no:cacheprovider \
+          test_docker_sandbox_integration.py 2>&1 | tee "$RUNNER_TEMP/sandbox-remote.log"
+        if grep -q "SKIPPED.*test_docker_sandbox_integration" "$RUNNER_TEMP/sandbox-remote.log"; then
+          echo "::error::Docker sandbox integration tests were skipped"
+          exit 1
+        fi
+
+    - name: No sandbox containers left behind
+      if: always()
+      run: |
+        status=0
+        for host in "" "$REMOTE_DOCKER_HOST"; do
+          if [ -n "$host" ] && ! DOCKER_HOST="$host" docker info >/dev/null 2>&1; then
+            continue
+          fi
+          left="$(DOCKER_HOST="$host" docker ps -aq --filter name=automaintainer-sandbox-)"
+          if [ -n "$left" ]; then
+            DOCKER_HOST="$host" docker ps -a --filter name=automaintainer-sandbox-
+            status=1
+          fi
+        done
+        exit "$status"

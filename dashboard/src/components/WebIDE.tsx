@@ -266,7 +266,7 @@ function DiffView({ oldContent, newContent, fileName }: { oldContent: string; ne
     <div className="bg-[#1e1e1e] rounded-lg border border-zinc-800 overflow-hidden">
       <div className="px-4 py-2 bg-zinc-900/50 border-b border-zinc-800 flex items-center justify-between">
         <span className="text-sm font-medium text-zinc-300">{fileName}</span>
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
+        <div className="flex items-center gap-2 text-xs text-muted">
           <span className="text-red-400">− {oldContent.split('\n').length} lines</span>
           <span className="text-green-400">+ {newContent.split('\n').length} lines</span>
         </div>
@@ -274,7 +274,7 @@ function DiffView({ oldContent, newContent, fileName }: { oldContent: string; ne
       <div className="p-4 font-mono text-sm overflow-x-auto max-h-96 overflow-y-auto">
         {lines.map((line, i) => (
           <div key={i} className={`flex py-0.5 ${line.startsWith('-') ? 'bg-red-500/10' : line.startsWith('+') ? 'bg-green-500/10' : ''}`}>
-            <span className={`w-8 text-right pr-3 text-zinc-500 select-none ${line.startsWith('-') ? 'text-red-400' : line.startsWith('+') ? 'text-green-400' : ''}`}>
+            <span className={`w-8 text-right pr-3 text-muted select-none ${line.startsWith('-') ? 'text-red-400' : line.startsWith('+') ? 'text-green-400' : ''}`}>
               {line.startsWith('-') || line.startsWith('+') ? line[0] : ' '}
             </span>
             <span className={`flex-1 ${line.startsWith('-') ? 'text-red-300' : line.startsWith('+') ? 'text-green-300' : 'text-zinc-300'}`}>
@@ -303,7 +303,7 @@ function ChangeSummary({ changes }: { changes: FileChange[] }) {
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-zinc-100 truncate">{change.path}</p>
-            <p className="text-xs text-zinc-500 capitalize">{change.status}</p>
+            <p className="text-xs text-muted capitalize">{change.status}</p>
           </div>
           <span className={`px-2 py-0.5 rounded text-xs font-medium ${
             change.status === 'created' ? 'bg-green-500/20 text-green-400' :
@@ -376,7 +376,7 @@ function ProposeChangesDialog({
               <h3 id={titleId} className="text-lg font-semibold text-zinc-100">
                 {step === 'review' ? 'Review Changes' : 'Create Pull Request'}
               </h3>
-              <p id={descId} className="text-sm text-zinc-500">
+              <p id={descId} className="text-sm text-muted">
                 {step === 'review'
                   ? `${changes.length} file${changes.length !== 1 ? 's' : ''} will be included`
                   : 'Fill in details to open a PR'}
@@ -390,14 +390,14 @@ function ProposeChangesDialog({
 
         {/* Step Indicator */}
         <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-2">
-          <div className={`flex items-center gap-2 ${step === 'review' ? 'text-blue-400' : 'text-zinc-500'}`}>
+          <div className={`flex items-center gap-2 ${step === 'review' ? 'text-blue-400' : 'text-muted'}`}>
             <div className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-medium">
               1
             </div>
             <span className="text-sm font-medium">Review</span>
           </div>
           <div className="flex-1 h-px bg-zinc-800" />
-          <div className={`flex items-center gap-2 ${step === 'confirm' ? 'text-emerald-400' : 'text-zinc-500'}`}>
+          <div className={`flex items-center gap-2 ${step === 'confirm' ? 'text-emerald-400' : 'text-muted'}`}>
             <div className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-medium">
               2
             </div>
@@ -477,7 +477,7 @@ function ProposeChangesDialog({
                   <GitBranch className="w-4 h-4" />
                   A new branch will be created: <code className="bg-zinc-900 px-2 py-0.5 rounded text-xs text-emerald-400">automaintainer/{title.toLowerCase().replace(/\s+/g, '-').slice(0, 50)}</code>
                 </h5>
-                <p className="text-xs text-zinc-500">
+                <p className="text-xs text-muted">
                   Changes will be pushed to this branch and a Pull Request will be opened against the default branch.
                 </p>
               </div>
@@ -537,7 +537,7 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-zinc-100 truncate">{change.title}</p>
-                <p className="text-xs text-zinc-500 truncate">{change.description.slice(0, 60)}...</p>
+                <p className="text-xs text-muted truncate">{change.description.slice(0, 60)}...</p>
                 <div className="flex items-center gap-2 mt-1">
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
                     change.status === 'merged' ? 'bg-emerald-500/20 text-emerald-400' :
@@ -548,7 +548,7 @@ function ProposedChangesPanel({ changes, onClose }: { changes: ProposedChange[];
                     {change.status}
                   </span>
                   {change.prNumber && (
-                    <span className="text-xs text-zinc-500">#PR-{change.prNumber}</span>
+                    <span className="text-xs text-muted">#PR-{change.prNumber}</span>
                   )}
                 </div>
               </div>
@@ -1257,7 +1257,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
           onClick={() => setActiveSidebarMode("explorer")}
           aria-label="Explorer"
           aria-pressed={activeSidebarMode === "explorer"}
-          className={`p-2 rounded-lg mb-2 transition-colors ${activeSidebarMode === 'explorer' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+          className={`p-2 rounded-lg mb-2 transition-colors ${activeSidebarMode === 'explorer' ? 'text-white' : 'text-muted hover:text-zinc-300'}`}
           title="Explorer"
         >
           <FileIcon className="w-6 h-6" aria-hidden="true" />
@@ -1267,7 +1267,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
           onClick={() => setActiveSidebarMode("search")}
           aria-label="Search"
           aria-pressed={activeSidebarMode === "search"}
-          className={`p-2 rounded-lg transition-colors ${activeSidebarMode === 'search' ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+          className={`p-2 rounded-lg transition-colors ${activeSidebarMode === 'search' ? 'text-white' : 'text-muted hover:text-zinc-300'}`}
           title="Search"
         >
           <Search className="w-6 h-6" aria-hidden="true" />
@@ -1358,7 +1358,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
                             <FileIcon className="w-3 h-3" aria-hidden="true" /> {res.file}
                           </span>
                           <span className="block text-zinc-400 truncate text-xs pl-4 group-hover:text-zinc-300">
-                            <span className="text-zinc-500 mr-1">{res.line_number}:</span>
+                            <span className="text-muted mr-1">{res.line_number}:</span>
                             {res.snippet}
                           </span>
                         </button>
@@ -1368,7 +1368,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
                 ) : searchQuery ? (
                   <div className="text-sm text-zinc-400">No results found.</div>
                 ) : (
-                  <div className="text-sm text-zinc-500">Enter a query to search.</div>
+                  <div className="text-sm text-muted">Enter a query to search.</div>
                 )}
               </div>
             </div>
@@ -1451,7 +1451,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
                 <button
                   onClick={handleSave}
                   disabled={!hasActiveTabUnsavedChanges || isSaving}
-                  className={`flex items-center gap-1 px-3 py-1 rounded transition-colors ${hasActiveTabUnsavedChanges ? 'bg-[#0e639c] text-white hover:bg-[#1177bb]' : 'text-zinc-500 cursor-not-allowed'}`}
+                  className={`flex items-center gap-1 px-3 py-1 rounded transition-colors ${hasActiveTabUnsavedChanges ? 'bg-[#0e639c] text-white hover:bg-[#1177bb]' : 'text-muted cursor-not-allowed'}`}
                 >
                   <Save className="w-3 h-3" />
                   {isSaving ? "Saving..." : "Save"}
@@ -1535,7 +1535,7 @@ function WebIDEWorkspace({ repoUrl, onDirtyChange }: WebIDEProps) {
               </div>
               <h2 className="text-[#cccccc] text-2xl font-light mb-2 tracking-wide">AutoMaintainer Editor</h2>
               <p className="text-[#888888] text-sm mb-4">Select a file from the explorer or search to begin.</p>
-              <div className="flex justify-center gap-4 text-xs text-zinc-500">
+              <div className="flex justify-center gap-4 text-xs text-muted">
                 <span className="flex items-center gap-1"><Search className="w-3 h-3"/> Search</span>
                 <span className="flex items-center gap-1"><FilePlus className="w-3 h-3"/> Create File</span>
               </div>
