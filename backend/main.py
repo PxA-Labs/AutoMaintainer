@@ -2218,9 +2218,9 @@ async def _refuse_websocket(websocket: WebSocket, code: int) -> None:
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     """Interactive shell (/bin/bash, or COMSPEC on Windows) as the API's OS user.
 
-    Checks, all before the handshake is accepted: exact Origin match,
-    ENABLE_TERMINAL=true, a Supabase token of an accepted org member (4401
-    otherwise), the user id on TERMINAL_ADMIN_USER_IDS, and repo_url
+    Checks, all before the handshake is accepted: exact Origin match, a
+    Supabase token of an accepted org member (4401 otherwise),
+    ENABLE_TERMINAL=true, the user id on TERMINAL_ADMIN_USER_IDS, and repo_url
     belonging to the caller's org (4403 otherwise; another org's repository
     and a missing one are indistinguishable).
     """
@@ -2240,13 +2240,14 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
         await websocket.close(code=WS_CLOSE_FORBIDDEN)
         return
 
-    if not _terminal_enabled():
-        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
-        return
-
+    # The token is checked before ENABLE_TERMINAL so an unauthenticated
+    # caller gets 4401 either way and cannot tell whether the terminal is on.
     user = await authenticate_websocket(websocket)
     if not user:
         await _refuse_websocket(websocket, WS_CLOSE_UNAUTHENTICATED)
+        return
+    if not _terminal_enabled():
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
     if not _terminal_user_allowed(user.get("user_id")):
         await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)

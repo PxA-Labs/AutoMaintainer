@@ -555,6 +555,20 @@ def test_refusal_echoes_only_the_bearer_marker(db, terminal):
             ws.receive_text()
 
 
+@pytest.mark.parametrize("enabled", ["true", ""])
+@pytest.mark.parametrize("subprotocols", [None, ["bearer", "not-a-real-token"]])
+def test_terminal_state_is_not_revealed_without_a_token(
+    db, terminal, monkeypatch, enabled, subprotocols
+):
+    """Unauthenticated callers get 4401 whether the terminal is on or off."""
+    monkeypatch.setenv("ENABLE_TERMINAL", enabled)
+
+    code = ws_close_code("/api/terminal/ws", subprotocols)
+
+    assert code == main.WS_CLOSE_UNAUTHENTICATED
+    assert terminal == []
+
+
 def test_terminal_is_off_by_default(db, terminal, monkeypatch):
     monkeypatch.delenv("ENABLE_TERMINAL")
 
