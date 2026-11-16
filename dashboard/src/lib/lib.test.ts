@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { appendCapped, prependCapped, MAX_LOG_ENTRIES } from "@/lib/logs";
 import { normalizeRepoSlug } from "@/lib/repo";
-import { buildTerminalWsUrl, reconnectDelay, RECONNECT_MAX_MS } from "@/lib/terminal";
+import {
+  buildTerminalWsUrl,
+  classifyTerminalClose,
+  reconnectDelay,
+  RECONNECT_MAX_MS,
+} from "@/lib/terminal";
 import { isTerminalRunStatus } from "@/lib/run-status";
 import { barPercent } from "@/lib/chart";
 import { readOAuthError } from "@/lib/oauth";
@@ -61,6 +66,17 @@ describe("terminal websocket url", () => {
     expect(reconnectDelay(0)).toBe(1000);
     expect(reconnectDelay(3)).toBe(8000);
     expect(reconnectDelay(20)).toBe(RECONNECT_MAX_MS);
+  });
+
+  it.each([
+    [4401, "signin"],
+    [4403, "forbidden"],
+    [1008, "policy"],
+    [1006, "retry"],
+    [1000, "retry"],
+    [1011, "retry"],
+  ] as const)("classifies close code %i as %s", (code, action) => {
+    expect(classifyTerminalClose(code)).toBe(action);
   });
 });
 

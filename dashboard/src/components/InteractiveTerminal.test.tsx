@@ -29,6 +29,8 @@ vi.mock("xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 vi.mock("xterm/css/xterm.css", () => ({}));
 vi.mock("@/lib/api", () => ({ getAccessToken: () => Promise.resolve("tok") }));
+const signInWithGitHub = vi.hoisted(() => vi.fn(async () => ({ error: null })));
+vi.mock("@/lib/auth", () => ({ useAuth: () => ({ signInWithGitHub }) }));
 
 class FakeSocket {
   static OPEN = 1;
@@ -132,5 +134,55 @@ describe("InteractiveTerminal", () => {
     });
     await flush();
     expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  /** Close the first socket with `code`, then let any backoff run out. */
+  async function closeWith(code: number) {
+    const view = render(<InteractiveTerminal repoUrl="octo/hello" />);
+    await flush();
+    act(() => FakeSocket.instances[0].onclose?.({ code }));
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    await flush();
+    return view;
+  }
+
+  it("does not reconnect after 4401 and offers to sign in again", async () => {
+    const view = await closeWith(4401);
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(terms[0].writes.join("")).toContain("Sign in again to use the terminal");
+    expect(view.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    act(() => view.getByRole("button", { name: "Sign in" }).click());
+    expect(signInWithGitHub).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reconnect after 4403 and says the terminal is not allowed", async () => {
+    const view = await closeWith(4403);
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(terms[0].writes.join("")).toContain(
+      "Terminal disabled or not allowed for this repository"
+    );
+    expect(view.getByText("Terminal unavailable")).toBeTruthy();
+    // Final: neither an automatic nor an offered retry.
+    expect(view.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Sign in" })).toBeNull();
+  });
+
+  it("keeps reconnecting with backoff after repeated 1006 closes", async () => {
+    render(<InteractiveTerminal repoUrl="octo/hello" />);
+    await flush();
+    for (const [index, delay] of [
+      [0, 1000],
+      [1, 2000],
+      [2, 4000],
+    ]) {
+      act(() => FakeSocket.instances[index].onclose?.({ code: 1006 }));
+      await act(async () => {
+        vi.advanceTimersByTime(delay);
+      });
+      await flush();
+      expect(FakeSocket.instances).toHaveLength(index + 2);
+    }
   });
 });

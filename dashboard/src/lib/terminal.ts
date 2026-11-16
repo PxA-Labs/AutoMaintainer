@@ -18,6 +18,41 @@ export function buildTerminalWsUrl(backendUrl: string, repo?: string | null): st
   return url;
 }
 
+/**
+ * Close codes the backend's terminal WebSocket refuses a handshake with
+ * (backend/main.py), mirroring HTTP 401 and 403. 1008 (policy violation) is
+ * what older backends sent for every refusal.
+ */
+export const WS_CLOSE_POLICY_VIOLATION = 1008;
+export const WS_CLOSE_UNAUTHENTICATED = 4401;
+export const WS_CLOSE_FORBIDDEN = 4403;
+
+/**
+ * What a terminal close means for the client:
+ * - "signin": the token is missing, expired or not an org member's; only
+ *   signing in again can help.
+ * - "forbidden": the terminal is disabled, the user is not allowed to use it,
+ *   or the repository is not the user's organization's. Final.
+ * - "policy": the legacy 1008 refusal. Final.
+ * - "retry": anything else (1006 abnormal close, server restart, ...); worth
+ *   reconnecting with backoff. A refused Origin also arrives as 1006, because
+ *   the backend closes before the handshake completes.
+ */
+export type TerminalCloseAction = "signin" | "forbidden" | "policy" | "retry";
+
+export function classifyTerminalClose(code: number): TerminalCloseAction {
+  switch (code) {
+    case WS_CLOSE_UNAUTHENTICATED:
+      return "signin";
+    case WS_CLOSE_FORBIDDEN:
+      return "forbidden";
+    case WS_CLOSE_POLICY_VIOLATION:
+      return "policy";
+    default:
+      return "retry";
+  }
+}
+
 /** Base delay and cap for automatic terminal reconnects. */
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
