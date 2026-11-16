@@ -79,7 +79,7 @@ def test_detects_pytest_from_tests_dir_ini_or_pyproject(tmp_path):
     for repo in (a, b, c):
         plan = verification.detect_test_plan(repo)
         assert plan.source == "pytest"
-        assert plan.command == [PY, "-m", "pytest", "-q"]
+        assert plan.command == [PY, "-P", "-c", verification.PYTEST_LAUNCHER, "-q"]
 
 
 def test_detects_npm_test_but_not_the_npm_init_placeholder(tmp_path):
@@ -141,9 +141,24 @@ async def test_passing_pytest_repo(tmp_path):
     assert result.status == "passed", result.output_tail
     assert result.exit_code == 0
     assert result.runner == "local"
-    assert result.command == [PY, "-m", "pytest", "-q"]
+    assert result.command == [PY, "-P", "-c", verification.PYTEST_LAUNCHER, "-q"]
     assert "1 passed" in result.output_tail
     assert result.duration_seconds > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("module", ["pytest", "argparse", "inspect", "pprint"])
+async def test_root_module_cannot_replace_pytest_or_its_imports(tmp_path, module):
+    # Without -P, `python -m pytest` imports these from the repository root,
+    # so this file would print a pass and exit 0 although the test fails.
+    repo = _pytest_repo(tmp_path, False)
+    _write(
+        repo,
+        {f"{module}.py": 'print("1 passed")\nimport sys\nsys.exit(0)\n'},
+    )
+    result = await verification.verify_working_copy(repo)
+    assert result.status == "failed", result.output_tail
+    assert result.exit_code != 0
 
 
 @pytest.mark.asyncio
@@ -259,7 +274,9 @@ async def test_configured_sandbox_backend_runs_the_tests(tmp_path, monkeypatch):
     _pytest_repo(tmp_path, True)
     result = await verification.verify_working_copy(tmp_path)
     assert result.status == "failed" and result.runner == "sandbox"
-    assert FakeSandbox.calls == [(tmp_path, [PY, "-m", "pytest", "-q"], 300)]
+    assert FakeSandbox.calls == [
+        (tmp_path, [PY, "-P", "-c", verification.PYTEST_LAUNCHER, "-q"], 300)
+    ]
     assert result.truncated and result.output_tail.endswith("sandbox-outsandbox-err")
 
 

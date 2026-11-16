@@ -48,8 +48,30 @@ NEEDS_HUMAN_LABEL = "needs-human"
 # real fix while flagging a sprawling rewrite.
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_LINES = 500
-# Files whose change affects CI, the build, dependencies, secrets or this
-# tool's own configuration.
+# Files whose change affects CI, the build, dependencies, secrets, how the
+# repository's tests run, or this tool's own configuration.
+#
+# Test-runner configuration is denied because a change to it can skip or
+# short-circuit the tests that verification runs (``addopts``, a conftest
+# hook, a ``test`` script) and so turn a failing change into a passing one
+# (#480). So are modules that replace the runner, for custom test commands
+# that run ``python -m pytest`` from the repository root (``-m`` puts that
+# directory first on ``sys.path``, so a root ``pytest.py`` or ``pytest/``
+# package runs instead of pytest). npm reads the project ``.npmrc`` (its
+# ``script-shell`` decides what runs ``npm test``).
+#
+# This is a partial guard. Test files are not denied: writing tests is part
+# of the agent's job, and the Maintainer sees the verification output
+# instead. Nor are setup files or other modules the tests load (their names
+# are configurable). Denying by name cannot stop a root module that shadows
+# something pytest imports, standard library included (``argparse.py``,
+# ``inspect.py``); the detected command closes that by putting the root
+# last on ``sys.path`` (verification.PYTEST_LAUNCHER). No
+# default protects a custom ``test_command``: a repository that sets one
+# should deny its entry point (a script, a Makefile) with
+# ``change_limits.deny``. A repository that wants the agent to edit one of
+# these files lists it under ``change_limits.allow`` in its base-branch
+# ``.automaintainer.yml``.
 DEFAULT_DENYLIST = (
     ".github/workflows/**",
     "Dockerfile*",
@@ -67,6 +89,36 @@ DEFAULT_DENYLIST = (
     ".env*",
     "*.pem",
     "*.key",
+    # Test runners and their configuration (Python, then JavaScript). Names
+    # without "/" match in any directory, so nested conftest.py files count.
+    "conftest.py",
+    # pytest >= 9 checks pytest.toml and .pytest.toml before the others.
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "noxfile.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "jest.config.*",
+    "vitest.config.*",
+    # Vitest also reads workspace/projects files, and falls back to the test
+    # block of vite.config.* when there is no vitest.config.*.
+    "vitest.workspace.*",
+    "vitest.projects.*",
+    "vite.config.*",
+    ".mocharc*",
+    "karma.conf.*",
+    "playwright.config.*",
+    # Modules that replace the runner itself when the tests run from the
+    # repository root (``python -m pytest``), and npm's project settings.
+    # Denied at any depth: a custom test command may run from a subdirectory.
+    "pytest.py",
+    "**/pytest/**",
+    "**/_pytest/**",
+    ".npmrc",
     CONFIG_FILE,
 )
 # Denied whatever the denylist or allowlist say.
