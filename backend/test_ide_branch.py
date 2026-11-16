@@ -130,8 +130,10 @@ def test_explicit_existing_branch_is_used_as_is(repo, method, path, kwargs):
 
 
 @pytest.mark.parametrize("method,path,kwargs", WRITES)
-def test_default_branch_is_refused(repo, method, path, kwargs):
-    response = _send(method, path, kwargs, branch="main")
+@pytest.mark.parametrize("branch", ["main", "Main", "MAIN"])
+def test_default_branch_is_refused(repo, method, path, kwargs, branch):
+    """Compared case-insensitively: "Main" must not slip past the guard."""
+    response = _send(method, path, kwargs, branch=branch)
 
     assert response.status_code == 409, response.text
     assert _write_branches(repo) == []
@@ -153,7 +155,29 @@ def test_protected_branch_is_refused(repo, method, path, kwargs, protected):
 
 @pytest.mark.parametrize(
     "branch",
-    ["../main", "a..b", "-x", ".hidden", "x.lock", "a/.b", "a b", "a~1", "x" * 201],
+    [
+        "../main",
+        "a..b",
+        "-x",
+        ".hidden",
+        "x.lock",
+        "a/.b",
+        "a b",
+        "a~1",
+        "x" * 201,
+        # Ref-qualified or symbolic names would resolve to the default
+        # branch on GitHub and bypass the default-branch comparison.
+        "refs/heads/main",
+        "REFS/heads/main",
+        "heads/main",
+        "Heads/main",
+        "tags/v1",
+        "remotes/origin/main",
+        "HEAD",
+        "head",
+        "FETCH_HEAD",
+        "orig_head",
+    ],
 )
 def test_invalid_branch_name_is_rejected_before_github(monkeypatch, branch):
     def no_github(*_a):
@@ -164,6 +188,34 @@ def test_invalid_branch_name_is_rejected_before_github(monkeypatch, branch):
     response = _send(*SAVE, branch=branch)
 
     assert response.status_code == 400, response.text
+
+
+@pytest.mark.parametrize("method,path,kwargs", WRITES)
+@pytest.mark.parametrize("branch", ["refs/heads/main", "heads/main", "HEAD"])
+def test_ref_qualified_default_branch_is_never_written(
+    repo, method, path, kwargs, branch
+):
+    """The reviewer's bypass: no ref is created and nothing is committed."""
+    response = _send(method, path, kwargs, branch=branch)
+
+    assert response.status_code == 400, response.text
+    assert _write_branches(repo) == []
+    repo.create_git_ref.assert_not_called()
+
+
+def test_branch_names_merely_containing_head_are_allowed():
+    for name in ("feature/head-fix", "headless", "my_heads/x", "fix/HEAD_cleanup"):
+        main._validate_branch_name(name)
+
+
+@pytest.mark.parametrize("default", [None, MagicMock()])
+def test_unknown_default_branch_fails_closed(repo, default):
+    repo.default_branch = default
+
+    response = _send(*SAVE)
+
+    assert response.status_code == 409, response.text
+    assert _write_branches(repo) == []
 
 
 def test_branch_lookup_failure_is_not_treated_as_missing(repo):

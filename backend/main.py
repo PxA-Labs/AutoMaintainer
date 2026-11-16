@@ -1381,6 +1381,17 @@ IDE_BRANCH_PREFIX = "automaintainer/ide-"
 # A conservative subset of git's ref-name rules (git check-ref-format).
 _BRANCH_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*")
 _BRANCH_NAME_MAX_LEN = 200
+# Ref-qualified spellings git (and GitHub's ref resolution) would expand to an
+# existing ref: "refs/heads/main", "heads/main", "tags/v1", "remotes/x/main".
+# Accepting them would let "refs/heads/main" slip past the default-branch
+# check, so a branch name must be a bare short name.
+_REF_NAMESPACE_PREFIXES = ("refs/", "heads/", "tags/", "remotes/")
+
+
+def _is_symbolic_ref_name(branch: str) -> bool:
+    """HEAD, FETCH_HEAD, ORIG_HEAD, ...: symbolic refs, never a branch."""
+    upper = branch.upper()
+    return upper == "HEAD" or ("/" not in branch and upper.endswith("_HEAD"))
 
 
 def _validate_branch_name(branch: str) -> None:
@@ -1391,8 +1402,16 @@ def _validate_branch_name(branch: str) -> None:
         or "/." in branch
         or branch.startswith((".", "-"))
         or branch.endswith((".", ".lock"))
+        or branch.lower().startswith(_REF_NAMESPACE_PREFIXES)
+        or _is_symbolic_ref_name(branch)
     ):
         raise HTTPException(status_code=400, detail="Invalid branch name")
+
+
+def _same_branch(a: Optional[str], b: Optional[str]) -> bool:
+    # Case-insensitive: git refs are case-sensitive, but on case-insensitive
+    # filesystems "Main" and "main" collide, so treat them as the same branch.
+    return isinstance(a, str) and isinstance(b, str) and a.casefold() == b.casefold()
 
 
 def _ide_working_branch(org_id: str, user_id: str) -> str:
@@ -1415,7 +1434,8 @@ def _ensure_writable_branch(repo, branch: str) -> None:
     Blocking (PyGithub); call from a worker thread.
     """
     default_branch = repo.default_branch
-    if branch == default_branch:
+    if not isinstance(default_branch, str) or _same_branch(branch, default_branch):
+        # An unknown default branch fails closed.
         raise HTTPException(
             status_code=409,
             detail="The IDE does not commit to the default branch; "
