@@ -50,8 +50,8 @@ the API's IDE routes and terminal read them back from it. If they do not share
 it, the IDE returns `404 Repository not cloned yet` for repos the agent has
 just processed. Maintenance and beat never touch clones.
 
-This still holds with per-user IDE views (#505, PR #507, not merged when this
-was written): each user's view is a git worktree of the shared clone, and the
+This still holds with per-user IDE views (#505, merged in PR #507): each
+user's view is a git worktree of the shared clone, and the
 API refreshes it from GitHub with `ls-remote`/`fetch` into that clone. The API
 never creates the clone itself; only an agent run on the worker does. On an
 API host without the worker's clone, the IDE routes answer `404` and the
@@ -308,7 +308,7 @@ All services build the repository `Dockerfile`, because Render's native Python
 runtime has no Node or gitnexus. Set every `sync: false` variable in the Render
 dashboard.
 
-## Option C: a single container (Hugging Face Spaces, plain `docker run`)
+## Option C: a single container (plain `docker run`; Hugging Face Spaces without the IDE)
 
 The image's default command starts only the API. A single-container platform
 also needs an agent worker and an external Redis:
@@ -325,7 +325,9 @@ If you run the API without any worker, `POST /start` answers `503`
 runs the image's default command, which is the API alone, and the repository
 has no Space start script (the sync workflow is
 `.github/workflows/hf-sync.yml.disabled`). Such a Space therefore needs a
-worker elsewhere on the same Redis, which also means its IDE has no clones.
+worker elsewhere on the same Redis, which also means its IDE has no clones:
+agent runs work, but the IDE routes answer `404` for every repository. Treat
+a Hugging Face Space as degraded, not as a supported topology for the IDE.
 The default command is not the launcher: without a reachable Redis the
 launcher's worker retries the broker and then exits, which takes the API down
 with it and would restart-loop a container meant to run the API alone.
@@ -387,7 +389,7 @@ example as a second Space.
 | `TERMINAL_ADMIN_USER_IDS` | unset (nobody) | Comma-separated Supabase user IDs allowed to open the terminal when `ENABLE_TERMINAL=true`. It fails closed: empty means nobody. The check also applies under `AUTH_DEV_BYPASS`, so the dev user ID must be listed for local terminal use. |
 | `GITHUB_AUTH_MODE` | `app` if App credentials are set, else `pat` | `app`: every run and IDE route acts with the GitHub App **installation token** of the repository's installation (cached, refreshed 5 minutes before expiry); a run or route with no known installation is refused, never silently downgraded to a PAT. `pat`: single-tenant mode using `GITHUB_TOKEN` for everything (a warning is logged at startup). Any other value is a startup error. |
 | `ASSIST_RATE_PER_MINUTE` / `ASSIST_ORG_RATE_PER_MINUTE` / `ASSIST_DAILY_REQUESTS_PER_ORG` | `20` / `60` / `1000` | Quotas for `/assist/inline` (per user per minute, per org per minute, per org per UTC day). Exceeding one returns `429` with `Retry-After`. Counters live in Redis; without Redis they fall back to per-process memory, so limits are then per API process rather than global. |
-| `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | Before creating a run, `/start` asks the Celery workers which queues they consume (`inspect active_queues`) and returns `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and a `Retry-After` header when none consuming `agent_runs` answers within the timeout, or the broker cannot be reached. No run row is created. A maintenance-only worker does not count. The answer, positive or negative, is cached for the given number of seconds. |
+| `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | Before creating a run, `/start` asks the Celery workers which queues they consume (`inspect active_queues`) and returns `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and a `Retry-After` header when none consuming `agent_runs` answers within the timeout, or the broker cannot be reached. No run row is created. A maintenance-only worker does not count. The probe opens its own broker connection with the timeout as its socket connect and read timeout and one retry, and `/start` waits for it at most `2 × timeout + 0.5` seconds (2.5 s by default) even if the broker host does not answer at all; while a probe is stuck past that, further `/start` calls answer `503` at once. The answer, positive or negative, is cached for the given number of seconds. |
 | `AGENT_WORKER_CHECK` | `true` | Set to `false` (or `0`, `no`, `off`) to skip that check, for local development or tests without a broker. Runs are then queued even if no worker will consume them. Any other value keeps the check on. Leave it unset in deployments; with `ENVIRONMENT=production` the API logs a warning the first time `/start` skips the check. |
 | `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. Timeouts, output limits and per-repository `.automaintainer.yml` are described in [VERIFICATION.md](./VERIFICATION.md). Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
 | `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, ...) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
