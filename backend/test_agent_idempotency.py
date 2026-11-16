@@ -27,11 +27,45 @@ WRITER = "octo-writer"
 RUN_IDENTITY = "automaintainer[bot]"
 
 
-def run_client(repo):
-    """A stand-in for agents.gh, authenticated as RUN_IDENTITY."""
+def run_client(repo, users=None):
+    """A stand-in for agents.gh, authenticated as RUN_IDENTITY, that also
+    resolves user ids (GET /user/{account_id}) through FakeUsers."""
     return MagicMock(
-        get_repo=lambda _: repo, get_user=lambda: SimpleNamespace(login=RUN_IDENTITY)
+        get_repo=lambda _: repo,
+        get_user=lambda: SimpleNamespace(login=RUN_IDENTITY),
+        get_user_by_id=(users or FakeUsers()).get_user_by_id,
     )
+
+
+# Numeric GitHub user ids of the fixture accounts (trust.py, #491): the gate
+# resolves an id to its current login before the permission lookup.
+_USER_IDS: dict = {}
+
+
+def user_id(login):
+    """The fixed GitHub user id of fixture account ``login``."""
+    return _USER_IDS.setdefault(login, 1000 + len(_USER_IDS))
+
+
+class FakeUsers:
+    """``Github.get_user_by_id`` (GET /user/{account_id}). By default every
+    fixture id resolves to its login; ``logins`` overrides an id's current
+    login (a rename) or makes its lookup raise."""
+
+    def __init__(self, logins=None):
+        self.logins = dict(logins or {})
+        self.lookups = []
+
+    def get_user_by_id(self, github_id):
+        self.lookups.append(github_id)
+        login = self.logins.get(github_id)
+        if login is None:
+            login = next((n for n, i in _USER_IDS.items() if i == github_id), None)
+        if isinstance(login, Exception):
+            raise login
+        if login is None:
+            raise GithubException(404, {"message": "Not Found"}, None)
+        return SimpleNamespace(id=github_id, login=login, type="User")
 
 
 class WorkerCrash(BaseException):
@@ -327,6 +361,7 @@ async def _run(trigger_login=WRITER):
         run_id=RUN_ID,
         emitter=NullEmitter(),
         trigger_login=trigger_login,
+        trigger_github_id=user_id(trigger_login) if trigger_login else None,
         trigger_source="api",
     )
 

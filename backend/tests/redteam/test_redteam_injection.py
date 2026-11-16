@@ -73,6 +73,7 @@ from test_agent_idempotency import (
     FakeSupabase,
     WorkerCrash,
     run_client,
+    user_id,
 )
 from verification import VerificationResult
 
@@ -143,7 +144,9 @@ def make_world(monkeypatch, tmp_path):
                 title="App crashes on startup",
                 body="Steps: run the app.\n\n" + payload(attack_path),
             )
-            issue.user = SimpleNamespace(login=issue_author, type="User")
+            issue.user = SimpleNamespace(
+                id=user_id(issue_author), login=issue_author, type="User"
+            )
             target_issue = issue.number
         monkeypatch.setattr(agents, "gh", run_client(repo))
         llm = ScriptedLLM(answers)
@@ -156,6 +159,7 @@ def make_world(monkeypatch, tmp_path):
                 run_id=RUN_ID,
                 emitter=NullEmitter(),
                 trigger_login=trigger,
+                trigger_github_id=user_id(trigger) if trigger else None,
                 trigger_source="api",
             )
 

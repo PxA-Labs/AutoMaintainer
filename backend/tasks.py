@@ -263,15 +263,17 @@ def run_agent_loop_task(
     mode: str = "autonomous",
     trigger_login: Optional[str] = None,
     trigger_source: Optional[str] = None,
+    trigger_github_id: Optional[int] = None,
 ):
     """
     Celery task to run the agent loop.
     This replaces the in-memory asyncio.Task approach.
 
-    ``trigger_login`` / ``trigger_source``: the GitHub login of whoever
-    started the run and how (``api``), for the trusted-trigger merge gate
-    (trust.py). A message without them (queued by an older API) runs with an
-    unknown trigger, so it is never merged automatically.
+    ``trigger_github_id`` / ``trigger_login`` / ``trigger_source``: the
+    numeric GitHub user id of whoever started the run, the login stored with
+    it and how (``api``), for the trusted-trigger merge gate (trust.py),
+    which decides by the id. A message without an id (queued by an older
+    API) still runs, but is never merged automatically.
     """
     return _execute_agent_run(
         self,
@@ -285,6 +287,7 @@ def run_agent_loop_task(
         mode=mode,
         trigger_login=trigger_login,
         trigger_source=trigger_source,
+        trigger_github_id=trigger_github_id,
     )
 
 
@@ -300,6 +303,7 @@ def _execute_agent_run(
     mode: str = "autonomous",
     trigger_login: Optional[str] = None,
     trigger_source: Optional[str] = None,
+    trigger_github_id: Optional[int] = None,
 ):
     """
     Body of run_agent_loop_task. Takes the bound Celery task explicitly so
@@ -412,6 +416,7 @@ def _execute_agent_run(
                     repository_id=repository_id,
                     trigger_login=trigger_login,
                     trigger_source=trigger_source,
+                    trigger_github_id=trigger_github_id,
                 )
             )
         )
@@ -779,8 +784,8 @@ def start_agent_task(run_id: str, config_payload: dict) -> dict:
 
     config_payload is expected to contain: repo_name, org_id, user_id,
     repository_id, github_installation_id, and optionally
-    target_issue_number, mode, trigger_login (the caller's GitHub login)
-    and trigger_source.
+    target_issue_number, mode, trigger_github_id (the caller's GitHub user
+    id), trigger_login (the login stored with it) and trigger_source.
 
     Decoupling from the FastAPI handler: when Redis is configured and
     reachable, this enqueues onto the agent_runs queue and returns
@@ -801,6 +806,7 @@ def start_agent_task(run_id: str, config_payload: dict) -> dict:
         mode=config_payload.get("mode", "autonomous"),
         trigger_login=config_payload.get("trigger_login"),
         trigger_source=config_payload.get("trigger_source"),
+        trigger_github_id=config_payload.get("trigger_github_id"),
     )
 
     if CELERY_AVAILABLE and is_redis_available():
