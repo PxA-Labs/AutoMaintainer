@@ -194,11 +194,22 @@ changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
 (`CHANGE_LIMIT_MAX_LINES`, default 500) and a path denylist
 (`CHANGE_LIMIT_DENYLIST`, comma-separated globs replacing the default:
 `.github/workflows/**`, `Dockerfile*`, `docker-compose*.yml`, lockfiles such as
-`uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`,
-`.automaintainer.yml`). A repository can override them in the `change_limits`
+`uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`, test-runner
+configuration, `.automaintainer.yml`). Test-runner configuration (`conftest.py`
+at any depth, `pytest.ini`, `.pytest.ini`, `tox.ini`, `noxfile.py`,
+`setup.cfg`, `pyproject.toml`, `package.json`, `jest.config.*`,
+`vitest.config.*`, `.mocharc*`, `karma.conf.*`, `playwright.config.*`) is
+denied because a change to it can skip or short-circuit the tests that
+verification runs and turn a failing change into a passing one (#480). Test
+files are not denied: the agent writes tests, so a change can still weaken a
+test it edits (docs/VERIFICATION.md, Limitations). A glob without `/` matches
+the file name in any directory; one with `/` is anchored at the repository
+root. A repository can override them in the `change_limits`
 section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,
 `allow` exempts globs, never `.automaintainer.yml`); that file is read from the
-**base** branch, so a change cannot relax its own limits. An invalid or
+**base** branch, so a change cannot relax its own limits. For example,
+`allow: ["pyproject.toml"]` lets a repository's agent edit `pyproject.toml`
+while every other runner configuration file stays denied. An invalid or
 unreadable configuration counts as a violation. A change over a limit gets a
 draft PR, the `needs-human` label and a "Change limits exceeded" PR-body
 section, and the Maintainer never merges it under any `MERGE_POLICY`. The

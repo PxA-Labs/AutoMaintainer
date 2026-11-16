@@ -171,7 +171,10 @@ timeout_seconds: 600                              # optional
   can still alter.
 - The same file can also hold a `change_limits` mapping (maximum changed
   files and lines, denied paths). It is read from the base branch, never from
-  the change; see [Change limits](../ARCHITECTURE.md#change-limits).
+  the change; see [Change limits](../ARCHITECTURE.md#change-limits). Test
+  runner configuration is denied by default; to let the agent edit, for
+  example, `pyproject.toml`, add
+  `change_limits: {allow: ["pyproject.toml"]}` on the base branch.
 
 Without the file, the command is detected, first match wins:
 
@@ -414,13 +417,23 @@ remote sandbox host setup).
 - **The PR is opened before the result is attached.** Verification runs right
   after the push; the PR body section and status appear moments later. The
   merge gate is unaffected because it reads the status on the head SHA.
-- **The change can still influence its own tests.** Only `.automaintainer.yml`
-  is protected by verification, and the default change-limit denylist does not
-  include test or runner configuration files. When the agent's target file is a test, `conftest.py`,
-  `pytest.ini`, `pyproject.toml` (e.g. `addopts`), `setup.cfg` or
-  `package.json` (the `test` script), the change can skip, rewrite or
-  short-circuit the tests and make verification pass. Human review of such
-  PRs, or required CI that the change cannot modify, remains necessary.
+- **The change can still influence its own tests.** Verification itself only
+  protects `.automaintainer.yml`. The default change-limit denylist also holds
+  test-runner configuration for a human (#480): `conftest.py` at any depth,
+  `pytest.ini`, `.pytest.ini`, `tox.ini`, `noxfile.py`, `setup.cfg`,
+  `pyproject.toml`, `package.json`, `jest.config.*`, `vitest.config.*`,
+  `.mocharc*`, `karma.conf.*` and `playwright.config.*`. A change to one of
+  them gets a draft `needs-human` PR and is never merged, even when
+  verification passes. Test files themselves (`tests/**`, `test_*.py`,
+  `*.test.*`) are **not** denied, because writing and fixing tests is part of
+  the agent's job: a change can still weaken, skip or delete assertions in a
+  test file it edits and make verification pass. The Maintainer now sees the
+  verification output (see [Maintainer input](#maintainer-input)), but that
+  is a model reading untrusted output, not a guarantee. Human review, or
+  required CI that the change cannot modify, remains necessary for
+  `MERGE_POLICY=ci`/`auto`. A repository whose fixes routinely touch, say,
+  `pyproject.toml` can re-allow it with `change_limits.allow` on the base
+  branch (see [Per repository](#per-repository-automaintaineryml)).
 - **Event counts are synthetic.** The `TestResultEvent` reports
   `passed_count`/`failed_count` as 1/0 for the whole command; individual test
   counts are not parsed from the output.

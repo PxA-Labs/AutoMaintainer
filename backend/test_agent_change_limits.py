@@ -179,6 +179,40 @@ async def test_over_limit_change_is_a_draft_for_a_human_under_every_policy(
     assert checkpoint["change_limit_violations"]
 
 
+@pytest.mark.parametrize("policy", ["human", "ci", "auto"])
+async def test_conftest_change_is_held_for_a_human_by_default(
+    world, monkeypatch, policy
+):
+    """#480: a conftest.py hook can short-circuit the tests verification runs,
+    so a change to it is a draft needs-human PR under the default limits,
+    even when verification passes and the merge policy would merge."""
+    monkeypatch.setenv("MERGE_POLICY", policy)
+    world.repo.files[("main", "tests/conftest.py")] = "x = 1\n"
+    target = "Make tests/conftest.py:1-1 set x to 2."
+
+    async def llm(system, user):
+        role = _role(system)
+        return {
+            "Architect": target,
+            "Visionary": target,
+            "Product Manager": APPROVE,
+            "Implementer": CODE,
+            "Maintainer": APPROVE,
+        }[role]
+
+    monkeypatch.setattr(agents, "run_llm_with_tools", llm)
+
+    result = await _run()
+
+    assert world.repo.commits == [(BRANCH, "tests/conftest.py")]
+    (pr,) = world.repo.pulls
+    assert pr.draft is True and pr.merged is False
+    assert [label.name for label in pr.labels] == [change_limits.NEEDS_HUMAN_LABEL]
+    assert "matches the protected path pattern ` conftest.py `" in pr.body
+    assert world.repo.merges == 0
+    assert result["merge_status"] == "awaiting_human_review"
+
+
 async def test_limits_come_from_the_base_branch_config(world):
     """A config committed on the run branch cannot relax the base limits."""
     repo = world.repo

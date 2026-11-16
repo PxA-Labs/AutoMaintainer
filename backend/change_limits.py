@@ -48,8 +48,16 @@ NEEDS_HUMAN_LABEL = "needs-human"
 # real fix while flagging a sprawling rewrite.
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_LINES = 500
-# Files whose change affects CI, the build, dependencies, secrets or this
-# tool's own configuration.
+# Files whose change affects CI, the build, dependencies, secrets, how the
+# repository's tests run, or this tool's own configuration.
+#
+# Test-runner configuration is denied because a change to it can skip or
+# short-circuit the tests that verification runs (``addopts``, a conftest
+# hook, a ``test`` script) and so turn a failing change into a passing one
+# (#480). Test files themselves are not denied: writing tests is part of the
+# agent's job, and the Maintainer sees the verification output instead. A
+# repository that wants the agent to edit one of these files lists it under
+# ``change_limits.allow`` in its base-branch ``.automaintainer.yml``.
 DEFAULT_DENYLIST = (
     ".github/workflows/**",
     "Dockerfile*",
@@ -67,6 +75,21 @@ DEFAULT_DENYLIST = (
     ".env*",
     "*.pem",
     "*.key",
+    # Test runners and their configuration (Python, then JavaScript). Names
+    # without "/" match in any directory, so nested conftest.py files count.
+    "conftest.py",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "noxfile.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "jest.config.*",
+    "vitest.config.*",
+    ".mocharc*",
+    "karma.conf.*",
+    "playwright.config.*",
     CONFIG_FILE,
 )
 # Denied whatever the denylist or allowlist say.

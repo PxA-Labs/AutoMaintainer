@@ -104,6 +104,53 @@ def test_default_denylist_leaves_ordinary_paths_alone(path):
     assert _violations([FileChange(path, 1)]) == []
 
 
+# Test-runner configuration can skip or short-circuit the tests verification
+# runs, so it is held for a human by default (#480).
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("conftest.py", "conftest.py"),
+        ("tests/conftest.py", "conftest.py"),
+        ("backend/tests/unit/conftest.py", "conftest.py"),
+        ("pytest.ini", "pytest.ini"),
+        (".pytest.ini", ".pytest.ini"),
+        ("tox.ini", "tox.ini"),
+        ("noxfile.py", "noxfile.py"),
+        ("setup.cfg", "setup.cfg"),
+        ("pyproject.toml", "pyproject.toml"),
+        ("backend/pyproject.toml", "pyproject.toml"),
+        ("package.json", "package.json"),
+        ("dashboard/package.json", "package.json"),
+        ("jest.config.js", "jest.config.*"),
+        ("web/jest.config.ts", "jest.config.*"),
+        ("vitest.config.mts", "vitest.config.*"),
+        (".mocharc.yml", ".mocharc*"),
+        ("app/.mocharc", ".mocharc*"),
+        ("karma.conf.js", "karma.conf.*"),
+        ("e2e/playwright.config.ts", "playwright.config.*"),
+    ],
+)
+def test_default_denylist_holds_test_runner_configuration(path, pattern):
+    assert cl.denied_by(path, cl.default_limits()) == pattern
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Test files stay writable: the agent legitimately adds and fixes tests.
+        "tests/test_app.py",
+        "test_app.py",
+        "src/app.test.ts",
+        "tests/fixtures/conftest_data.py",
+        "docs/pyproject.md",
+        "src/package_json.py",
+        "jest.setup.js",
+    ],
+)
+def test_default_denylist_leaves_test_files_alone(path):
+    assert _violations([FileChange(path, 1)]) == []
+
+
 @pytest.mark.parametrize(
     "path, pattern, expected",
     [
@@ -163,6 +210,20 @@ def test_config_overrides_sizes_and_extends_lists():
     assert _violations([FileChange("backend/uv.lock", 1)], limits) == []
     # Allowing one lockfile does not allow the others.
     assert _violations([FileChange("poetry.lock", 1)], limits)
+
+
+def test_allow_re_enables_test_runner_configuration_per_repository():
+    """The escape hatch for repositories whose fixes routinely touch
+    pyproject.toml: allow it on the base branch, keep the rest denied."""
+    limits = cl.limits_from_config(
+        "change_limits:\n  allow: ['pyproject.toml', 'tests/conftest.py']\n"
+    )
+    assert _violations([FileChange("backend/pyproject.toml", 1)], limits) == []
+    assert _violations([FileChange("tests/conftest.py", 1)], limits) == []
+    # An anchored allow entry exempts that file only.
+    assert _violations([FileChange("conftest.py", 1)], limits)
+    assert _violations([FileChange("tox.ini", 1)], limits)
+    assert _violations([FileChange("package.json", 1)], limits)
 
 
 def test_allow_cannot_exempt_the_automaintainer_config():
