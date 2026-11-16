@@ -380,6 +380,67 @@ def test_classifications_do_not_overlap():
     assert total == len(set().union(*CLASSIFIED))
 
 
+# Parameter names that identify a tenant-owned object. A route taking one
+# belongs in TENANT, where the cross-org probe covers it, not in ORG_SCOPED.
+TENANT_IDENTIFIERS = re.compile(r"repo|run_id|repository|installation|org_id")
+# ORG_SCOPED routes whose tenant-looking parameter is handled otherwise; the
+# reason is in ORG_SCOPED.
+ORG_SCOPED_IDENTIFIER_EXEMPT = {
+    ("POST", "/assist/inline"): {"repo_name"},
+    ("POST", "/github/installations/claim"): {"installation_id"},
+}
+
+
+def _parameter_names(route: APIRoute) -> set:
+    dependant = route.dependant
+    names = {p.alias for p in dependant.path_params + dependant.query_params}
+    for body in dependant.body_params:
+        fields = getattr(body.field_info.annotation, "model_fields", None)
+        names |= set(fields) if fields else {body.alias}
+    return names
+
+
+def test_org_scoped_routes_take_no_tenant_identifier():
+    """An ORG_SCOPED route never takes a repository, run or installation id.
+
+    ORG_SCOPED only needs a one-line reason, so without this check a route
+    that takes another org's identifier could be filed there and skip the
+    cross-org probe.
+    """
+    offenders = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in route.methods - {"HEAD"}:
+            key = (method, route.path)
+            if key not in ORG_SCOPED:
+                continue
+            tenant_params = {
+                name
+                for name in _parameter_names(route)
+                if TENANT_IDENTIFIERS.search(name)
+            } - ORG_SCOPED_IDENTIFIER_EXEMPT.get(key, set())
+            if tenant_params:
+                offenders[key] = sorted(tenant_params)
+    assert not offenders, (
+        f"ORG_SCOPED routes taking tenant identifiers: {offenders}. Move them to "
+        "TENANT with a request builder."
+    )
+
+
+def test_org_scoped_identifier_check_detects_a_misfiled_route():
+    from fastapi import FastAPI
+
+    probe = FastAPI()
+
+    @probe.get("/things/{run_id}")
+    def _thing(run_id: str, repo_name: str = ""):  # pragma: no cover - not called
+        return {}
+
+    (route,) = [r for r in probe.routes if isinstance(r, APIRoute)]
+    assert {"run_id", "repo_name"} <= _parameter_names(route)
+
+
 def _sample_url(path: str) -> str:
     samples = {"repo_name": "a/app", "run_id": RUN_A, "repository_id": "1"}
     return re.sub(r"\{(\w+)(?::\w+)?\}", lambda m: samples.get(m.group(1), "x"), path)
