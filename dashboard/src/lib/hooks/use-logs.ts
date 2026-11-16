@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { getBrowserClient } from "@/lib/supabase";
 import type { LogEntry } from "./use-agent-run";
 import { appendCapped, prependCapped } from "@/lib/logs";
+import { formatRunErrorLog } from "@/lib/run-errors";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -130,6 +131,11 @@ export function useLogs(activeRunId: string | null) {
           msg: row.message || "",
           color: row.color || "text-zinc-400",
         };
+        // ErrorEvent rows: show the code's label and help text rather than
+        // only "Error [CODE]: ...", and tell warnings from run failures.
+        if (row.log_type === "error" && row.metadata?.error_code !== undefined) {
+          Object.assign(logEntry, formatRunErrorLog(row.metadata, logEntry.msg));
+        }
         if (accumulator) {
           accumulator.historyLogs.push(logEntry);
         } else {

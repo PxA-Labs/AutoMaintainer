@@ -55,6 +55,8 @@ export interface LogEntry {
   agent: string;
   msg: string;
   color: string;
+  /** What a run error code means and what to do about it (error rows only). */
+  help?: string;
 }
 
 interface UseAgentRunOptions {

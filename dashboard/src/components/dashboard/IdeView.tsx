@@ -92,7 +92,12 @@ export function IdeView({ user, repoUrl, logs, onDirtyChange }: IdeViewProps) {
               <div key={i} className={`flex items-start gap-2 py-0.5 leading-relaxed ${log.color}`}>
                 <span className="text-muted shrink-0 text-[11px] select-none">{log.time}</span>
                 <span className="text-zinc-400 shrink-0 select-none">[{log.agent}]</span>
-                <span className="break-words flex-1">{log.msg}</span>
+                <span className="break-words flex-1">
+                  {log.msg}
+                  {log.help && (
+                    <span className="block text-[11px] text-zinc-400">{log.help}</span>
+                  )}
+                </span>
               </div>
             ))}
           </div>

@@ -80,6 +80,9 @@ export function LogConsole({
             </span>
             <span className={`break-words flex-1 ${log.color || "text-zinc-300"}`}>
               {log.msg}
+              {log.help && (
+                <span className="block text-[11px] text-zinc-400">{log.help}</span>
+              )}
             </span>
           </div>
         ))}
