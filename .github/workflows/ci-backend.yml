@@ -6,13 +6,16 @@ on:
     paths:
       - 'backend/**'
       - 'scripts/export-backend-requirements.sh'
-      - '.github/workflows/ci-backend.yml'
+      - '.github/workflows/**'
   pull_request:
     branches: [ "main" ]
     paths:
       - 'backend/**'
       - 'scripts/export-backend-requirements.sh'
-      - '.github/workflows/ci-backend.yml'
+      - '.github/workflows/**'
+
+# Workflow changes also run this suite: backend/tests/test_workflow_hygiene.py
+# statically checks every workflow file.
 
 permissions: read-all
 
