@@ -96,6 +96,7 @@ TENANT_TABLES = {
     "webhook_events": "org_id",
     "ide_sessions": "org_id",
     "verification_results": "org_id",
+    "merge_decisions": "org_id",
 }
 
 # Tables clients may never write: the backend writes them with the service
@@ -108,6 +109,7 @@ SERVICE_WRITTEN_TABLES = [
     "usage_events",
     "webhook_events",
     "verification_results",
+    "merge_decisions",
 ]
 
 # webhook_events is internal: no client may read it, even in its own org.
@@ -188,6 +190,19 @@ def _insert_row(table: str, tenant: Tenant, user_id: uuid.UUID):
             "status": "passed",
             "command": '["pytest"]',
         },
+        "merge_decisions": {
+            "org_id": tenant.org_id,
+            "run_id": tenant.run_id,
+            "repository_id": tenant.repository_id,
+            "repo_name": f"{tenant.login}/repo",
+            "pr_number": 1,
+            "head_sha": "a" * 40,
+            "policy": "ci",
+            "decision": "merged",
+            "actor": "policy",
+            "reasons": '["maintainer approved", "ci checks passed"]',
+            "evidence": '{"pr_url": "https://github.com/o/r/pull/1"}',
+        },
     }
     row = rows[table]
     statement = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -260,6 +275,7 @@ def _seed(conn):
                 "webhook_events",
                 "ide_sessions",
                 "verification_results",
+                "merge_decisions",
             ):
                 cur.execute(*_insert_row(table, tenant, tenant.owner))
         # A pending invite: a membership row that has not been accepted yet.
@@ -759,6 +775,114 @@ def test_verification_results_are_not_published_to_realtime(db):
         cur.execute(
             "SELECT count(*) FROM pg_publication_tables"
             " WHERE pubname = 'supabase_realtime' AND tablename = 'verification_results'"
+        )
+        assert cur.fetchone() == (0,)
+    db.rollback()
+
+
+# --------------------------------------------------------------------------
+# merge_decisions (epic #411)
+# --------------------------------------------------------------------------
+
+
+def test_merge_decisions_are_read_by_members_only(db):
+    with session(db, "authenticated", USER_A) as cur:
+        cur.execute(
+            "SELECT DISTINCT run_id::text FROM merge_decisions WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert cur.fetchall() == [(str(TENANT_A.run_id),)]
+    for user in (USER_B, USER_C):  # another org; a pending invite to org A
+        with session(db, "authenticated", user) as cur:
+            cur.execute(
+                "SELECT count(*) FROM merge_decisions WHERE org_id = %s",
+                (str(ORG_A),),
+            )
+            assert cur.fetchone() == (0,)
+
+
+def test_members_cannot_forge_or_rewrite_merge_decisions(db):
+    with session(db, "authenticated", USER_A) as cur:
+        statement, params = _insert_row("merge_decisions", TENANT_A, USER_A)
+        assert attempt(cur, statement, params) == "denied"
+        rewritten = attempt(
+            cur,
+            "UPDATE merge_decisions SET decision = 'merged' WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert rewritten == 0
+        assert attempt(cur, *_delete("merge_decisions", TENANT_A)) == 0
+
+
+def test_service_role_writes_merge_decisions(db):
+    with session(db, "service_role") as cur:
+        cur.execute(*_insert_row("merge_decisions", TENANT_A, USER_A))
+        cur.execute(
+            "SELECT count(*) FROM merge_decisions WHERE run_id = %s",
+            (str(TENANT_A.run_id),),
+        )
+        assert cur.fetchone() == (2,)
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    [
+        ("policy", "yolo"),
+        ("decision", "approved"),
+        ("actor", "robot"),
+        ("actor_role", "x" * 101),
+        ("reasons", '"maintainer rejected"'),
+        ("reasons", "[" + ", ".join(['"r"'] * 21) + "]"),
+        ("reasons", '["' + "x" * 4000 + '"]'),
+        ("evidence", '["https://github.com/o/r/pull/1"]'),
+        ("evidence", '{"pr_url": "' + "x" * 4000 + '"}'),
+    ],
+    ids=[
+        "policy",
+        "decision",
+        "actor",
+        "actor_role",
+        "reasons-not-array",
+        "reasons-count",
+        "reasons-size",
+        "evidence-not-object",
+        "evidence-size",
+    ],
+)
+def test_merge_decisions_reject_invalid_values(db, column, value):
+    row = {
+        "org_id": str(ORG_A),
+        "run_id": str(TENANT_A.run_id),
+        "head_sha": "a" * 40,
+        "policy": "human",
+        "decision": "held",
+        "actor": "policy",
+        column: value,
+    }
+    statement = sql.SQL("INSERT INTO merge_decisions ({}) VALUES ({})").format(
+        sql.SQL(", ").join(map(sql.Identifier, row)),
+        sql.SQL(", ").join(sql.Placeholder() * len(row)),
+    )
+    with session(db, "service_role") as cur:
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            cur.execute(statement, list(row.values()))
+
+
+def test_merge_decisions_go_with_their_run(db):
+    with session(db, "service_role") as cur:
+        cur.execute("DELETE FROM runs WHERE id = %s", (str(TENANT_A.run_id),))
+        cur.execute(
+            "SELECT count(*) FROM merge_decisions WHERE run_id = %s",
+            (str(TENANT_A.run_id),),
+        )
+        assert cur.fetchone() == (0,)
+
+
+def test_merge_decisions_are_not_published_to_realtime(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM pg_publication_tables"
+            " WHERE pubname = 'supabase_realtime' AND tablename = 'merge_decisions'"
         )
         assert cur.fetchone() == (0,)
     db.rollback()
