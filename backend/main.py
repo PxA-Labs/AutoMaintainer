@@ -2172,12 +2172,38 @@ async def _authorize_terminal_cwd(
     return True, None
 
 
+# Application close codes (RFC 6455 reserves 4000-4999 for applications),
+# mirroring HTTP 401 and 403.
+WS_CLOSE_UNAUTHENTICATED = 4401
+WS_CLOSE_FORBIDDEN = 4403
+
+
+async def _refuse_websocket(websocket: WebSocket, code: int) -> None:
+    """Refuse a handshake that already failed authentication or authorization.
+
+    Every check runs before this is called, so nothing has been spawned or
+    read. Closing before accept() makes the ASGI server answer with a bare
+    HTTP 403, which a browser reports as close code 1006 for every reason; to
+    let a client tell "sign in again" (4401) from "not allowed" (4403), the
+    handshake is completed and closed at once with the code. The "bearer"
+    subprotocol is echoed only when offered (browsers fail a handshake that
+    selects a protocol they did not offer); the token is never echoed.
+    """
+    offered = websocket.scope.get("subprotocols") or []
+    await websocket.accept(subprotocol="bearer" if "bearer" in offered else None)
+    await websocket.close(code=code)
+
+
 @app.websocket("/api/terminal/ws")
 async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
-    if not _terminal_enabled():
-        await websocket.close(code=1008)
-        return
+    """Interactive shell (/bin/bash, or COMSPEC on Windows) as the API's OS user.
 
+    Checks, all before the handshake is accepted: exact Origin match,
+    ENABLE_TERMINAL=true, a Supabase token of an accepted org member (4401
+    otherwise), the user id on TERMINAL_ADMIN_USER_IDS, and repo_url
+    belonging to the caller's org (4403 otherwise; another org's repository
+    and a missing one are indistinguishable).
+    """
     # Fail closed. The previous guard was `if origin and not (...)`, which
     # skipped the check entirely when Origin was absent -- every non-browser
     # client (websocat, curl, python-websockets) omits it by default. It also
@@ -2186,19 +2212,29 @@ async def terminal_ws(websocket: WebSocket, repo_url: str = ""):
     # configured allowlist; set ALLOWED_ORIGINS to permit another origin. The
     # CORS preview-deployment regex is deliberately NOT honoured here -- an
     # interactive shell should not be reachable from arbitrary preview hosts.
+    #
+    # Checked first and refused without completing the handshake, so a page on
+    # a foreign origin learns nothing (not even whether the terminal is on).
     origin = websocket.headers.get("origin")
     if not origin or origin not in ALLOWED_ORIGINS:
-        await websocket.close(code=1008)
+        await websocket.close(code=WS_CLOSE_FORBIDDEN)
+        return
+
+    if not _terminal_enabled():
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     user = await authenticate_websocket(websocket)
-    if not user or not _terminal_user_allowed(user.get("user_id")):
-        await websocket.close(code=1008)
+    if not user:
+        await _refuse_websocket(websocket, WS_CLOSE_UNAUTHENTICATED)
+        return
+    if not _terminal_user_allowed(user.get("user_id")):
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     allowed, cwd = await _authorize_terminal_cwd(repo_url, user)
     if not allowed:
-        await websocket.close(code=1008)
+        await _refuse_websocket(websocket, WS_CLOSE_FORBIDDEN)
         return
 
     await websocket.accept(subprotocol="bearer")
