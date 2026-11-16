@@ -3,9 +3,12 @@ name: Database & Contract Tests
 # Epic #419. Two suites that need more than the unit-test job provides:
 # - backend/tests/contract: the OpenAPI snapshot and the dashboard <-> API
 #   contract (reads dashboard/src, so dashboard changes trigger it too);
-# - backend/tests/rls: supabase_schema.sql applied to a real PostgreSQL 16 and
-#   its row level security checked per tenant table. Skipped everywhere else
-#   (they need DATABASE_URL_RLS_TEST); this job fails if they were skipped.
+# - backend/tests/rls: the database built from supabase/migrations by
+#   scripts/db-migrate on a real PostgreSQL 16, its row level security checked
+#   per tenant table, and every migration applied a second time (and on top of
+#   an older schema) without errors or data loss (#473). Skipped everywhere
+#   else (they need DATABASE_URL_RLS_TEST); this job fails if they were skipped.
+# It also checks that the generated supabase_schema.sql matches the migrations.
 
 on:
   pull_request:
@@ -13,6 +16,8 @@ on:
     paths:
       - 'backend/**'
       - 'supabase_schema.sql'
+      - 'supabase/**'
+      - 'scripts/db-migrate/**'
       - 'dashboard/src/**'
       - '.github/workflows/ci-db.yml'
 
@@ -75,6 +80,35 @@ jobs:
 
     - name: Install dependencies from uv.lock
       run: uv sync --frozen --group dev
+
+    - name: supabase_schema.sql is generated from supabase/migrations
+      run: |
+        python ../scripts/db-migrate schema --check
+        uv run --frozen pytest tests/test_db_migrate.py -v -p no:cacheprovider
+
+    # The command operators run, end to end: a fresh database, the migrations
+    # applied, then applied again (nothing pending) and listed.
+    - name: Migration runner CLI against PostgreSQL
+      env:
+        PGURL: postgresql://postgres@localhost:5432
+      run: |
+        uv run --frozen python - <<'EOF'
+        import os, psycopg2
+        admin = psycopg2.connect(os.environ["PGURL"] + "/postgres")
+        admin.autocommit = True
+        admin.cursor().execute("CREATE DATABASE db_migrate_cli")
+        conn = psycopg2.connect(os.environ["PGURL"] + "/db_migrate_cli")
+        with conn, conn.cursor() as cur:
+            cur.execute(open("tests/rls/supabase_shim.sql", encoding="utf-8").read())
+        EOF
+        export DATABASE_URL="$PGURL/db_migrate_cli"
+        uv run --frozen python ../scripts/db-migrate up
+        uv run --frozen python ../scripts/db-migrate up | tee "$RUNNER_TEMP/second-up.txt"
+        grep -q "database is up to date" "$RUNNER_TEMP/second-up.txt"
+        uv run --frozen python ../scripts/db-migrate status
+        if uv run --frozen python ../scripts/db-migrate status | grep -v '^applied'; then
+          echo "::error::migrations left pending or modified"; exit 1
+        fi
 
     - name: Contract tests (OpenAPI snapshot, dashboard calls)
       run: uv run --frozen pytest tests/contract -v -p no:cacheprovider
