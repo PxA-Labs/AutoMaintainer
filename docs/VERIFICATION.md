@@ -171,13 +171,23 @@ timeout_seconds: 600                              # optional
   can still alter.
 - The same file can also hold a `change_limits` mapping (maximum changed
   files and lines, denied paths). It is read from the base branch, never from
-  the change; see [Change limits](../ARCHITECTURE.md#change-limits).
+  the change; see [Change limits](../ARCHITECTURE.md#change-limits). Test
+  runner configuration is denied by default; to let the agent edit, for
+  example, `pyproject.toml`, add
+  `change_limits: {allow: ["pyproject.toml"]}` on the base branch.
 
 Without the file, the command is detected, first match wins:
 
 1. **pytest**, when there is a `tests/` directory, a `pytest.ini`, a
    `[tool.pytest...]` table in `pyproject.toml`, or `[tool:pytest]` in
-   `setup.cfg`: `<VERIFY_PYTHON> -m pytest -q`.
+   `setup.cfg`: `<VERIFY_PYTHON> -P -c <launcher> -q`, where the launcher
+   appends the repository root to the **end** of `sys.path` and runs
+   pytest. Under plain `python -m pytest` the root comes first, so a root
+   module named after anything pytest imports (`pytest.py`, `pluggy.py`, or
+   a standard-library name such as `argparse.py`) would replace it and could
+   make a failing suite exit 0. With the root last, installed and
+   standard-library modules always win, and tests can still import packages
+   from the repository root. `-P` needs Python 3.11 or later.
 2. **npm**, when `package.json` has a `scripts.test` other than the `npm init`
    placeholder: `npm test --silent`.
 3. Otherwise `skipped` with "no tests detected".
@@ -192,7 +202,7 @@ Without the file, the command is detected, first match wins:
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
 | `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail). The PR body shows the last 3000 characters. |
-| `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. |
+| `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. Must be Python 3.11 or later (`-P`); with an older one the detected command fails. |
 
 ## Security model
 
@@ -414,13 +424,46 @@ remote sandbox host setup).
 - **The PR is opened before the result is attached.** Verification runs right
   after the push; the PR body section and status appear moments later. The
   merge gate is unaffected because it reads the status on the head SHA.
-- **The change can still influence its own tests.** Only `.automaintainer.yml`
-  is protected by verification, and the default change-limit denylist does not
-  include test or runner configuration files. When the agent's target file is a test, `conftest.py`,
-  `pytest.ini`, `pyproject.toml` (e.g. `addopts`), `setup.cfg` or
-  `package.json` (the `test` script), the change can skip, rewrite or
-  short-circuit the tests and make verification pass. Human review of such
-  PRs, or required CI that the change cannot modify, remains necessary.
+- **The change can still influence its own tests.** Verification itself only
+  protects `.automaintainer.yml`. The default change-limit denylist also holds
+  test-runner configuration for a human (#480): `conftest.py` at any depth,
+  `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `tox.ini`,
+  `noxfile.py`, `setup.cfg`, `pyproject.toml`, `package.json`,
+  `jest.config.*`, `vitest.config.*`, `vitest.workspace.*`,
+  `vitest.projects.*`, `vite.config.*` (Vitest falls back to its `test`
+  block), `.mocharc*`, `karma.conf.*` and `playwright.config.*`. It also
+  holds files that replace the runner for custom commands such as
+  `python -m pytest` (`-m` puts the working directory first on `sys.path`,
+  so a root `pytest.py` or `pytest/` package would run instead of pytest and
+  could print a pass); `pytest.py`, `pytest/**` and `_pytest/**` are denied
+  at any depth. npm reads the
+  project `.npmrc` when it runs `npm test` (`script-shell=true` would make it
+  exit 0 without running the script), so `.npmrc` is denied too. A change to
+  one of them gets a draft `needs-human` PR and is never merged, even when
+  verification passes. Test files themselves (`tests/**`, `test_*.py`,
+  `*.test.*`) are **not** denied, because writing and fixing tests is part of
+  the agent's job. Nor is any other file the tests load: setup files
+  (`jest.setup.js`, `tests/__init__.py`), helpers and the source under test
+  can monkeypatch the runner much as `conftest.py` can, and setup-file names
+  are configurable, so denying by name is a partial guard. The same goes for
+  build configuration the runner applies, such as `babel.config.js` or
+  `tsconfig.json`. Denying by name cannot stop a root module that shadows
+  anything pytest imports, standard library included (`argparse.py`,
+  `inspect.py`): under plain `python -m pytest` such a file makes a failing
+  suite exit 0. The detected command puts the root last on `sys.path`
+  instead (see the detection rules above); a custom `test_command` should
+  run `python -P` and add the root the same way, or use the `pytest`
+  executable. A change can still
+  weaken, skip or delete assertions in a test file it edits and make
+  verification pass. No default entry protects a custom `test_command` (a
+  script, `make test`, `tox`): add its entry point to `change_limits.deny`
+  on the base branch, e.g. `deny: ["scripts/test.sh", "Makefile"]`. The
+  Maintainer now sees the verification output (see [Maintainer input](#maintainer-input)), but that
+  is a model reading untrusted output, not a guarantee. Human review, or
+  required CI that the change cannot modify, remains necessary for
+  `MERGE_POLICY=ci`/`auto`. A repository whose fixes routinely touch, say,
+  `pyproject.toml` can re-allow it with `change_limits.allow` on the base
+  branch (see [Per repository](#per-repository-automaintaineryml)).
 - **Event counts are synthetic.** The `TestResultEvent` reports
   `passed_count`/`failed_count` as 1/0 for the whole command; individual test
   counts are not parsed from the output.

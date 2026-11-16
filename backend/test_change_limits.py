@@ -104,6 +104,107 @@ def test_default_denylist_leaves_ordinary_paths_alone(path):
     assert _violations([FileChange(path, 1)]) == []
 
 
+# Test-runner configuration can skip or short-circuit the tests verification
+# runs, so it is held for a human by default (#480).
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("conftest.py", "conftest.py"),
+        ("tests/conftest.py", "conftest.py"),
+        ("backend/tests/unit/conftest.py", "conftest.py"),
+        # pytest >= 9 looks for pytest.toml and .pytest.toml before every
+        # other config file, so leaving them out would bypass the rest.
+        ("pytest.toml", "pytest.toml"),
+        ("backend/pytest.toml", "pytest.toml"),
+        (".pytest.toml", ".pytest.toml"),
+        ("pkg/sub/.pytest.toml", ".pytest.toml"),
+        ("pytest.ini", "pytest.ini"),
+        (".pytest.ini", ".pytest.ini"),
+        ("tox.ini", "tox.ini"),
+        ("noxfile.py", "noxfile.py"),
+        ("setup.cfg", "setup.cfg"),
+        ("pyproject.toml", "pyproject.toml"),
+        ("backend/pyproject.toml", "pyproject.toml"),
+        ("package.json", "package.json"),
+        ("dashboard/package.json", "package.json"),
+        ("jest.config.js", "jest.config.*"),
+        ("web/jest.config.ts", "jest.config.*"),
+        ("vitest.config.mts", "vitest.config.*"),
+        # Vitest reads these too: workspace/projects files redefine what
+        # runs, and vite.config.* holds the test block without a vitest.config.
+        ("vitest.workspace.ts", "vitest.workspace.*"),
+        ("web/vitest.projects.json", "vitest.projects.*"),
+        ("vite.config.ts", "vite.config.*"),
+        ("apps/web/vite.config.mjs", "vite.config.*"),
+        (".mocharc.yml", ".mocharc*"),
+        ("app/.mocharc", ".mocharc*"),
+        ("karma.conf.js", "karma.conf.*"),
+        ("e2e/playwright.config.ts", "playwright.config.*"),
+    ],
+)
+def test_default_denylist_holds_test_runner_configuration(path, pattern):
+    assert cl.denied_by(path, cl.default_limits()) == pattern
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Test files stay writable: the agent legitimately adds and fixes tests.
+        "tests/test_app.py",
+        "test_app.py",
+        "src/app.test.ts",
+        "tests/fixtures/conftest_data.py",
+        "docs/pyproject.md",
+        "src/package_json.py",
+        # Setup files are ordinary modules the tests load; their names are
+        # configurable, so they are not denied by name (VERIFICATION.md).
+        "jest.setup.js",
+        "tests/pytest_toml_helpers.py",
+    ],
+)
+def test_default_denylist_leaves_test_files_alone(path):
+    assert _violations([FileChange(path, 1)]) == []
+
+
+# The default verification command is ``python -m pytest`` run from the
+# repository root, and ``-m`` puts the working directory first on sys.path,
+# so a root ``pytest.py`` or ``pytest/`` package replaces pytest itself and
+# can print a pass without running anything. npm reads the project ``.npmrc``
+# when it runs ``npm test`` (``script-shell=true`` skips the script).
+@pytest.mark.parametrize(
+    "path, pattern",
+    [
+        ("pytest.py", "pytest.py"),
+        ("PYTEST.PY", "pytest.py"),
+        ("backend/pytest.py", "pytest.py"),
+        ("pytest/__main__.py", "**/pytest/**"),
+        ("pytest/__init__.py", "**/pytest/**"),
+        ("backend/pytest/__main__.py", "**/pytest/**"),
+        ("_pytest/main.py", "**/_pytest/**"),
+        ("src/_pytest/config/__init__.py", "**/_pytest/**"),
+        (".npmrc", ".npmrc"),
+        ("web/.npmrc", ".npmrc"),
+    ],
+)
+def test_default_denylist_holds_test_runner_shadows(path, pattern):
+    assert cl.denied_by(path, cl.default_limits()) == pattern
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/pytest_helpers.py",
+        "src/my_pytest.py",
+        "src/pytest_plugin/hooks.py",
+        "docs/pytest.md",
+        "tests/test_pytest.py",
+        "npmrc.example",
+    ],
+)
+def test_default_denylist_leaves_similar_names_alone(path):
+    assert _violations([FileChange(path, 1)]) == []
+
+
 @pytest.mark.parametrize(
     "path, pattern, expected",
     [
@@ -163,6 +264,33 @@ def test_config_overrides_sizes_and_extends_lists():
     assert _violations([FileChange("backend/uv.lock", 1)], limits) == []
     # Allowing one lockfile does not allow the others.
     assert _violations([FileChange("poetry.lock", 1)], limits)
+
+
+def test_allow_re_enables_test_runner_configuration_per_repository():
+    """The escape hatch for repositories whose fixes routinely touch
+    pyproject.toml: allow it on the base branch, keep the rest denied."""
+    limits = cl.limits_from_config(
+        "change_limits:\n  allow: ['pyproject.toml', 'tests/conftest.py']\n"
+    )
+    assert _violations([FileChange("backend/pyproject.toml", 1)], limits) == []
+    assert _violations([FileChange("tests/conftest.py", 1)], limits) == []
+    # An anchored allow entry exempts that file only.
+    assert _violations([FileChange("conftest.py", 1)], limits)
+    assert _violations([FileChange("tox.ini", 1)], limits)
+    assert _violations([FileChange("package.json", 1)], limits)
+
+
+def test_deny_protects_a_custom_test_command_entry_point():
+    """The default list cannot know a custom test_command's script, so the
+    documented remedy is to deny it per repository."""
+    limits = cl.limits_from_config(
+        "change_limits:\n  deny: ['scripts/test.sh', 'Makefile']\n"
+    )
+    assert cl.denied_by("scripts/test.sh", limits) == "scripts/test.sh"
+    assert cl.denied_by("Makefile", limits) == "Makefile"
+    # The built-in entries still apply alongside the added ones.
+    assert cl.denied_by("pytest.toml", limits) == "pytest.toml"
+    assert cl.denied_by("scripts/build.sh", limits) is None
 
 
 def test_allow_cannot_exempt_the_automaintainer_config():

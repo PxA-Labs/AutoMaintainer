@@ -194,11 +194,32 @@ changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
 (`CHANGE_LIMIT_MAX_LINES`, default 500) and a path denylist
 (`CHANGE_LIMIT_DENYLIST`, comma-separated globs replacing the default:
 `.github/workflows/**`, `Dockerfile*`, `docker-compose*.yml`, lockfiles such as
-`uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`,
-`.automaintainer.yml`). A repository can override them in the `change_limits`
+`uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`, test-runner
+configuration, `.automaintainer.yml`). Test-runner configuration (`conftest.py`
+at any depth, `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
+`tox.ini`, `noxfile.py`, `setup.cfg`, `pyproject.toml`, `package.json`,
+`jest.config.*`, `vitest.config.*`, `vitest.workspace.*`, `vitest.projects.*`,
+`vite.config.*`, `.mocharc*`, `karma.conf.*`, `playwright.config.*`) is
+denied because a change to it can skip or short-circuit the tests that
+verification runs and turn a failing change into a passing one (#480). So are
+`pytest.py`, `pytest/**` and `_pytest/**` at any depth, because a custom
+`python -m pytest` from the repository root imports a root module of that
+name instead of pytest, and `.npmrc`, which configures how `npm test` runs.
+Test files, setup files and other modules the tests load are not denied: the
+agent writes tests, so a change can still weaken a test or a module it edits,
+and no name list can catch a root module shadowing something pytest
+imports, standard library included; the detected command puts the
+repository root last on `sys.path` instead (docs/VERIFICATION.md,
+Limitations). No default entry
+protects a custom `test_command`; a repository that sets one should add its
+entry point (a script, a `Makefile`) to `deny`. A glob without `/` matches
+the file name in any directory; one with `/` is anchored at the repository
+root. A repository can override them in the `change_limits`
 section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,
 `allow` exempts globs, never `.automaintainer.yml`); that file is read from the
-**base** branch, so a change cannot relax its own limits. An invalid or
+**base** branch, so a change cannot relax its own limits. For example,
+`allow: ["pyproject.toml"]` lets a repository's agent edit `pyproject.toml`
+while every other runner configuration file stays denied. An invalid or
 unreadable configuration counts as a violation. A change over a limit gets a
 draft PR, the `needs-human` label and a "Change limits exceeded" PR-body
 section, and the Maintainer never merges it under any `MERGE_POLICY`. The
