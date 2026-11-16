@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **verification**: Hold test-runner configuration for a human and stop root modules shadowing pytest ([#484](https://github.com/PxA-Labs/AutoMaintainer/pull/484)) - @purvanshjoshi
 - **db**: Replace the non-re-runnable schema file with versioned migrations ([#475](https://github.com/PxA-Labs/AutoMaintainer/pull/475)) (closes [#473](https://github.com/PxA-Labs/AutoMaintainer/issues/473)) - @purvanshjoshi
 - **workspace**: Key clones by GitHub repository id for agent runs and IDE routes ([#474](https://github.com/PxA-Labs/AutoMaintainer/pull/474)) (closes [#392](https://github.com/PxA-Labs/AutoMaintainer/issues/392)) - @purvanshjoshi
 - **db**: Add runs.repo_name and check tenant references in run and IDE policies ([#472](https://github.com/PxA-Labs/AutoMaintainer/pull/472)) - @purvanshjoshi
