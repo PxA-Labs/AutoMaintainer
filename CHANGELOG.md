@@ -135,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump actions/first-interaction from 3.0.0 to 3.1.0 ([#502](https://github.com/PxA-Labs/AutoMaintainer/pull/502)) - @dependabot[bot]
 - **deps**: Keep mcp on 1.x and drop unused server-only ([#456](https://github.com/PxA-Labs/AutoMaintainer/pull/456)) - @purvanshjoshi
 - **deps**: Bump langchain from 1.4.2 to 1.4.3 in /backend ([#305](https://github.com/PxA-Labs/AutoMaintainer/pull/305)) - @dependabot[bot]
 - **deps**: Pin backend dependencies for reproducible installs ([#204](https://github.com/PxA-Labs/AutoMaintainer/pull/204)) (closes [#121](https://github.com/PxA-Labs/AutoMaintainer/issues/121)) - @SriRamkunamsetty
