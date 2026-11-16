@@ -438,8 +438,16 @@ def _views_root() -> Path:
 
 
 def is_git_clone(clone_dir: Path) -> bool:
-    """True for a real clone. A directory without one is served as it is."""
-    return (Path(clone_dir) / ".git" / "HEAD").is_file()
+    """True for a real clone. A directory without one is served as it is.
+
+    Only paths inside the workspace count: callers pass get_safe_repo_dir
+    results, and this check keeps it that way if one ever does not.
+    """
+    base = os.path.realpath(str(get_base_workspace_dir()))
+    head = os.path.realpath(os.path.join(str(clone_dir), ".git", "HEAD"))
+    if not head.startswith(base + os.sep):
+        return False
+    return os.path.isfile(head)
 
 
 def ide_view_dir(clone_dir: Path, key: str) -> Path:
