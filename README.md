@@ -60,7 +60,7 @@ so reviews and code may come from the smaller model. See
 > Auth and Realtime). Provision your own project:
 > * Create a project at [supabase.com](https://supabase.com).
 > * Apply the migrations in [`supabase/migrations`](./supabase/migrations)
->   with `supabase db push` or `python scripts/db-migrate up`, or paste the
+>   with `supabase db push` or `uv run --project backend python scripts/db-migrate up`, or paste the
 >   generated [`supabase_schema.sql`](./supabase_schema.sql) into the
 >   **Supabase SQL Editor**. They create `organizations`,
 >   `organization_members`, `github_installations`, `repositories`, `runs`,

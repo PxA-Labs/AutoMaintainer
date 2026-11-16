@@ -167,6 +167,9 @@ def applied_migrations(conn) -> dict[str, str]:
     """{version: checksum} recorded in the tracking table (created if missing)."""
     with conn:
         with conn.cursor() as cur:
+            # Take the runner lock first: concurrent CREATE ... IF NOT EXISTS
+            # on a fresh database can still fail with a duplicate error.
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
             cur.execute(TRACKING_DDL)
             cur.execute(
                 f"SELECT version, checksum FROM {TRACKING_SCHEMA}.schema_migrations"
@@ -204,6 +207,10 @@ def up(conn, migrations: list[Migration], *, baseline: str | None = None, log=pr
         if migration.version in applied:
             continue
         skip = baseline is not None and migration.version <= baseline
+        # Read the file once: the executed SQL and the recorded checksum must
+        # describe the same content even if the file changes meanwhile.
+        sql = migration.sql
+        checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
         # One transaction per file: the migration and its tracking row commit
         # together or not at all (``with conn`` rolls back on any exception).
         try:
@@ -211,19 +218,27 @@ def up(conn, migrations: list[Migration], *, baseline: str | None = None, log=pr
                 with conn.cursor() as cur:
                     cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_KEY,))
                     cur.execute(
-                        f"SELECT 1 FROM {TRACKING_SCHEMA}.schema_migrations"
+                        f"SELECT checksum FROM {TRACKING_SCHEMA}.schema_migrations"
                         " WHERE version = %s",
                         (migration.version,),
                     )
-                    if cur.fetchone():
-                        continue  # another runner applied it meanwhile
+                    row = cur.fetchone()
+                    if row:
+                        # Another runner applied it meanwhile; it must have
+                        # applied the same file.
+                        if row[0] != checksum:
+                            raise MigrationError(
+                                f"{migration.filename} was applied by another "
+                                "runner with different content"
+                            )
+                        continue
                     if not skip:
-                        cur.execute(migration.sql)
+                        cur.execute(sql)
                     cur.execute(
                         f"INSERT INTO {TRACKING_SCHEMA}.schema_migrations"
                         " (version, name, checksum, baselined)"
                         " VALUES (%s, %s, %s, %s)",
-                        (migration.version, migration.name, migration.checksum, skip),
+                        (migration.version, migration.name, checksum, skip),
                     )
         except Exception as exc:
             raise MigrationError(

@@ -31,8 +31,12 @@
 -- (IF NOT EXISTS, OR REPLACE, DROP ... IF EXISTS before CREATE), so it can be
 -- applied to:
 --   * an empty database (new deployment);
---   * a database built from any earlier supabase_schema.sql -- it adds what is
---     missing (columns, functions, policies) and keeps every row;
+--   * a database built from an earlier multi-tenant supabase_schema.sql
+--     (one whose runs and logs tables already have org_id) -- it adds what is
+--     missing (columns, functions, policies) and keeps every row. Databases
+--     from the pre-multi-tenant schema (runs/logs without org_id) are not
+--     supported: their rows have no organization to assign; see
+--     docs/DEPLOYMENT.md "Upgrading";
 --   * a database it was already applied to (a no-op).
 -- Every later migration must keep that property: the RLS suite
 -- (backend/tests/rls) applies all migrations a second time and fails if

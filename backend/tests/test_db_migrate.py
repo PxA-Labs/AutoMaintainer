@@ -173,9 +173,11 @@ def test_schema_check_fails_when_out_of_date(tmp_path, capsys):
 class FakeDB:
     """Just enough of a psycopg2 connection: transactions and a tracking table."""
 
-    def __init__(self, recorded=None, fail_on=None):
+    def __init__(self, recorded=None, fail_on=None, race=None):
         self.recorded = dict(recorded or {})  # version -> checksum (committed)
         self.fail_on = fail_on
+        # version -> checksum another runner commits after our initial read
+        self.race = dict(race or {})
         self.executed = []  # committed migration SQL
         self.transactions = 0
         self._pending_sql = []
@@ -211,8 +213,11 @@ class FakeCursor:
         db = self.db
         if statement.startswith("SELECT version, checksum"):
             self._result = list(db.recorded.items())
-        elif statement.startswith("SELECT 1 FROM"):
-            self._result = [(1,)] if params[0] in db.recorded else []
+        elif statement.startswith("SELECT checksum FROM"):
+            row = db.recorded.get(params[0])
+            if row is None and db.race and params[0] in db.race:
+                row = db.race[params[0]]  # committed by another runner
+            self._result = [(row,)] if row is not None else []
         elif statement.startswith("INSERT INTO"):
             db._pending_rows[params[0]] = params[2]
         elif statement.startswith(("SELECT pg_advisory", "\nCREATE SCHEMA")):
@@ -288,3 +293,38 @@ def test_up_and_status_need_a_database_url(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         db_migrate.main(["up"])
     assert exc.value.code == 2
+
+
+def test_up_skips_a_version_another_runner_applied_with_the_same_content(three):
+    first = three[0]
+    db = FakeDB(race={first.version: first.checksum})
+    applied = db_migrate.up(db, three, log=lambda _: None)
+    assert applied == three[1:]
+    assert db.executed == ["SELECT 2;", "SELECT 3;"]
+
+
+def test_up_rejects_a_version_another_runner_applied_with_other_content(three):
+    db = FakeDB(race={three[0].version: "0" * 64})
+    with pytest.raises(db_migrate.MigrationError, match="different content"):
+        db_migrate.up(db, three, log=lambda _: None)
+    assert db.executed == []
+
+
+def test_tracking_table_is_created_under_the_runner_lock(three):
+    statements = []
+
+    class Recording(FakeDB):
+        def cursor(self):
+            cur = FakeCursor(self)
+            real = cur.execute
+
+            def execute(statement, params=None):
+                statements.append(statement)
+                return real(statement, params)
+
+            cur.execute = execute
+            return cur
+
+    db_migrate.applied_migrations(Recording())
+    assert statements[0].startswith("SELECT pg_advisory_xact_lock")
+    assert statements[1] == db_migrate.TRACKING_DDL

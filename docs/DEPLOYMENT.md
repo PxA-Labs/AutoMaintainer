@@ -74,9 +74,13 @@ Use one of these:
 - **Supabase CLI:** `supabase link --project-ref <ref>`, then
   `supabase db push`. If the CLI asks for `supabase/config.toml`, run
   `supabase init` once first. It keeps the existing `supabase/migrations`.
-- **`scripts/db-migrate`** works on any PostgreSQL, including a Supabase
-  project through its direct connection string. It needs only psycopg2,
-  which is a backend dependency:
+- **`scripts/db-migrate`** works on a Supabase project through its direct
+  connection string, or on another PostgreSQL that provides the objects
+  Supabase does: the `anon`, `authenticated` and `service_role` roles and the
+  `auth` schema with `auth.uid()` and `auth.users` (the tests use the
+  stand-in `backend/tests/rls/supabase_shim.sql`). The migrations do not
+  create them, so on a plain PostgreSQL server the first `up` fails. It needs
+  only psycopg2, which is a backend dependency:
 
   ```bash
   export DATABASE_URL='postgresql://postgres:<password>@<host>:5432/postgres'
@@ -100,11 +104,13 @@ it is confusing.
 ### Upgrading
 
 Apply pending migrations before you roll out the new API and worker image:
-`supabase db push` or `scripts/db-migrate up`. If you use the SQL Editor,
+`supabase db push` or
+`uv run --project backend python scripts/db-migrate up`. If you use the SQL Editor,
 paste the new `supabase_schema.sql` again.
 
 **A database created from the old single-file `supabase_schema.sql`** (before
-#473) needs no manual steps. Back it up (Supabase dashboard, Database ->
+#473) needs no manual steps, provided it is the multi-tenant schema (`runs`
+and `logs` have an `org_id` column). Back it up (Supabase dashboard, Database ->
 Backups, or `pg_dump`), then apply the migrations as above. The baseline adopts
 such a database: it creates only what is missing and redefines policies,
 functions, triggers and views to their current form. That covers
@@ -117,10 +123,22 @@ dropped and re-created the `supabase_realtime` publication. The baseline only
 adds `logs`, `runs`, `webhook_events` and `ide_sessions` to it, so any other
 tables you added stay.
 
+Two cases need preparation:
+
+- **Pre-multi-tenant databases** (`runs`/`logs` without `org_id`, from the
+  earliest versions of the file) cannot be adopted: the baseline fails at
+  `runs_org_idx` and rolls back. Existing rows have no organization to assign
+  them to. Export what you need, then create a fresh database from the
+  migrations.
+- **Views of your own that depend on `monthly_usage_summary` or `org_health`**
+  make the baseline's `DROP VIEW` fail (PostgreSQL refuses to drop a view
+  others depend on) and the migration rolls back. Save their definitions
+  (`pg_get_viewdef`), drop them, apply the baseline, then re-create them.
+
 Running the baseline takes short exclusive locks on the tables while it
 replaces their policies and triggers. To record it as applied without running
 it, use `supabase migration repair 20261116000000 --status applied` or
-`scripts/db-migrate up --baseline`. Do that only for a database that already
+`uv run --project backend python scripts/db-migrate up --baseline`. Do that only for a database that already
 has the complete current schema. Otherwise the missing pieces stay missing:
 without `runs.repo_name`, for example, every `POST /start` fails.
 
