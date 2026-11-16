@@ -15,10 +15,12 @@ vi.mock("@/lib/supabase", () => ({
 }));
 
 import AuthCallbackPage from "@/app/auth/callback/page";
+import { RETURN_TO_STORAGE_KEY } from "@/lib/auth-return";
 
 describe("auth callback page", () => {
   beforeEach(() => {
     replace.mockReset();
+    window.sessionStorage.clear();
     window.history.replaceState(null, "", "/auth/callback/");
   });
 
@@ -27,6 +29,15 @@ describe("auth callback page", () => {
     render(<AuthCallbackPage />);
     expect(screen.getByText(/completing sign-in/i)).toBeTruthy();
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+  });
+
+  it("returns to the page sign-in was started from", async () => {
+    window.sessionStorage.setItem(RETURN_TO_STORAGE_KEY, "/?run=abc-123");
+    sessionResult = { data: { session: { access_token: "t" } }, error: null };
+    render(<AuthCallbackPage />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/?run=abc-123"));
+    expect(replace).not.toHaveBeenCalledWith("/");
+    expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBeNull();
   });
 
   it("shows the provider error when sign-in failed", async () => {

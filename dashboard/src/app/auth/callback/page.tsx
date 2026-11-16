@@ -6,6 +6,7 @@ import Link from "next/link";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { getBrowserClient } from "@/lib/supabase";
 import { readOAuthError } from "@/lib/oauth";
+import { consumeReturnTo } from "@/lib/auth-return";
 
 /**
  * OAuth landing page (redirectTo in AuthProvider.signInWithGitHub).
@@ -26,8 +27,14 @@ export default function AuthCallbackPage() {
     const urlError = readOAuthError(window.location.href);
     const supabase = getBrowserClient();
 
+    // Back to where sign-in was started (AuthProvider.signInWithGitHub). Read
+    // once: finish() can run twice (auth event and getSession) and the
+    // stored value is forgotten on the first read.
+    let returnTo: string | null = null;
     const finish = () => {
-      if (active) router.replace("/");
+      if (!active) return;
+      returnTo ??= consumeReturnTo();
+      router.replace(returnTo);
     };
 
     // Covers the case where the exchange completes after getSession resolved.

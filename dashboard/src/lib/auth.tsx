@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { User, Session, AuthError } from '@supabase/supabase-js';
 import { getBrowserClient, getSupabaseConfigError } from '@/lib/supabase';
+import { rememberReturnTo } from '@/lib/auth-return';
 
 interface AuthContextType {
   user: User | null;
@@ -80,6 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signInWithGitHub = async () => {
+    // Come back to this page (and its ?run=) rather than "/" after OAuth.
+    rememberReturnTo();
     const supabase = getBrowserClient();
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'github',

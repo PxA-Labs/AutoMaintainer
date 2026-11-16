@@ -1,0 +1,98 @@
+{
+  "AST_PARSING_FAILED": {
+    "label": "Code map unavailable",
+    "help": "The repository's syntax tree could not be built. The run continues without the code map, so the agents see less of the codebase."
+  },
+  "COMMENT_ISSUE_FAILED": {
+    "label": "Issue comment failed",
+    "help": "The decision could not be posted as a comment on the GitHub issue. The run continues; check the GitHub App's issue permissions."
+  },
+  "CREATE_ISSUE_FAILED": {
+    "label": "Issue creation failed",
+    "help": "The proposed task could not be opened as a GitHub issue. The run continues; check the GitHub App's issue permissions."
+  },
+  "DECISION_PARSE_FAILED": {
+    "label": "Agent decision rejected",
+    "help": "An agent's decision was not in the expected format and was treated as a rejection."
+  },
+  "FETCH_ISSUE_FAILED": {
+    "label": "Could not fetch issue",
+    "help": "GitHub did not return the target issue (an outage, a rate limit or a credentials problem). Starting the run again later may succeed."
+  },
+  "GITHUB_AUTH_UNAVAILABLE": {
+    "label": "GitHub access unavailable",
+    "help": "The run could not get GitHub credentials for this repository. Check that the GitHub App is installed on it and linked to your organization."
+  },
+  "GITNEXUS_INDEXING_FAILED": {
+    "label": "Code index unavailable",
+    "help": "Indexing the repository failed. The run continues without the index, so the agents see less of the codebase."
+  },
+  "INVALID_GENERATED_CODE": {
+    "label": "Generated code rejected",
+    "help": "The implementer's output failed validation (for example it did not parse or dropped most of the file), so nothing was committed."
+  },
+  "INVALID_REPOSITORY": {
+    "label": "Invalid repository",
+    "help": "The run has no valid owner/repo target. Set the target repository and start again."
+  },
+  "INVALID_TARGET_ISSUE": {
+    "label": "Target issue not found",
+    "help": "The issue does not exist in this repository or is not visible to the run's credentials. Correct the issue number; running again unchanged fails the same way."
+  },
+  "LLM_EXECUTION_FAILED": {
+    "label": "Language model unavailable",
+    "help": "The language model did not return a response (an outage or a rate limit). Try again in a few minutes."
+  },
+  "MERGE_FAILED": {
+    "label": "Merge failed",
+    "help": "GitHub did not merge the pull request, for example because its head changed or a branch protection rule blocked it. The pull request stays open."
+  },
+  "NO_TARGET_FILE": {
+    "label": "No target file",
+    "help": "The task does not reference a repository file (such as path/to/file.py:10-25), so there is nothing to change. Add a file reference to the issue."
+  },
+  "PROTECTED_PATH": {
+    "label": "Protected path",
+    "help": "The change touches a path the change limits deny (workflows, lockfiles, secrets, test configuration, .automaintainer.yml), so nothing was committed. A person has to make this change."
+  },
+  "PR_COMMENT_FAILED": {
+    "label": "Pull request comment failed",
+    "help": "The review could not be posted on the pull request. The run continues; check the GitHub App's pull request permissions."
+  },
+  "PR_DIFF_UNAVAILABLE": {
+    "label": "Pull request diff unavailable",
+    "help": "The pull request's diff could not be loaded, so it was not reviewed or merged. Starting the run again later may succeed."
+  },
+  "RATE_LIMIT_REACHED": {
+    "label": "Rate limit reached",
+    "help": "The language model's rate limit was reached. Wait a minute before starting another run."
+  },
+  "REPO_CLONE_FAILED": {
+    "label": "Repository clone failed",
+    "help": "The worker could not clone the repository, so the run had no working copy. Check that the GitHub App can read the repository and the worker can reach GitHub, then start the run again."
+  },
+  "REPO_SYNC_FAILED": {
+    "label": "Repository update failed",
+    "help": "Not a run failure: updating the existing local clone failed, so the run continued on the cached copy, which may be behind the latest commits."
+  },
+  "RUN_CANCELLED": {
+    "label": "Run cancelled",
+    "help": "The run was stopped before it finished."
+  },
+  "RUN_FAILED": {
+    "label": "Run failed",
+    "help": "The run stopped on an unexpected error. The message has the details; the worker log has the full trace."
+  },
+  "TARGET_FILE_TOO_LARGE": {
+    "label": "Target file too large",
+    "help": "The file is above the size the implementer can rewrite in full, so the run stopped rather than commit a truncated file."
+  },
+  "TARGET_IS_PULL_REQUEST": {
+    "label": "Target is a pull request",
+    "help": "The number given is a pull request, not an issue. Target an issue instead."
+  },
+  "VERIFICATION_STATUS_FAILED": {
+    "label": "Verification status not recorded",
+    "help": "The verification result could not be posted on the pull request, so under the ci merge policy it was not merged. Starting the run again later may succeed."
+  }
+}
