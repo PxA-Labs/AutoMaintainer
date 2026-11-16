@@ -71,6 +71,34 @@ green verification, including merges by people.
 The GitHub App needs the **Commit statuses: read & write** repository
 permission.
 
+### Maintainer input
+
+The Maintainer's review prompt includes the `VerificationResult` of the
+current iteration (`agents._verification_review_section`; the Implementer
+hands it over as `verification` in the graph state):
+
+- The status (`passed`, `failed`, `error`, `skipped`, anything else shown as
+  `unknown`) and the exit code are set by AutoMaintainer and appear outside
+  the data block.
+- The summary, the command (it can come from `.automaintainer.yml`) and the
+  output tail are attacker-influenced, so they go inside an escaped
+  `<untrusted-data source="verification output">` block. The tail is cut to
+  the same last 3000 characters (`PR_OUTPUT_TAIL_CHARS`) as the PR body.
+- When no result exists (for example a node run outside the pipeline), the
+  prompt says explicitly that verification was **not run** and the change is
+  untested.
+
+The system prompt (`MAINTAINER_VERIFICATION_INSTRUCTIONS`) tells the
+Maintainer that the output is evidence, not instructions, and that on
+`failed`, `error`, `skipped` or not run it must reject, unless its reasons
+explain specifically why the result is unrelated to the change (for example a
+failure in code the change does not touch). This is guidance for the model,
+not a gate: an approval that explains a failure away reaches the merge policy
+like any other approval. The gate stays fail closed: `MERGE_POLICY=ci` still
+requires the `automaintainer/verification` status to be `success`, whatever
+the Maintainer decides, and `human` never merges. `auto` merges on approval
+alone, as before.
+
 ### Effect on existing deployments
 
 - With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image
@@ -104,6 +132,9 @@ timeout_seconds: 600                              # optional
   so a change cannot rewrite the configured command. This guards that file
   only; see Limitations for the test files and runner configuration a change
   can still alter.
+- The same file can also hold a `change_limits` mapping (maximum changed
+  files and lines, denied paths). It is read from the base branch, never from
+  the change; see [Change limits](../ARCHITECTURE.md#change-limits).
 
 Without the file, the command is detected, first match wins:
 
@@ -347,7 +378,8 @@ remote sandbox host setup).
   after the push; the PR body section and status appear moments later. The
   merge gate is unaffected because it reads the status on the head SHA.
 - **The change can still influence its own tests.** Only `.automaintainer.yml`
-  is protected. When the agent's target file is a test, `conftest.py`,
+  is protected by verification, and the default change-limit denylist does not
+  include test or runner configuration files. When the agent's target file is a test, `conftest.py`,
   `pytest.ini`, `pyproject.toml` (e.g. `addopts`), `setup.cfg` or
   `package.json` (the `test` script), the change can skip, rewrite or
   short-circuit the tests and make verification pass. Human review of such
@@ -362,8 +394,8 @@ remote sandbox host setup).
   `_ci_checks_passed` requires at least one successful check; a passed
   verification is one. Repositories that want an independent CI signal as
   well should make their CI job a required check in branch protection.
-- **Test output does not reach the Maintainer prompt yet**; the Maintainer
-  sees it only through the PR. Feeding it into the review is a follow-up of
-  #411, as are change limits and audit rows.
+- **No audit rows yet.** Verification results are visible in the PR, the
+  commit status and the Maintainer prompt (see [Maintainer input](#maintainer-input)),
+  but are not written to an audit table; that remains a follow-up of #411.
 - **Windows hosts** kill the process tree with `taskkill /T`; POSIX hosts use
   a new session and `killpg`.
