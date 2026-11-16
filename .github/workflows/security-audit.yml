@@ -12,7 +12,8 @@ on:
       - 'backend/**'
       - 'dashboard/**'
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   python-security:
