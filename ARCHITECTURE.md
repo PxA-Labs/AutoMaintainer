@@ -196,13 +196,16 @@ changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
 `.github/workflows/**`, `Dockerfile*`, `docker-compose*.yml`, lockfiles such as
 `uv.lock` or `package-lock.json`, `.env*`, `*.pem`, `*.key`, test-runner
 configuration, `.automaintainer.yml`). Test-runner configuration (`conftest.py`
-at any depth, `pytest.ini`, `.pytest.ini`, `tox.ini`, `noxfile.py`,
-`setup.cfg`, `pyproject.toml`, `package.json`, `jest.config.*`,
-`vitest.config.*`, `.mocharc*`, `karma.conf.*`, `playwright.config.*`) is
+at any depth, `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`,
+`tox.ini`, `noxfile.py`, `setup.cfg`, `pyproject.toml`, `package.json`,
+`jest.config.*`, `vitest.config.*`, `vitest.workspace.*`, `vitest.projects.*`,
+`vite.config.*`, `.mocharc*`, `karma.conf.*`, `playwright.config.*`) is
 denied because a change to it can skip or short-circuit the tests that
 verification runs and turn a failing change into a passing one (#480). Test
-files are not denied: the agent writes tests, so a change can still weaken a
-test it edits (docs/VERIFICATION.md, Limitations). A glob without `/` matches
+files, setup files and other modules the tests load are not denied: the agent
+writes tests, so a change can still weaken a test or a module it edits
+(docs/VERIFICATION.md, Limitations). A repository with a custom `test_command`
+should add its entry point (a script, a `Makefile`) to `deny`. A glob without `/` matches
 the file name in any directory; one with `/` is anchored at the repository
 root. A repository can override them in the `change_limits`
 section of `.automaintainer.yml` (`max_files`, `max_lines`, `deny` adds globs,

@@ -55,8 +55,11 @@ DEFAULT_MAX_LINES = 500
 # short-circuit the tests that verification runs (``addopts``, a conftest
 # hook, a ``test`` script) and so turn a failing change into a passing one
 # (#480). Test files themselves are not denied: writing tests is part of the
-# agent's job, and the Maintainer sees the verification output instead. A
-# repository that wants the agent to edit one of these files lists it under
+# agent's job, and the Maintainer sees the verification output instead. Nor
+# are setup files or other modules the tests load, whose names are
+# configurable, so this is a partial guard. A repository with a custom
+# ``test_command`` should deny its entry point (a script, a Makefile) with
+# ``change_limits.deny``. A repository that wants the agent to edit one of these files lists it under
 # ``change_limits.allow`` in its base-branch ``.automaintainer.yml``.
 DEFAULT_DENYLIST = (
     ".github/workflows/**",
@@ -78,6 +81,9 @@ DEFAULT_DENYLIST = (
     # Test runners and their configuration (Python, then JavaScript). Names
     # without "/" match in any directory, so nested conftest.py files count.
     "conftest.py",
+    # pytest >= 9 checks pytest.toml and .pytest.toml before the others.
+    "pytest.toml",
+    ".pytest.toml",
     "pytest.ini",
     ".pytest.ini",
     "tox.ini",
@@ -87,6 +93,11 @@ DEFAULT_DENYLIST = (
     "package.json",
     "jest.config.*",
     "vitest.config.*",
+    # Vitest also reads workspace/projects files, and falls back to the test
+    # block of vite.config.* when there is no vitest.config.*.
+    "vitest.workspace.*",
+    "vitest.projects.*",
+    "vite.config.*",
     ".mocharc*",
     "karma.conf.*",
     "playwright.config.*",

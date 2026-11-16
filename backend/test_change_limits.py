@@ -112,6 +112,12 @@ def test_default_denylist_leaves_ordinary_paths_alone(path):
         ("conftest.py", "conftest.py"),
         ("tests/conftest.py", "conftest.py"),
         ("backend/tests/unit/conftest.py", "conftest.py"),
+        # pytest >= 9 looks for pytest.toml and .pytest.toml before every
+        # other config file, so leaving them out would bypass the rest.
+        ("pytest.toml", "pytest.toml"),
+        ("backend/pytest.toml", "pytest.toml"),
+        (".pytest.toml", ".pytest.toml"),
+        ("pkg/sub/.pytest.toml", ".pytest.toml"),
         ("pytest.ini", "pytest.ini"),
         (".pytest.ini", ".pytest.ini"),
         ("tox.ini", "tox.ini"),
@@ -124,6 +130,12 @@ def test_default_denylist_leaves_ordinary_paths_alone(path):
         ("jest.config.js", "jest.config.*"),
         ("web/jest.config.ts", "jest.config.*"),
         ("vitest.config.mts", "vitest.config.*"),
+        # Vitest reads these too: workspace/projects files redefine what
+        # runs, and vite.config.* holds the test block without a vitest.config.
+        ("vitest.workspace.ts", "vitest.workspace.*"),
+        ("web/vitest.projects.json", "vitest.projects.*"),
+        ("vite.config.ts", "vite.config.*"),
+        ("apps/web/vite.config.mjs", "vite.config.*"),
         (".mocharc.yml", ".mocharc*"),
         ("app/.mocharc", ".mocharc*"),
         ("karma.conf.js", "karma.conf.*"),
@@ -144,7 +156,10 @@ def test_default_denylist_holds_test_runner_configuration(path, pattern):
         "tests/fixtures/conftest_data.py",
         "docs/pyproject.md",
         "src/package_json.py",
+        # Setup files are ordinary modules the tests load; their names are
+        # configurable, so they are not denied by name (VERIFICATION.md).
         "jest.setup.js",
+        "tests/pytest_toml_helpers.py",
     ],
 )
 def test_default_denylist_leaves_test_files_alone(path):
@@ -224,6 +239,19 @@ def test_allow_re_enables_test_runner_configuration_per_repository():
     assert _violations([FileChange("conftest.py", 1)], limits)
     assert _violations([FileChange("tox.ini", 1)], limits)
     assert _violations([FileChange("package.json", 1)], limits)
+
+
+def test_deny_protects_a_custom_test_command_entry_point():
+    """The default list cannot know a custom test_command's script, so the
+    documented remedy is to deny it per repository."""
+    limits = cl.limits_from_config(
+        "change_limits:\n  deny: ['scripts/test.sh', 'Makefile']\n"
+    )
+    assert cl.denied_by("scripts/test.sh", limits) == "scripts/test.sh"
+    assert cl.denied_by("Makefile", limits) == "Makefile"
+    # The built-in entries still apply alongside the added ones.
+    assert cl.denied_by("pytest.toml", limits) == "pytest.toml"
+    assert cl.denied_by("scripts/build.sh", limits) is None
 
 
 def test_allow_cannot_exempt_the_automaintainer_config():

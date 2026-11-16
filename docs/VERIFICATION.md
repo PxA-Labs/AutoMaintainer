@@ -420,14 +420,23 @@ remote sandbox host setup).
 - **The change can still influence its own tests.** Verification itself only
   protects `.automaintainer.yml`. The default change-limit denylist also holds
   test-runner configuration for a human (#480): `conftest.py` at any depth,
-  `pytest.ini`, `.pytest.ini`, `tox.ini`, `noxfile.py`, `setup.cfg`,
-  `pyproject.toml`, `package.json`, `jest.config.*`, `vitest.config.*`,
-  `.mocharc*`, `karma.conf.*` and `playwright.config.*`. A change to one of
-  them gets a draft `needs-human` PR and is never merged, even when
+  `pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `tox.ini`,
+  `noxfile.py`, `setup.cfg`, `pyproject.toml`, `package.json`,
+  `jest.config.*`, `vitest.config.*`, `vitest.workspace.*`,
+  `vitest.projects.*`, `vite.config.*` (Vitest falls back to its `test`
+  block), `.mocharc*`, `karma.conf.*` and `playwright.config.*`. A change to
+  one of them gets a draft `needs-human` PR and is never merged, even when
   verification passes. Test files themselves (`tests/**`, `test_*.py`,
   `*.test.*`) are **not** denied, because writing and fixing tests is part of
-  the agent's job: a change can still weaken, skip or delete assertions in a
-  test file it edits and make verification pass. The Maintainer now sees the
+  the agent's job. Nor is any other file the tests load: setup files
+  (`jest.setup.js`, `tests/__init__.py`), helpers and the source under test
+  can monkeypatch the runner much as `conftest.py` can, and setup-file names
+  are configurable, so denying by name is a partial guard. A change can
+  still weaken, skip or delete assertions in such a file it edits and make
+  verification pass. A repository with a custom `test_command` (a script,
+  `make test`, `tox`) is protected only if its entry point is denied: add it
+  to `change_limits.deny` on the base branch, e.g.
+  `deny: ["scripts/test.sh", "Makefile"]`. The Maintainer now sees the
   verification output (see [Maintainer input](#maintainer-input)), but that
   is a model reading untrusted output, not a guarantee. Human review, or
   required CI that the change cannot modify, remains necessary for
