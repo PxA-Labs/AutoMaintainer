@@ -173,12 +173,17 @@ deterministic and runs after everything a model decided: every GitHub user who
 caused the run must have `write`, `maintain` or `admin` permission on the
 repository (`GET /repos/{owner}/{repo}/collaborators/{username}/permission`,
 through the run's installation-scoped client, looked up once per run). For a
-run started with `POST /start` that is the caller's linked GitHub login (from
-their Supabase GitHub identity) and, when the run targets an issue, that
-issue's author too, because the issue body is the task the models follow.
-There is no webhook-started run. An unknown login (no linked GitHub identity,
-e.g. the dev-auth bypass), a bot account (there is no bot allowlist), a
-non-collaborator or a failed lookup holds the PR with
+run started with `POST /start` that is the caller's linked GitHub account
+(the numeric user id of their Supabase GitHub identity) and, when the run
+targets an issue, that issue's author too, because the issue body is the task
+the models follow. Every actor is checked by its GitHub user id: the id is
+resolved to its current login (`GET /user/{account_id}`) before the
+permission lookup, so a renamed account is checked under its new name and a
+freed login re-registered by someone else never stands in for it (#491).
+There is no webhook-started run. An unknown actor (no linked GitHub identity,
+e.g. the dev-auth bypass, or a run queued without the id), a bot account
+(there is no bot allowlist), a non-collaborator or a failed lookup holds the
+PR with
 `merge_status=awaiting_human_review`, like `human`. Such a hold is sticky for
 the run: a redelivery that reviews again finds the earlier `held`
 merge_decisions row and holds again. The gate vouches for who
