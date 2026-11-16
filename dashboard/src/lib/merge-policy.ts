@@ -45,6 +45,11 @@ export interface RepositoryMergePolicy {
   allowed: MergePolicy[];
   /** Whether the caller may change it (org owners and admins). */
   can_edit: boolean;
+  /**
+   * The latest recorded change (Supabase user id and ISO time), or null when
+   * it was never changed through the API or the history could not be read.
+   */
+  last_change?: { changed_by: string; changed_at: string } | null;
 }
 
 /** Whether `policy` is stricter than or equal to `ceiling`. */

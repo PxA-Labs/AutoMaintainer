@@ -22,6 +22,23 @@ function message(err: unknown, fallback: string): string {
   return err instanceof MergePolicyError ? err.message : fallback;
 }
 
+/** Who last changed the setting (a shortened user id) and when. */
+function LastChange({ change }: { change: { changed_by: string; changed_at: string } }) {
+  const when = new Date(change.changed_at);
+  return (
+    <p className="text-[10px] text-muted">
+      Last changed by <span title={change.changed_by}>user {change.changed_by.slice(0, 8)}</span>
+      {Number.isNaN(when.getTime()) ? "" : (
+        <>
+          {" "}
+          on <time dateTime={change.changed_at}>{when.toLocaleString()}</time>
+        </>
+      )}
+      .
+    </p>
+  );
+}
+
 function Panel({ repository }: { repository: MergePolicyRepository }) {
   const selectId = useId();
   const [policy, setPolicy] = useState<RepositoryMergePolicy | null>(null);
@@ -103,6 +120,7 @@ function Panel({ repository }: { repository: MergePolicyRepository }) {
         <span className="text-zinc-300">{MERGE_POLICY_LABELS[policy.effective]}</span>.
         {canEdit ? "" : " Only organization owners and admins can change it."}
       </p>
+      {policy.last_change && <LastChange change={policy.last_change} />}
       <p role="status" className="sr-only">
         {saved ? `Merge policy saved. Effective: ${MERGE_POLICY_LABELS[policy.effective]}.` : ""}
       </p>
