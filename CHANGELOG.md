@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- Keep IDE writes off the default branch and enforce route auth and tenant checks ([#504](https://github.com/PxA-Labs/AutoMaintainer/pull/504)) (closes [#139](https://github.com/PxA-Labs/AutoMaintainer/issues/139), [#210](https://github.com/PxA-Labs/AutoMaintainer/issues/210)) - @purvanshjoshi
 - **agents**: Fail runs on clone failure and report missing target issues as INVALID_TARGET_ISSUE ([#497](https://github.com/PxA-Labs/AutoMaintainer/pull/497)) (closes [#138](https://github.com/PxA-Labs/AutoMaintainer/issues/138), [#142](https://github.com/PxA-Labs/AutoMaintainer/issues/142)) - @purvanshjoshi
 - **agents**: Require a trusted trigger to auto-merge and check limits before commit ([#489](https://github.com/PxA-Labs/AutoMaintainer/pull/489)) (closes [#488](https://github.com/PxA-Labs/AutoMaintainer/issues/488)) - @purvanshjoshi
 - **verification**: Hold test-runner configuration for a human and stop root modules shadowing pytest ([#484](https://github.com/PxA-Labs/AutoMaintainer/pull/484)) - @purvanshjoshi
