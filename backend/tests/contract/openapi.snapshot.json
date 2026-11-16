@@ -3,6 +3,17 @@
     "schemas": {
       "FileCreateRequest": {
         "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
           "commit_message": {
             "anyOf": [
               {
@@ -37,6 +48,17 @@
       },
       "FileUpdateRequest": {
         "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
           "commit_message": {
             "anyOf": [
               {
@@ -742,6 +764,22 @@
                 }
               ],
               "title": "Commit Message"
+            }
+          },
+          {
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Branch"
             }
           },
           {

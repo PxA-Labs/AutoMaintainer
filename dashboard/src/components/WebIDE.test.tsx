@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 // Monaco is replaced by a textarea that exposes the same value/onChange contract.
 vi.mock("@monaco-editor/react", () => ({
@@ -112,6 +112,36 @@ describe("WebIDE", () => {
 
     await waitFor(() => expect(screen.getByTestId("editor")).toHaveProperty("value", "my edit"));
     expect(fileGets()).toHaveLength(1);
+  });
+
+  it("keeps a saved file staged, shows its working branch and proposes it (#139)", async () => {
+    render(<WebIDE repoUrl="octo/a" />);
+    await openReadme();
+    await act(async () => resolveFile("octo/a", fileJson("v1")));
+    fireEvent.change(await screen.findByTestId("editor"), { target: { value: "v2" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    const save = pending.find((p) => p.init?.method === "POST");
+    expect(save).toBeDefined();
+    pending.splice(pending.indexOf(save!), 1);
+    await act(async () =>
+      save!.resolve(
+        new Response(JSON.stringify({ status: "updated", branch: "automaintainer/ide-abc123" }))
+      )
+    );
+
+    expect((await screen.findByRole("status")).textContent).toContain("automaintainer/ide-abc123");
+    fireEvent.click(screen.getByRole("button", { name: /^propose \(1\)$/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^propose changes$/i }));
+    fireEvent.change(await screen.findByLabelText(/pr title/i), { target: { value: "Edit readme" } });
+    fireEvent.click(screen.getByRole("button", { name: /create pull request/i }));
+
+    const propose = calls.find((c) => c.url.endsWith("/propose-changes"));
+    expect(propose).toBeDefined();
+    expect(JSON.parse(String(propose!.init?.body)).changes).toEqual([
+      { path: "README.md", content: "v2", status: "modified" },
+    ]);
   });
 
   it("reports unsaved edits to the parent", async () => {
