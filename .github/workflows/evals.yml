@@ -26,7 +26,8 @@ on:
         required: false
         default: 'llama-3.3-70b-versatile'
 
-permissions: read-all
+permissions:
+  contents: read
 
 # Same uv version as ci-backend.yml (keep in step with the Dockerfile).
 env:

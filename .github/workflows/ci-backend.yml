@@ -17,7 +17,8 @@ on:
 # Workflow changes also run this suite: backend/tests/test_workflow_hygiene.py
 # statically checks every workflow file.
 
-permissions: read-all
+permissions:
+  contents: read
 
 # Backend dependencies are managed with uv: backend/pyproject.toml declares
 # them and backend/uv.lock pins them (no requirements.txt is committed).

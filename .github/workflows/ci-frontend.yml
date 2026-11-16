@@ -12,7 +12,8 @@ on:
       - 'dashboard/**'
       - '.github/workflows/ci-frontend.yml'
 
-permissions: read-all
+permissions:
+  contents: read
 
 jobs:
   build-and-lint:

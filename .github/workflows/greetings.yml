@@ -1,8 +1,7 @@
 name: Greetings
 on: [pull_request_target, issues]
 permissions:
-  issues: write
-  pull-requests: write
+  contents: read
 jobs:
   greeting:
     runs-on: ubuntu-latest

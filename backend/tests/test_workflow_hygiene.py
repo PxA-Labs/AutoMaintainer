@@ -5,7 +5,9 @@ These guard CI hygiene that used to regress silently:
 - every third-party action is pinned to a full 40-character commit SHA with a
   ``# vX.Y.Z`` comment, so Dependabot can bump it and a reviewer can read it;
 - every ``github/codeql-action`` step runs the same SHA (mismatched init and
-  analyze versions made CodeQL fail on main).
+  analyze versions made CodeQL fail on main);
+- the top-level token permissions are read-only, and write scopes are
+  granted only to the jobs that need them.
 """
 
 import re
@@ -88,7 +90,26 @@ def test_all_codeql_action_steps_use_one_sha():
     assert len(shas) == 1, shas
 
 
+def _load(wf):
+    return yaml.safe_load(wf.read_text(encoding="utf-8"))
+
+
 def test_workflows_are_valid_yaml():
     for wf in WORKFLOWS:
-        data = yaml.safe_load(wf.read_text(encoding="utf-8"))
+        data = _load(wf)
         assert isinstance(data, dict) and "jobs" in data, wf.name
+
+
+def test_top_level_permissions_are_read_only():
+    # The workflow-wide default is contents: read (or no scopes at all); any
+    # write scope is granted per job, so a new job never inherits write access.
+    for wf in WORKFLOWS:
+        perms = _load(wf).get("permissions")
+        assert perms in ({"contents": "read"}, {}), f"{wf.name}: {perms!r}"
+
+
+def test_no_job_uses_blanket_permissions():
+    for wf in WORKFLOWS:
+        for job_name, job in _load(wf)["jobs"].items():
+            perms = job.get("permissions", {})
+            assert isinstance(perms, dict), f"{wf.name}:{job_name}: {perms!r}"

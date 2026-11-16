@@ -16,7 +16,8 @@ on:
       - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
 
-permissions: read-all
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
