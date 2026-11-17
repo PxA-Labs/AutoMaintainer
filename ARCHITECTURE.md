@@ -3,7 +3,7 @@
 This document describes the system as it is implemented on `main`. Each
 section names the source file it is based on. When the code changes, update
 the section that names it. No test checks this document; the agent-graph
-diagram is checked by hand against `backend/agents.py` (`build_graph()`).
+diagram is checked by hand against `backend/automaintainer/_runtime/agents.py` (`build_graph()`).
 
 For deployment topology, environment variables and the security checklist,
 see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md). For the eval harness, see
@@ -53,12 +53,12 @@ flowchart LR
 | Component | Code | Role |
 | --- | --- | --- |
 | API (control plane) | `backend/main.py` | Authenticates requests, authorizes them against the caller's organization, creates `runs` rows and enqueues Celery tasks, serves the IDE file routes, inline assist, webhooks and the opt-in terminal. It does not run the agent graph. |
-| Agent worker | `backend/tasks.py`, `backend/agents.py` | Consumes the `agent_runs` queue and runs the LangGraph pipeline for one run at a time per process (`worker_prefetch_multiplier=1`). |
+| Agent worker | `backend/tasks.py`, `backend/automaintainer/_runtime/agents.py` | Consumes the `agent_runs` queue and runs the LangGraph pipeline for one run at a time per process (`worker_prefetch_multiplier=1`). |
 | Maintenance worker and beat | `backend/tasks.py`, `backend/webhook_processor.py`, `backend/celery_app.py` | Periodic jobs: `cleanup_stale_runs` (every 5 min), `process_webhook_events` (every 5 min), `sync_repositories` (every 6 h). |
-| Redis | `backend/celery_app.py`, `backend/redis_locks.py`, `backend/quotas.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
+| Redis | `backend/celery_app.py`, `backend/automaintainer/_runtime/redis_locks.py`, `backend/quotas.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
 | Supabase | `supabase_schema.sql` | Postgres with Row Level Security, Auth (GitHub OAuth), and Realtime for live logs. |
 | Dashboard | `dashboard/` | Next.js 16 static export: run control, live logs, run history, admin page, Monaco-based Web IDE, terminal client. |
-| GitNexus | `backend/agents.py`, `backend/main.py` | The worker indexes each clone with `gitnexus analyze` / `gitnexus index` and gives the LLM GitNexus tools over MCP (stdio). The API also starts `gitnexus serve` at startup. Every GitNexus step is best-effort; on failure the agents use a plain completion. |
+| GitNexus | `backend/automaintainer/_runtime/agents.py`, `backend/main.py` | The worker indexes each clone with `gitnexus analyze` / `gitnexus index` and gives the LLM GitNexus tools over MCP (stdio). The API also starts `gitnexus serve` at startup. Every GitNexus step is best-effort; on failure the agents use a plain completion. |
 
 The API and the `agent_runs` worker must share the workspace directory: the
 worker clones repositories there and the IDE routes read them back. See
@@ -103,11 +103,11 @@ frees the lock.
 
 ## The agent pipeline (LangGraph)
 
-Source: `backend/agents.py`, `build_graph()`. The node ids below are
+Source: `backend/automaintainer/_runtime/agents.py`, `build_graph()`. The node ids below are
 the ids registered with `StateGraph`. The names in parentheses are the
 display names used in logs and the dashboard.
 
-<!-- agent-graph: checked by hand against backend/agents.py, build_graph() -->
+<!-- agent-graph: checked by hand against backend/automaintainer/_runtime/agents.py, build_graph() -->
 ```mermaid
 flowchart TD
     __start__([START])
@@ -145,7 +145,7 @@ injected so far; the nodes still read the module-level clients.
 
 | Node | What it does |
 | --- | --- |
-| `architect` | **Targeted mode** (`target_issue` set): fetches that issue and uses it as the directive. The run aborts if the issue cannot be fetched, if the number is a pull request, or if the text names no repository file. **Autonomous mode**: reads the root file list and README through the GitHub API, syncs the local clone, indexes it with GitNexus, builds an AST map (`ast_indexer.py`, tree-sitter), and asks the LLM for a directive. The run aborts if the directive names no target file. |
+| `architect` | **Targeted mode** (`target_issue` set): fetches that issue and uses it as the directive. The run aborts if the issue cannot be fetched, if the number is a pull request, or if the text names no repository file. **Autonomous mode**: reads the root file list and README through the GitHub API, syncs the local clone, indexes it with GitNexus, builds an AST map (`backend/automaintainer/_runtime/ast_indexer.py`, tree-sitter), and asks the LLM for a directive. The run aborts if the directive names no target file. |
 | `brainstormer` | In autonomous mode, asks the LLM for one feature and opens a GitHub issue for it. The issue carries a hidden run marker. In targeted mode, it reuses the target issue. It is also the resume point after a redelivery (see [Idempotent side effects](#idempotent-side-effects)). |
 | `pm` | Asks the LLM to approve or reject the change. It comments the decision on the issue, and closes the issue on rejection, but only if the agent opened it. A human-filed issue stays open. Targeted runs go through this review too. |
 | `implementer` | Rewrites **one whole file**: the target file on the default branch, or on the PR branch in later iterations. It refuses files larger than `IMPLEMENTER_MAX_FILE_CHARS` (default 60 000). The model output is validated by `normalize_generated_code` (refusals, truncated output with `finish_reason=length`, ambiguous code fences, empty output) and `validate_generated_code`: a syntax check for Python (`ast`), JSON, TOML and YAML plus a heuristic bracket check for JS/TS, and a shrink guard that refuses a rewrite keeping less than `IMPLEMENTER_MIN_SIZE_RATIO` (default 0.4) of a file larger than `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` (default 2048) unless the directive explicitly asks for removal. The change is committed to a run-scoped branch and checked against the change limits (see [Change limits](#change-limits)); the node then opens a PR or reuses the existing one, and the change is verified with the repository's tests (see [Verification](#verification)). |
@@ -154,7 +154,7 @@ injected so far; the nodes still read the module-level clients.
 ### Structured verdicts
 
 The PM and the Maintainer answer with a JSON object validated by pydantic
-(`AgentDecision`, `MaintainerDecision` in `backend/agents.py`):
+(`AgentDecision`, `MaintainerDecision` in `backend/automaintainer/_runtime/agents.py`):
 `{"verdict": "approve" | "reject", "reasons": [...], "blocking_issues": [...]}`,
 plus `requested_changes` for the Maintainer (`decision` is accepted as an alias
 of `verdict`). An approval that lists blocking issues is invalid. A reply that
@@ -179,7 +179,7 @@ re-setting the current value records nothing. Members read the changes with
 `GET /repositories/{id}/merge-policy/history` (newest first, `limit` at
 most 100), and the `GET` response carries the latest one as `last_change`.
 The run uses the stricter of the ceiling and the setting,
-read at the merge decision (`backend/merge_policy.py`). It fails closed: if
+read at the merge decision (`backend/automaintainer/_runtime/merge_policy.py`). It fails closed: if
 the setting cannot be read the run uses `human` and records
 `repository merge policy unreadable (fail closed)`, and if the run's `runs`
 or `repositories` row is missing (PostgREST returns a row hidden by RLS, a
@@ -201,7 +201,7 @@ reason when the repository lowered it:
 Under `ci` and `auto`, the merge is also skipped when the review comment could
 not be posted, when the diff the Maintainer saw was incomplete (truncated, or
 a file without a patch), when the change exceeds the change limits, and when
-the run's trigger is not trusted (`backend/trust.py`, #487). The last gate is
+the run's trigger is not trusted (`backend/automaintainer/_runtime/trust.py`, #487). The last gate is
 deterministic and runs after everything a model decided: every GitHub user who
 caused the run must have `write`, `maintain` or `admin` permission on the
 repository (`GET /repos/{owner}/{repo}/collaborators/{username}/permission`,
@@ -242,7 +242,7 @@ them is still committed and opened as a draft for a human.
 
 ### Verification
 
-After each Implementer push, `backend/verification.py` checks out the PR
+After each Implementer push, `backend/automaintainer/_runtime/verification.py` checks out the PR
 head and runs the repository's tests: the command from `.automaintainer.yml`
 at the repository root, otherwise a detected `pytest` or `npm test`. They run
 through `SANDBOX_BACKEND` (the `SandboxRunner` adapter). Running them on the
@@ -258,7 +258,7 @@ docs/VERIFICATION.md. Details, settings and the security model are in
 ### Change limits
 
 Before the Implementer commits to the run branch (and before every later
-push to it), `backend/change_limits.py` measures the change against the base branch:
+push to it), `backend/automaintainer/_runtime/change_limits.py` measures the change against the base branch:
 changed files (`CHANGE_LIMIT_MAX_FILES`, default 10), changed lines
 (`CHANGE_LIMIT_MAX_LINES`, default 500) and a path denylist
 (`CHANGE_LIMIT_DENYLIST`, comma-separated globs replacing the default:
@@ -311,8 +311,8 @@ The guarantee against an unreviewed merge is `MERGE_POLICY=human`.
 ### LLM access
 
 Models: `llama-3.3-70b-versatile` on Groq, with `llama-3.1-8b-instant` as a
-silent fallback on the tool path. Source: `backend/agents.py`,
-`backend/rate_limiter.py`.
+silent fallback on the tool path. Source: `backend/automaintainer/_runtime/agents.py`,
+`backend/automaintainer/_runtime/rate_limiter.py`.
 
 - **Tool path first.** `run_llm_with_tools` runs a LangGraph ReAct agent with
   the GitNexus MCP tools. Its model is
@@ -326,7 +326,7 @@ silent fallback on the tool path. Source: `backend/agents.py`,
   GitNexus is not installed), the node falls back to a plain completion with
   `llama-3.3-70b-versatile` only (`run_llm_with_rate_limit`). Inline assist in
   the Web IDE also uses the 70B model only.
-- **Key rotation and budgets.** All calls go through `rate_limiter.py`, which
+- **Key rotation and budgets.** All calls go through `backend/automaintainer/_runtime/rate_limiter.py`, which
   rotates `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_19` and enforces
   client-side request and token budgets per key (`GROQ_REQUESTS_PER_MINUTE`,
   default 30; `GROQ_TOKENS_PER_MINUTE`, default 6000). The manager is an
@@ -579,7 +579,7 @@ Source: `backend/main.py`.
   `/admin/metrics` and `/admin/runs` require an org admin.
 - **Repository routes** (`/repo/{owner/name}/...`) check that the repository
   belongs to the caller's organization. Repository names and file paths are
-  validated. `workspace.py` refuses paths that leave the clone, including
+  validated. `backend/automaintainer/_runtime/workspace.py` refuses paths that leave the clone, including
   through symlinks and `.git/`.
 - **`AUTH_DEV_BYPASS=true`** trusts every request as a fixed development user.
   It is ignored, and refused at startup, when `ENVIRONMENT=production`.
@@ -623,7 +623,7 @@ refused without completing the handshake.
 
 ## GitHub authentication
 
-Source: `backend/github_app.py`. The mode is set by `GITHUB_AUTH_MODE`:
+Source: `backend/automaintainer/_runtime/github_app.py`. The mode is set by `GITHUB_AUTH_MODE`:
 
 - `app`: every run and IDE route uses a short-lived **installation access
   token** for the repository's own installation
@@ -731,7 +731,7 @@ label set of each, and why ids stay out of labels) is in
   record. The format is plain text, not JSON.
 - **Health**: `/healthz` (liveness, no external calls), `/healthz/supabase`
   and `/healthz/observability`.
-- **Run events**: typed domain events (`events.py`: node transitions, plan
+- **Run events**: typed domain events (`backend/automaintainer/_runtime/events.py`: node transitions, plan
   checkpoints, telemetry, errors) are written to `logs` and shown in the
   dashboard. `/admin/metrics` and `/admin/runs` aggregate runs per
   organization.
