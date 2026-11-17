@@ -140,7 +140,8 @@ shared graph from `get_default_graph()` (also `agents.app`). Importing
 `agents` builds nothing: the graph and the Supabase client
 (`get_supabase()`, also `agents.supabase`) are created on first use under a
 lock, and `backend/test_agents_import_side_effects.py` checks that the import
-makes no network calls and writes no files.
+makes no network calls and writes no files. Only node functions can be
+injected so far; the nodes still read the module-level clients.
 
 | Node | What it does |
 | --- | --- |

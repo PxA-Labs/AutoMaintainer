@@ -48,6 +48,16 @@ def test_build_graph_matches_the_previous_module_level_graph():
     assert branches == EXPECTED_BRANCHES
 
 
+def test_build_graph_compiles_without_checkpointer_or_interrupts():
+    # The graph was compiled with a bare compile(); changing that (e.g. a
+    # checkpointer for resumable runs) must be a deliberate edit here.
+    graph = agents.build_graph()
+
+    assert graph.checkpointer is None
+    assert not graph.interrupt_before_nodes
+    assert not graph.interrupt_after_nodes
+
+
 def test_build_graph_uses_the_default_node_functions():
     builder = agents.build_graph().builder
     defaults = {

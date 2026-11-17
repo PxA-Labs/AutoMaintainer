@@ -2,8 +2,26 @@ import ast
 import os
 import logging
 import threading
+import warnings
 
 logger = logging.getLogger(__name__)
+
+# Process-wide settings this module used to get as a side effect of an
+# unused ``from litellm import completion`` (litellm/_logging.py
+# _suppress_loggers() and litellm/__init__.py). Kept explicitly so dropping
+# that import changes nothing at runtime: without the httpx level, the root
+# INFO level set by observability.setup_structured_logging would log one
+# "HTTP Request: GET <url with query>" line per Supabase / Groq call.
+for _noisy_logger in (
+    "httpx",
+    "apscheduler.executors.default",
+    "apscheduler.scheduler",
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+warnings.filterwarnings("ignore", message=".*conflict with protected namespace.*")
+warnings.filterwarnings(
+    "ignore", message=".*Accessing the.*attribute on the instance is deprecated.*"
+)
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
@@ -140,14 +158,19 @@ SUPABASE_SERVICE_KEY = _clean_env(os.getenv("SUPABASE_SERVICE_KEY"))
 # lru_cache keeps assigning ``agents.supabase`` / ``agents.app`` (as the tests
 # do) an override that every use in this module honours.
 _UNSET = object()
-_lazy_globals_lock = threading.RLock()
+# One lock per global, so a graph compile in one thread does not block a
+# coroutine waiting for the Supabase client in another.
+_lazy_global_locks = {"supabase": threading.Lock(), "app": threading.Lock()}
 
 
 def _lazy_global(name: str, factory):
-    """Module global ``name``, built once by ``factory`` (thread-safe)."""
+    """Module global ``name``, built once by ``factory`` (thread-safe).
+
+    A factory that raises caches nothing, so the next call retries.
+    """
     value = globals().get(name, _UNSET)
     if value is _UNSET:
-        with _lazy_globals_lock:
+        with _lazy_global_locks[name]:
             value = globals().get(name, _UNSET)
             if value is _UNSET:
                 value = factory()
@@ -3581,6 +3604,11 @@ def build_graph(nodes: Optional[dict] = None):
     shape (edges and routing) is fixed. Each call returns an independent
     compiled graph; get_default_graph() is the shared one with the default
     nodes.
+
+    Only node functions can be injected: the nodes still read the module
+    level clients (``supabase``, ``gh``, the LLM). Per-engine clients
+    (#186, AutoMaintainerEngine) need those passed in as well, e.g. as
+    further optional arguments or a context the nodes read.
     """
     implementations = {
         "architect": architect_node,
@@ -3620,6 +3648,10 @@ def __getattr__(name: str):
     # It keeps ``agents.supabase``, ``from agents import supabase`` and
     # ``agents.app`` (used by many routes and tests) working without building
     # either at import time.
+    # Caveat: unittest.mock.patch("agents.supabase", x) before the first
+    # build sees the name as non-local and deletes it on exit, so the next
+    # access builds a fresh client rather than restoring a previous object.
+    # Harmless while tests run with Supabase unconfigured (None).
     if name == "supabase":
         return get_supabase()
     if name == "app":
