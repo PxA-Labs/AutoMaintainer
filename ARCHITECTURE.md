@@ -327,6 +327,35 @@ silent fallback on the tool path. Source: `backend/agents.py`,
 - If no LLM path answers, the node raises `PipelineAbortError`, so error text
   never ends up in issues, commits or reviews.
 
+### Engine configuration
+
+`backend/automaintainer/config.py` defines `AutoMaintainerConfig` (#183,
+epic #157): one immutable Pydantic v2 model (`frozen`, `extra="forbid"`) for
+the engine's credentials, model routing, execution and safety settings. **The
+runtime does not use it yet**; the modules above still read the environment
+themselves until the engine refactor (#186) passes a config object through.
+
+- Values resolve as: explicit argument, then the environment variable the
+  runtime reads today (`from_env(environ)` reads only the mapping it is
+  given, default `os.environ`), then, for credentials only, an optional
+  `SecretProvider` callable (name in, value or `None` out), then the
+  runtime's default. The defaults equal current behaviour, for example
+  every role routed to `llama-3.3-70b-versatile` with the
+  `llama-3.1-8b-instant` fallback, `max_iterations=3`, `merge_policy="human"`.
+- Credentials (`GITHUB_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, the
+  `GROQ_API_KEY` pool) are `SecretStr`; neither `repr`, dumps nor validation
+  errors contain their values.
+- Validation is stricter than the runtime: a malformed or unknown value
+  (e.g. `MERGE_POLICY=yolo`) is an error instead of a logged fallback, and
+  so are an App id without a private key, an empty Groq key pool, and a
+  relative `workspace_dir`.
+- `enable_hitl` is derived (`merge_policy == "human"`), not a separate flag.
+  There are no OpenAI/Anthropic keys, command denylist or cost ceiling,
+  because the runtime has no provider, mechanism or meter they would map to.
+  Settings of the API, persistence and broker are out of scope; the test
+  `backend/tests/test_engine_config.py` lists each one with its reason and
+  fails when the runtime starts reading a variable that is in neither list.
+
 ### Errors
 
 A node raises `PipelineAbortError(error_code, message, phase)` to end a run
