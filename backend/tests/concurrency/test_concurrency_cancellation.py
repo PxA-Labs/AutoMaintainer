@@ -234,16 +234,15 @@ async def test_cancel_just_after_the_last_node(tmp_path, grace_seconds, status):
     _assert_consistent(result, db, events)
 
 
-class _CompletedWriteLandsLast(FakeSupabase):
+class _SlowCompletedWrite(FakeSupabase):
     """The final ``completed`` update is slow: it announces that it started
-    and lands only after the ``cancelled`` update (a slow database round
-    trip racing a fast one)."""
+    and lands only once the test releases it (a slow database round trip
+    that a cancel overtakes)."""
 
     def __init__(self):
         super().__init__()
         self.completed_write_started = threading.Event()
-        self.cancelled_written = threading.Event()
-        self.completed_written = threading.Event()
+        self.release_completed_write = threading.Event()
 
     def table(self, name):
         query = super().table(name)
@@ -253,42 +252,57 @@ class _CompletedWriteLandsLast(FakeSupabase):
             status = (query.payload or {}).get("status")
             if query.op == "update" and status == "completed":
                 self.completed_write_started.set()
-                self.cancelled_written.wait(5)
-                try:
-                    return execute()
-                finally:
-                    self.completed_written.set()
-            result = execute()
-            if query.op == "update" and status == "cancelled":
-                self.cancelled_written.set()
-            return result
+                assert self.release_completed_write.wait(30), "never released"
+            return execute()
 
         query.execute = ordered
         return query
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "agents._run_pipeline does not wait for an in-flight 'completed' "
-        "write before marking the run cancelled (unlike the 'running' upsert), "
-        "so the slower write lands last and the row ends 'completed' while "
-        "run() returns 'cancelled' with RUN_CANCELLED"
-    ),
-)
-async def test_cancel_during_the_completed_write_keeps_row_and_result_in_step(
+async def _cancel_during_the_completed_write(tmp_path, cancel):
+    """Run to the final ``completed`` write, call ``cancel(engine, caller)``
+    while it is in flight, wait until the cancellation has reached the run's
+    task, then let the write land. Returns (caller task, db, events)."""
+    db, events = _SlowCompletedWrite(), Collector()
+    engine = _engine(tmp_path, {}, db=db, events=events)
+    caller = asyncio.create_task(engine.run(REPO, run_id="run-1"))
+    await wait_until(db.completed_write_started.is_set, 30)
+    run_task = engine._runs["run-1"].task
+    cancel(engine, caller)
+    await wait_until(lambda: run_task.cancelling() > 0, 30)
+    db.release_completed_write.set()
+    return caller, db, events
+
+
+async def test_cancel_during_the_completed_write_keeps_the_run_completed(tmp_path):
+    """#524: the graph finished (the PR may be merged) and ``completed`` is
+    being written when a grace cancel interrupts the run's task. The write
+    is shielded and the run stays ``completed`` (row, result, no
+    RUN_CANCELLED) instead of being recorded as cancelled."""
+    caller, db, events = await _cancel_during_the_completed_write(
+        tmp_path, lambda engine, _: engine.cancel("run-1", grace_seconds=0)
+    )
+    result = await caller
+
+    assert result.status == "completed"
+    assert run_statuses(db, "run-1") == ["running", "completed"]
+    _assert_consistent(result, db, events)
+
+
+async def test_caller_cancel_during_the_completed_write_raises_but_keeps_row(
     tmp_path,
 ):
-    db, events = _CompletedWriteLandsLast(), Collector()
-    engine = _engine(tmp_path, {}, db=db, events=events)
-    run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
-    await wait_until(db.completed_write_started.is_set, 30)
-    assert engine.cancel("run-1", grace_seconds=0)
-    result = await run
-    await wait_until(db.completed_written.is_set, 30)
+    """Cancelling the caller of run() still raises CancelledError into it,
+    but only after the shielded write landed, and the finished run is not
+    marked cancelled."""
+    caller, db, events = await _cancel_during_the_completed_write(
+        tmp_path, lambda _, caller: caller.cancel()
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await caller
 
-    _assert_consistent(result, db, events)
+    assert run_statuses(db, "run-1") == ["running", "completed"]
+    assert cancelled_codes(events) == []
 
 
 # --- aclose with runs in flight ---------------------------------------------------
