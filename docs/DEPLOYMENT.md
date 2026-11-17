@@ -400,6 +400,12 @@ example as a second Space.
 
 ## Environment variables
 
+The API (`main`) and the Celery worker (`celery_app`) load `backend/.env` at
+startup, before any module reads its settings; variables already set in the
+environment win. Importing the SDK (`import automaintainer`) loads no `.env`
+file and logs nothing: an application embedding the engine passes an
+`AutoMaintainerConfig` or sets its own environment (#524).
+
 ### Required (API and workers)
 
 | Variable | Purpose |
@@ -645,8 +651,49 @@ After fixing, confirm with a manual run: Actions, then "Supabase Database
 Keep-Alive", then "Run workflow". If the project is retired or on a paid plan that
 does not pause, disable the workflow instead of leaving it red.
 
+## CI: Publishing the Python SDK
+
+`.github/workflows/publish-sdk.yml` publishes the engine package (the
+`automaintainer` distribution built from `backend/`, import name
+`automaintainer`; the server code is not in it) when a tag
+`sdk-v<version>` is pushed, where `<version>` must equal
+`automaintainer.__version__` in `backend/automaintainer/__init__.py`. The
+`build` job builds the sdist and wheel with `uv build`, checks the wheel holds
+only the `automaintainer` package and imports it in a fresh venv. The
+`publish-testpypi` job then uploads to TestPyPI, and `publish-pypi` uploads
+the same files to PyPI once TestPyPI accepted them and a reviewer approved
+the `pypi` environment. Uploads use PyPI trusted publishing (OIDC): no API
+token is stored in the repository.
+
+The workflow is inert until the owner does the following once; until then a
+tag only builds and checks the distributions:
+
+1. On [TestPyPI](https://test.pypi.org/manage/account/publishing/) and on
+   [PyPI](https://pypi.org/manage/account/publishing/), add a pending trusted
+   publisher for the project `automaintainer`: owner `PxA-Labs`, repository
+   `AutoMaintainer`, workflow `publish-sdk.yml`, environment `testpypi` and
+   `pypi` respectively.
+2. Under Settings > Environments, create the environments `testpypi` and
+   `pypi`. Give `pypi` required reviewers (this is the manual approval) and
+   restrict both to tags matching `sdk-v*`.
+3. Under Settings > Secrets and variables > Actions > Variables, set
+   `SDK_PUBLISH_ENABLED` to `true`.
+
+To release: bump `__version__`, merge, then
+`git tag sdk-v<version> && git push origin sdk-v<version>`. A version
+already on an index cannot be uploaded again; bump it instead. These tags do
+not match `release.yml`'s `v*.*.*`, so they create no GitHub release.
+
 ## Upgrade notes
 
+- **SDK distribution name and `.env` loading (#524).** The engine package is now
+  distributed as `automaintainer` (was `automaintainer-backend`; the import name
+  is unchanged), so a wheel built locally is `automaintainer-<version>-py3-none-any.whl`.
+  `backend/.env` is loaded by the API and worker entry points at startup instead
+  of when `github_app` is imported; deployments that start `uvicorn main:app` or
+  `celery -A celery_app worker` see no change. A script that imported the
+  runtime modules directly and relied on them reading `.env` must now load it
+  itself (for example with `python-dotenv`).
 - **Run trigger columns and one active run per issue (#518).** Migration `20261117140000_run_trigger_and_active_issue.sql` adds `runs.trigger_source`, `trigger_github_id` and `trigger_login` (who started the run: `api` for `POST /start`, `label` for the trigger label), and a partial unique index allowing one queued, running or awaiting-review run per repository and issue. **Apply it before rolling out the new API and worker image** ([Upgrading](#upgrading)): the new code writes the trigger columns, so until the migration is applied every `POST /start` and every label-started run fails to insert its row. Applying the migration first is safe for the old code, which does not read the new columns. If the database already holds several active runs for the same issue (possible before this release, from repeated `/start` calls or two label deliveries at once), the migration keeps one per issue (a running one, else one awaiting review, else the oldest queued one) and marks the others `cancelled` with an `error_message` naming the migration, so the index can be built; check `runs` for that message after upgrading. Runs without a target issue are not affected.
 
 - **Database: versioned migrations (#473).** The schema is now applied from `supabase/migrations`, and `supabase_schema.sql` is generated from them. For an existing database, apply the migrations once as described in [Database, Upgrading](#upgrading). This replaces the statements that earlier notes asked you to run by hand: `runs.checkpoint` (run state checkpoints, so a redelivered run resumes instead of repeating GitHub side effects), `runs.repo_name` (without it every `POST /start` insert fails), the tenant checks in the run and IDE policies, the `github_installations` policies and the repository org-immutability trigger. All rows are kept.

@@ -16,6 +16,12 @@
 **/out
 **/.pytest_cache
 
+# SDK build output (`uv build` in backend/ writes dist/): host-built
+# distributions are never part of the image, which runs the source tree.
+backend/dist
+backend/build
+**/*.egg-info
+
 # VCS and local noise
 .git
 .gitignore

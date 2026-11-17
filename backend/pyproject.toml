@@ -10,7 +10,7 @@
 #   uv lock --upgrade-package <pkg>      # upgrade one dependency
 #   uv build                             # build the automaintainer wheel
 [project]
-name = "automaintainer-backend"
+name = "automaintainer"
 # Single source: automaintainer.__version__, read by hatchling at build time.
 dynamic = ["version"]
 description = "AutoMaintainer engine (Python SDK), with the FastAPI backend and Celery workers behind the server extra."

@@ -470,15 +470,21 @@ event loop without sharing clients, settings or caches.
   and logging and warnings setup, which is process-global by nature.
 
 **Package and SDK (#187).** `backend/automaintainer` is also an installable
-wheel (`uv build` in `backend/`, hatchling; version from
-`automaintainer.__version__`).
+wheel, distributed as `automaintainer` (`uv build` in `backend/`,
+hatchling; version from `automaintainer.__version__`; published by
+`.github/workflows/publish-sdk.yml` on `sdk-v<version>` tags, see
+docs/DEPLOYMENT.md).
 
 - **Public surface.** `automaintainer` exports `AutoMaintainerConfig`,
   `AutoMaintainerEngine`, `RunResult`, `RunAlreadyActive`,
   `cancel_active_run`, the runners (`BaseRunner`, `LocalRunner`,
   `SandboxRunner`, `SandboxBackend`) and the `RunnerError` family, all
   resolved lazily: `import automaintainer` does no I/O and loads no runtime
-  module. `automaintainer.runners` is the runner package.
+  module. Importing the runtime (as the engine does) loads no `.env` file
+  and logs nothing either: `main` and `celery_app` call
+  `github_app.configure_process_environment()` at startup, which loads
+  `.env` and logs the PAT-mode warning (#524). `automaintainer.runners` is
+  the runner package.
 - **Layout.** The engine runtime (`agents`, `ast_indexer`, `events`,
   `github_app`, `rate_limiter`, `workspace`, `verification`,
   `change_limits`, `merge_policy`, `merge_audit`, `trust`, `redis_locks`)
