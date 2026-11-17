@@ -18,6 +18,7 @@ on:
       - 'supabase_schema.sql'
       - 'supabase/**'
       - 'scripts/db-migrate/**'
+      - 'scripts/import-legacy-history.sql'
       - 'dashboard/src/**'
       - '.github/workflows/ci-db.yml'
 
