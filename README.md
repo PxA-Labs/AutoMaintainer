@@ -26,34 +26,6 @@ so reviews and code may come from the smaller model. See
 
 ---
 
-> [!WARNING]
-> ### Project status: beta (pre-1.0)
-> The multi-tenant migration has landed: Celery workers, Supabase Auth with
-> organization-scoped data and Row Level Security, and GitHub App installation
-> tokens. Every API route except the health probes, the OpenAPI docs and the
-> signed GitHub webhook requires a Supabase login, and a test enforces this.
-> When the API serves the static dashboard build at `/`, those files are public
-> too. They hold no user data, only the compiled UI and its public
-> `NEXT_PUBLIC_*` settings (backend URL, Supabase URL and anon key).
-> Limitations that remain:
-> * **No sandbox ships with the project.** Agent changes are verified with
->   the target repository's tests only once `SANDBOX_BACKEND` is configured
->   (or `VERIFY_ALLOW_LOCAL=true` on a machine you trust; see
->   [docs/VERIFICATION.md](./docs/VERIFICATION.md)). Until then verification
->   reports an error, `MERGE_POLICY=ci` never merges, and the Maintainer's
->   review is the LLM's alone. Keep the default `MERGE_POLICY=human`.
-> * **One file per change.** The Implementer rewrites a single file per run.
-> * **Single-host deployment.** The API and the agent worker must share the
->   clone directory, so the Render blueprint runs both in one instance.
-> * **The interactive terminal is not a sandbox.** It is off by default. Do
->   not enable it on a deployment that other people can reach.
->
-> It is suitable for running against your own repositories. Hosting it for
-> untrusted tenants is not recommended yet. Open work is tracked in the
-> [epics](https://github.com/PxA-Labs/AutoMaintainer/issues?q=is%3Aissue+is%3Aopen+label%3Aepic).
-
----
-
 > [!IMPORTANT]
 > ### Supabase is required
 > AutoMaintainer stores organizations, runs and logs in **Supabase** (Postgres,
