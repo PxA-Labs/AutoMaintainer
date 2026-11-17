@@ -871,10 +871,16 @@ async def agent_worker_available() -> bool:
         return probe
     # Awaited on the event loop, so a slow broker holds no pool thread. The
     # shield stops a caller that times out from cancelling the shared probe.
+    # Each caller waits only for what is left of the shared probe's deadline,
+    # so a late joiner never waits a second full deadline (a timer firing a
+    # few ms early must not let the next caller start a fresh wait).
+    with _worker_probe_lock:
+        started_at = _worker_probe["started_at"]
+    remaining = WORKER_PROBE_DEADLINE_SECONDS - (time.monotonic() - started_at)
     try:
         return await asyncio.wait_for(
             asyncio.shield(asyncio.wrap_future(probe)),
-            WORKER_PROBE_DEADLINE_SECONDS,
+            max(0.0, remaining),
         )
     except asyncio.TimeoutError:
         return False
