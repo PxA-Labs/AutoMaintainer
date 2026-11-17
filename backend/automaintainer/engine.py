@@ -108,6 +108,9 @@ class _ActiveRun:
         # cancel task runs on its own event loop).
         self.stop = threading.Event()
         self.progress: dict = {}
+        # Set by the run's task when its coroutine starts. A task cancelled
+        # before its first step never runs its body (nor its except blocks).
+        self.started = False
 
 
 class AutoMaintainerEngine:
@@ -313,6 +316,14 @@ class AutoMaintainerEngine:
             except asyncio.CancelledError:
                 current = asyncio.current_task()
                 caller_cancelled = current is not None and current.cancelling() > 0
+                if not active.started:
+                    # Cancelled (aclose, or the caller) before the task took
+                    # its first step: _execute never ran, so mark the run here.
+                    await self._mark_cancelled_before_start(
+                        run_id,
+                        emitter if emitter is not None else self._emitter,
+                        active,
+                    )
                 if active.stop.is_set() and not caller_cancelled:
                     # Cancelled through cancel(): the run already emitted
                     # RUN_CANCELLED and marked itself cancelled.
@@ -324,9 +335,26 @@ class AutoMaintainerEngine:
     def _graph_for_run(self):
         return self.graph()
 
+    async def _mark_cancelled_before_start(
+        self, run_id: str, emitter: Any, active: _ActiveRun
+    ) -> None:
+        """RUN_CANCELLED and the ``cancelled`` row for a run whose task was
+        cancelled before it started, in the run's context (engine, emitter)
+        as _execute would have done."""
+        engine_token = current_engine.set(self._context)
+        run_token = agents.current_run_id.set(run_id)
+        emitter_token = agents.current_emitter.set(emitter)
+        try:
+            await agents._mark_run_cancelled_once(run_id, active.progress)
+        finally:
+            agents.current_emitter.reset(emitter_token)
+            agents.current_run_id.reset(run_token)
+            current_engine.reset(engine_token)
+
     async def _execute(
         self, repo_name: str, *, run_id: str, active: _ActiveRun, **kwargs
     ) -> dict:
+        active.started = True
         engine_token = current_engine.set(self._context)
         run_token = agents.current_run_id.set(run_id)
         trust_token = agents._run_trigger_trust.set({})

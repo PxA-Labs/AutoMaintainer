@@ -79,6 +79,39 @@ async def test_cancel_as_soon_as_the_run_is_registered(tmp_path, grace_seconds):
     assert engine._runs == {}
 
 
+@pytest.mark.parametrize("how", ["aclose", "caller-cancel"])
+async def test_stop_before_the_run_task_takes_its_first_step(tmp_path, how):
+    """aclose() (or cancelling the caller) right after run() registered the
+    run, before the engine's task ever ran: the task is cancelled before its
+    coroutine starts, so nothing inside it can mark the run."""
+    calls = []
+    db, events = FakeSupabase(), Collector()
+    engine = _engine(
+        tmp_path, {"architect": _never(calls, "architect")}, db=db, events=events
+    )
+    run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
+    # One loop step: run() registers the run and creates its task, which is
+    # scheduled after this coroutine resumes, so it has not started yet.
+    await asyncio.sleep(0)
+    assert engine._runs["run-1"].task is not None
+
+    if how == "aclose":
+        await engine.aclose()
+        result = await run
+        assert result.status == "cancelled" and result.error_code == "RUN_CANCELLED"
+    else:
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    assert calls == []
+    assert cancelled_codes(events) == ["RUN_CANCELLED"]
+    # No "running" row was ever written; the cancel marker's update is the
+    # only write, so a row created earlier (queued) cannot stay active.
+    assert run_statuses(db, "run-1") == ["cancelled"]
+    assert engine._runs == {}
+
+
 # --- Cancel racing completion ---------------------------------------------------
 
 # With no-op nodes and no approved verdict the graph is architect ->
