@@ -59,8 +59,8 @@ Guards, each recorded as 'ignored' with a log line: the repository must be
 registered to the event's org under the event's installation, and that
 installation must not be suspended; no run may be queued, running or
 awaiting review for the same (repository, issue); and an agent worker must
-be available (the check POST /start makes, #512), so no run is created that
-nobody consumes. GitHub needs no error for any of these. A redelivery (same
+be available (worker_probe, the check POST /start makes, #512), so no run
+is created that nobody consumes. GitHub needs no error for any of these. A redelivery (same
 X-GitHub-Delivery) is never stored twice (github_app.handle_github_webhook),
 and a stored row is processed once (see Idempotency). Known limit: the
 active-run check and the insert are not one transaction, so two different
@@ -94,6 +94,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import worker_probe
 from celery_app import celery_app
 from github_app import invalidate_installation_tokens, sync_installation_repositories
 
@@ -161,15 +162,11 @@ def trigger_label() -> Optional[str]:
 
 
 def _agent_worker_available() -> bool:
-    """POST /start's worker check (#512), AGENT_WORKER_CHECK included.
-
-    main imports this module, so the import is deferred. Fails closed: if
-    the check itself cannot run, no run is created.
-    """
+    """POST /start's worker check (worker_probe, #512), AGENT_WORKER_CHECK
+    included. Fails closed: if the check itself cannot run, no run is
+    created."""
     try:
-        from main import agent_worker_available
-
-        return bool(asyncio.run(agent_worker_available()))
+        return bool(asyncio.run(worker_probe.agent_worker_available()))
     except Exception:
         logger.warning("Agent worker check failed", exc_info=True)
         return False

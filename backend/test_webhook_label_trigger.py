@@ -19,6 +19,7 @@ import github_app
 import tasks
 import trust
 import webhook_processor
+import worker_probe
 from test_webhook_processor import FakeDB, event, installation
 from webhook_processor import process_event, process_pending_events
 
@@ -409,20 +410,19 @@ def test_processing_the_event_twice_starts_one_run(trigger):
 
 
 def test_worker_check_uses_starts_check(monkeypatch):
-    import main
-
     check = AsyncMock(return_value=False)
-    monkeypatch.setattr(main, "agent_worker_available", check)
+    monkeypatch.setattr(worker_probe, "agent_worker_available", check)
     assert webhook_processor._agent_worker_available() is False
     check.return_value = True
     assert webhook_processor._agent_worker_available() is True
+    assert check.await_count == 2
 
 
 def test_worker_check_fails_closed(monkeypatch):
-    import main
-
     monkeypatch.setattr(
-        main, "agent_worker_available", AsyncMock(side_effect=RuntimeError("x"))
+        worker_probe,
+        "agent_worker_available",
+        AsyncMock(side_effect=RuntimeError("x")),
     )
     assert webhook_processor._agent_worker_available() is False
 
