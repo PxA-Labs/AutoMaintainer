@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **sdk**: Package the engine runtime as an installable automaintainer wheel ([#521](https://github.com/PxA-Labs/AutoMaintainer/pull/521)) - @purvanshjoshi
 - **engine**: Add AutoMaintainerEngine with per-engine context, isolated runs and cancellation ([#519](https://github.com/PxA-Labs/AutoMaintainer/pull/519)) - @purvanshjoshi
 - **webhooks**: Start a run from the trigger label and answer 401 to bad signatures ([#517](https://github.com/PxA-Labs/AutoMaintainer/pull/517)) (closes [#190](https://github.com/PxA-Labs/AutoMaintainer/issues/190)) - @purvanshjoshi
 - **engine**: Add AutoMaintainerConfig engine configuration schema ([#516](https://github.com/PxA-Labs/AutoMaintainer/pull/516)) - @purvanshjoshi
