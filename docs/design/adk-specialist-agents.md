@@ -1,6 +1,6 @@
 # Design note: ADK specialist agents under the LangGraph orchestrator
 
-Status: proposed. Tracking issue: see the pinned "ADK specialist agents" issue.
+Status: proposed. Tracking issue: #525.
 Branch: `feat/adk-migration`.
 
 ## Why
