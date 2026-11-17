@@ -72,9 +72,9 @@ variable "redis_url" {
 }
 
 variable "redis_image" {
-  description = "Image of the self-hosted Redis (same as docker-compose.yml)."
+  description = "Image of the self-hosted Redis (same tag as docker-compose.yml), pinned by digest (the multi-arch index) so a re-pushed tag cannot change it."
   type        = string
-  default     = "redis:7.4.12-alpine"
+  default     = "redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
 }
 
 variable "redis_maxmemory" {

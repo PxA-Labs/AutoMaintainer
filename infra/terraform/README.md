@@ -84,9 +84,29 @@ nobody unless PAT mode is chosen). The deployer can push to the one
 repository, act as the two runtime accounts (required to deploy a revision
 that runs as `api` and to change the metadata of a VM that runs as
 `worker`), deploy the one Cloud Run service, and get and set metadata on the
-one VM through a custom role, plus read zone operations. The WIF provider
-accepts only tokens whose `repository` is `PxA-Labs/AutoMaintainer` and
-whose `environment` is `production`.
+one VM through a custom role, plus read zone operations. `setMetadata`
+cannot be limited to one key, so the deployer can also rewrite the VM's
+`user-data`, `startup-script` or `enable-oslogin` (effective at the next
+boot); that is about the code execution it already has by choosing the
+image.
+
+**Who can deploy.** The WIF provider (`modules/github_wif`) accepts a GitHub
+OIDC token only if all of these hold, checked by Google:
+
+- `repository` is `PxA-Labs/AutoMaintainer` and `repository_id` and
+  `repository_owner_id` are its numeric ids (`github_repository_id`,
+  `github_repository_owner_id`), so a renamed or re-created repository
+  cannot take the name over;
+- `environment` is `production`;
+- `ref` is `refs/heads/main` or starts with `refs/tags/v`.
+
+The `workloadIdentityUser` binding is on the repository id. A fork, a pull
+request, a job outside the environment or a run on any other branch cannot
+impersonate the deployer, whatever the environment's settings on GitHub.
+Two gates remain on GitHub's side: the environment's required reviewers, and
+who may push `v*` tags (anyone with write access, unless a tag ruleset
+restricts it). A workflow file changed on `main` or in a tagged commit runs
+with deployer credentials, as any deploy pipeline does.
 
 **Dangerous settings are refused.** `app_env` may not set
 `AUTH_DEV_BYPASS`, `ENABLE_TERMINAL` or `VERIFY_ALLOW_LOCAL`, nor the values
@@ -106,9 +126,22 @@ No CI job holds Google credentials or runs `plan` or `apply`.
 
 ## Caveats
 
-- Custom IAM roles are soft-deleted on destroy and their ids stay reserved
-  for weeks; re-creating the configuration in the same project soon after a
-  destroy needs new `role_id`s.
+- Custom IAM roles (`automaintainerWorkerRoller`,
+  `automaintainerZoneOperationReader`) are soft-deleted on destroy and their
+  ids stay reserved for weeks; an apply soon after a destroy in the same
+  project fails on them. Undelete them (`gcloud iam roles undelete`) or
+  change the `role_id`s.
+- The Redis image is pinned by tag and digest; bump both together. The VM
+  boots from the `cos-stable` image family, resolved once at creation (the
+  boot disk ignores later images, so a new COS release never recreates the
+  VM; recreate it deliberately to move to one). The Cloud Run placeholder
+  image is unpinned; it runs only until the first deploy and is ignored
+  afterwards.
+- The worker container uses the host network and can reach the metadata
+  server, so code running in it can obtain the worker service account's
+  token and read the worker's secrets. That is acceptable only while
+  verification of untrusted code is off (`VERIFY_ALLOW_LOCAL` refused).
+  Sandboxed verification (#158) must not run on this network.
 - `deletion_protection` (default `true`) guards the Cloud Run service and the
   VM; set it to `false` and apply before a deliberate destroy.
 - Changing `app_env`, `var.secrets` or the Redis mode updates the VM's

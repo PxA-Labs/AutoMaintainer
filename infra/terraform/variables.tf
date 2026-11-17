@@ -49,8 +49,30 @@ variable "github_repository" {
   default     = "PxA-Labs/AutoMaintainer"
 }
 
+variable "github_repository_id" {
+  description = "Numeric id of github_repository (`gh api repos/OWNER/NAME --jq .id`). The WIF provider checks it as well as the name, so a renamed or re-created repository cannot take the name over."
+  type        = string
+  default     = "1254396219"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "github_repository_id must be the numeric repository id."
+  }
+}
+
+variable "github_repository_owner_id" {
+  description = "Numeric id of the repository owner (`gh api repos/OWNER/NAME --jq .owner.id`)."
+  type        = string
+  default     = "284408399"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_owner_id))
+    error_message = "github_repository_owner_id must be the numeric owner id."
+  }
+}
+
 variable "github_environment" {
-  description = "GitHub Actions environment the deploy job runs in. Only OIDC tokens issued for this environment are accepted, so its protection rules (required reviewers, tags only) gate every deploy."
+  description = "GitHub Actions environment the deploy job runs in. Only OIDC tokens issued for this environment (and for main or a v* tag) are accepted; its required reviewers gate every deploy."
   type        = string
   default     = "production"
 }

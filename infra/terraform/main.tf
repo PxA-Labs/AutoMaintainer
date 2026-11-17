@@ -142,10 +142,12 @@ module "worker" {
 module "github_wif" {
   source = "./modules/github_wif"
 
-  pool_id              = "github"
-  github_repository    = var.github_repository
-  github_environment   = var.github_environment
-  service_account_name = google_service_account.deployer.name
+  pool_id                    = "github"
+  github_repository          = var.github_repository
+  github_repository_id       = var.github_repository_id
+  github_repository_owner_id = var.github_repository_owner_id
+  github_environment         = var.github_environment
+  service_account_name       = google_service_account.deployer.name
 
   depends_on = [google_project_service.services]
 }

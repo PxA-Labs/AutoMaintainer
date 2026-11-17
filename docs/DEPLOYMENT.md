@@ -388,10 +388,16 @@ choices. Supabase stays the database.
 Service accounts: `automaintainer-api` reads only the API's secrets (and
 writes traces if enabled); `automaintainer-worker` reads only the worker's
 secrets, pulls images and writes logs and metrics; `automaintainer-deployer`
-pushes images, deploys new API revisions and sets one metadata key on the
-worker VM. The deployer cannot read secrets or change IAM. Only GitHub
-Actions jobs of `PxA-Labs/AutoMaintainer` that run in the `production`
-environment can impersonate it.
+pushes images, deploys new API revisions and sets the worker VM's metadata
+(the deploy changes only `automaintainer-image`, but the permission covers
+every key, including `user-data`, which is about the same power as choosing
+the image). The deployer cannot read secrets or change IAM. Google lets a
+GitHub Actions job impersonate it only if the token is for
+`PxA-Labs/AutoMaintainer` (name and numeric repository and owner ids), the
+`production` environment, and the ref `main` or a `v*` tag. That check does
+not depend on GitHub settings; the environment's required reviewers (step 4)
+add a human approval on top, and a tag ruleset on `v*` limits who can push a
+release tag.
 
 **Redis: why the VM by default.** The Redis container costs nothing extra.
 It shares the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and
@@ -400,7 +406,11 @@ survive restarts (append-only file on the VM disk). Memorystore is managed
 and keeps the queue up while the worker restarts, but its basic tier has no
 replica either and it costs more than the VM (see the cost table). Neither
 uses AUTH or TLS: only the subnet can reach them (VPC firewall rules, and the
-VM's own firewall for the container).
+VM's own firewall for the container), and Celery accepts only JSON messages,
+so a write to the broker cannot become a pickle payload. The subnet includes
+every Cloud Run instance, so a server-side request forgery in the API could
+still reach Redis; a password from Secret Manager (`requirepass`) would be
+cheap defence in depth and is not set up yet.
 
 **Limitation: the IDE has no clones.** The API on Cloud Run and the agent
 worker on the VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this
@@ -418,7 +428,10 @@ sandboxed (gVisor or one Cloud Run Job per verification, #158), install the
 GitHub App only on the owner's own repositories. Terraform refuses
 `VERIFY_ALLOW_LOCAL` in `app_env`, and the worker has no Docker daemon for
 `SANDBOX_BACKEND`, so each agent change's verification reports an error
-(`MERGE_POLICY=ci` then never merges). Keep `MERGE_POLICY=human`.
+(`MERGE_POLICY=ci` then never merges). Keep `MERGE_POLICY=human`. The worker
+container uses the VM's host network and can reach the metadata server, so
+any code it runs can obtain the worker service account's token and its
+secrets: #158 must run verification somewhere else, not on this VM's network.
 
 ### Owner steps
 
@@ -455,6 +468,18 @@ account (Billing Account Administrator, or Costs Manager on it).
    run `plan` and `apply` again. The API starts with Google's public "hello"
    placeholder image and the worker waits for its first image.
    `terraform output api_url` prints the API URL.
+
+   Enabling the Compute Engine API creates the project's default compute
+   service account, which Google normally grants `roles/editor`. Nothing here
+   uses it; remove the grant (or enforce the organization policy
+   `iam.automaticIamGrantsForDefaultServiceAccounts` before the first apply):
+
+   ```bash
+   P=automaintainer-prod
+   N=$(gcloud projects describe $P --format='value(projectNumber)')
+   gcloud projects remove-iam-policy-binding $P \
+     --member="serviceAccount:$N-compute@developer.gserviceaccount.com" --role=roles/editor
+   ```
 
 3. **Add the secret versions.** Terraform created empty secrets
    (`terraform output secret_ids`). Add a version to each one that is
@@ -494,7 +519,10 @@ account (Billing Account Administrator, or Costs Manager on it).
    VM restarts its container within about 20 seconds. Release tags
    (`v*.*.*`) deploy the same way. Check the worker in Logs Explorer
    (resource "VM Instance", `automaintainer-worker`): `POST /start` answers
-   `503 AGENT_WORKER_UNAVAILABLE` until it is up.
+   `503 AGENT_WORKER_UNAVAILABLE` until it is up. The deployer holds
+   `roles/run.developer` on the one service only, with no project-level Run
+   role; this has not been exercised by a real deploy yet, so if
+   `gcloud run deploy` is denied, the error names the missing permission.
 
 6. **Point the GitHub App at the new URL.** Webhook URL
    `<api_url>/webhooks/github` (secret: the `github-webhook-secret` value);
@@ -538,11 +566,11 @@ before relying on them.
 | Cloud NAT | one VM, low traffic | ~1-5 (*uncertain*: data processed) |
 | Redis, `vm` mode | on the worker VM | 0 |
 | Redis, `memorystore` mode (instead) | basic tier, 1 GB | ~35 (*uncertain*) |
-| Artifact Registry | a few GB of images (20 kept, 30-day cleanup) | <1 (*uncertain*: image size) |
+| Artifact Registry | 20 kept images of about 1-2 GB each (Node build, Node tools, Python venv), 30-day cleanup | ~2-4 (*uncertain*: image size, layers shared between versions) |
 | Secret Manager | 6 secrets, accesses at instance start | <1 |
 | Logging, Monitoring, Trace | low volume, within the free allotments | 0 (*uncertain*: log volume) |
 | Internet egress | API responses, GitHub, Groq and Supabase traffic | *uncertain* |
-| **Total** | `vm` mode / `memorystore` mode | **~40-55 / ~75-90** |
+| **Total** | `vm` mode / `memorystore` mode | **~40-60 / ~75-95** |
 
 Groq and Supabase are billed by their providers. The budget
 (`budget_amount`, 100 by default) alerts but never stops spending.

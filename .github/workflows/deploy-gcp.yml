@@ -5,9 +5,10 @@ name: Deploy to Google Cloud
 #
 # - Runs only by hand or for a release tag, never for a pull request.
 # - The job uses the "production" environment: protect it (required
-#   reviewers, deployment tags only) under Settings > Environments. The
-#   workload identity provider accepts only tokens issued for that
-#   environment in this repository.
+#   reviewers, deployment branches and tags main and v*.*.*) under
+#   Settings > Environments. Independently of that, the workload identity
+#   provider accepts only tokens of this repository (name and numeric ids)
+#   issued for that environment on main or a v* tag.
 # - Authenticates through Workload Identity Federation; no key is stored.
 # - Inert until the owner sets the repository variables Terraform prints
 #   (`terraform output github_repository_variables`): the job is skipped
@@ -45,13 +46,14 @@ jobs:
       RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
       WORKER_INSTANCE: ${{ vars.GCP_WORKER_INSTANCE }}
       WORKER_ZONE: ${{ vars.GCP_WORKER_ZONE }}
+      DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
 
     steps:
       - name: Check the repository variables
         shell: bash
         run: |
           missing=""
-          for v in PROJECT_ID REGION IMAGE_REPOSITORY RUN_SERVICE WORKER_INSTANCE WORKER_ZONE; do
+          for v in PROJECT_ID REGION IMAGE_REPOSITORY RUN_SERVICE WORKER_INSTANCE WORKER_ZONE DEPLOYER_SERVICE_ACCOUNT; do
             [ -n "${!v}" ] || missing="$missing GCP_$v"
           done
           if [ -n "$missing" ]; then
@@ -68,7 +70,7 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          service_account: ${{ env.DEPLOYER_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1

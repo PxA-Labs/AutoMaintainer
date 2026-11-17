@@ -171,6 +171,12 @@ def test_worker_vm_has_no_public_ip_and_egress_goes_through_nat():
     assert 'resource "google_compute_router_nat"' in network
 
 
+def test_self_hosted_redis_image_is_pinned_by_digest():
+    worker = (TF / "modules/worker/main.tf").read_text(encoding="utf-8")
+    body = _block(worker, r'variable\s+"redis_image"')
+    assert re.search(r'default\s*=\s*"redis:[^"@]+@sha256:[0-9a-f]{64}"', body)
+
+
 def test_redis_defaults_to_the_cheaper_self_hosted_container():
     variables = (TF / "variables.tf").read_text(encoding="utf-8")
     body = _block(variables, r'variable\s+"redis_mode"')
@@ -189,13 +195,44 @@ def test_workload_identity_is_limited_to_this_repository():
     wif = _strip_comments(
         (TF / "modules/github_wif/main.tf").read_text(encoding="utf-8")
     )
-    assert re.search(r"attribute_condition\s*=", wif)
-    assert "assertion.repository ==" in wif
-    assert "assertion.environment ==" in wif
+    m = re.search(r"attribute_condition\s*=\s*join\((.*?)\)\n", wif, re.S)
+    assert m, "attribute_condition must be built with join()"
+    condition = m.group(1)
+    assert "assertion.repository ==" in condition
+    assert "assertion.environment ==" in condition
+    # Google checks the ref itself, so the GitHub environment's branch
+    # policy (set by hand) is not the only gate: only main and release
+    # tags can mint deployer credentials.
+    assert 'assertion.ref == \\"refs/heads/main\\"' in condition
+    assert 'assertion.ref.startsWith(\\"refs/tags/v\\")' in condition
+    # Numeric ids: a renamed or re-created repository cannot take the name.
+    assert "assertion.repository_id ==" in condition
+    assert "assertion.repository_owner_id ==" in condition
+    # Raw text: _strip_comments would cut the principalSet:// URL.
+    binding = _block(
+        (TF / "modules/github_wif/main.tf").read_text(encoding="utf-8"),
+        r'resource\s+"google_service_account_iam_member"\s+"deployer_wif"',
+    )
+    assert "/attribute.repository_id/${var.github_repository_id}" in binding
     variables = (TF / "variables.tf").read_text(encoding="utf-8")
     assert '"PxA-Labs/AutoMaintainer"' in _block(
         variables, r'variable\s+"github_repository"'
     )
+    # gh api repos/PxA-Labs/AutoMaintainer --jq '.id, .owner.id'
+    assert '"1254396219"' in _block(variables, r'variable\s+"github_repository_id"')
+    assert '"284408399"' in _block(
+        variables, r'variable\s+"github_repository_owner_id"'
+    )
+
+
+def test_deploy_checks_every_repository_variable_it_reads():
+    text = (WORKFLOWS / "deploy-gcp.yml").read_text(encoding="utf-8")
+    loop = re.search(r"for v in ([^;]+);", text)
+    assert loop
+    checked = {f"GCP_{v}" for v in loop.group(1).split()}
+    read = set(re.findall(r"vars\.(GCP_[A-Z_]+)", text))
+    read.discard("GCP_WORKLOAD_IDENTITY_PROVIDER")  # the job's `if` needs it
+    assert read <= checked, read - checked
 
 
 def test_a_billing_budget_with_thresholds_exists():

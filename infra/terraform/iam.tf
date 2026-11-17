@@ -83,7 +83,10 @@ resource "google_service_account_iam_member" "deployer_acts_as" {
 
 # Rolling the worker = changing one metadata key on one instance. A custom
 # role keeps the deployer from stopping, deleting or SSH-ing into it, which
-# roles/compute.instanceAdmin.v1 would allow.
+# roles/compute.instanceAdmin.v1 would allow. setMetadata cannot be limited
+# to one key: the deployer can also rewrite user-data, startup-script or
+# enable-oslogin (effective at the next boot). That is about the same power
+# it already has by choosing the image the VM runs.
 resource "google_project_iam_custom_role" "worker_roller" {
   role_id     = "automaintainerWorkerRoller"
   title       = "AutoMaintainer worker roller"
