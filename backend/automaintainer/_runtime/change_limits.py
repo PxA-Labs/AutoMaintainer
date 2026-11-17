@@ -40,7 +40,7 @@ from typing import Iterable, Optional, Sequence
 
 from automaintainer.context import active_config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("change_limits")  # legacy name, kept for log filters
 
 CONFIG_FILE = ".automaintainer.yml"
 CONFIG_KEY = "change_limits"

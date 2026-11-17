@@ -33,7 +33,7 @@ from typing import Optional
 
 from automaintainer.context import active_config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("merge_policy")  # legacy name, kept for log filters
 
 # Strictest first; the order is what "stricter" means.
 POLICIES = ("human", "ci", "auto")

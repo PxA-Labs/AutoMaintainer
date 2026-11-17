@@ -4,7 +4,7 @@ import logging
 import threading
 import warnings
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("agents")  # legacy name, kept for log filters
 
 # Process-wide settings this module used to get as a side effect of an
 # unused ``from litellm import completion`` (litellm/_logging.py
@@ -38,7 +38,7 @@ import json
 import re
 import time
 import tomllib
-from ast_indexer import CodebaseMapper
+from .ast_indexer import CodebaseMapper
 from contextvars import ContextVar
 from pydantic import (
     AliasChoices,
@@ -52,7 +52,7 @@ from pydantic import (
 from supabase import create_client, Client
 
 # Events & Emitter Abstraction
-from events import (
+from .events import (
     BaseEvent,
     AgentPhase,
     NodeTransitionEvent,
@@ -68,10 +68,10 @@ from events import (
 )
 
 # Rate limiting
-from rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
+from .rate_limiter import get_rate_limit_manager, run_llm_with_rate_limit
 
 # GitHub credentials (App installation tokens, or the single-tenant PAT)
-from github_app import (
+from .github_app import (
     AUTH_MODE_APP,
     AUTH_MODE_PAT,
     GitHubAuthError,
@@ -1669,7 +1669,7 @@ async def _sync_clone_or_abort(
     timeout; exceptions (git missing, token lookup failing) are handled here,
     and their text is redacted before it is shown anywhere.
     """
-    from workspace import sync_repo_clone
+    from .workspace import sync_repo_clone
 
     # Checked before syncing: a clone that fails part way can leave a .git
     # directory behind that must not count as a usable cache.
@@ -1840,7 +1840,7 @@ async def architect_node(state: AgentState):
 
     # Clone the repo locally and analyze it with GitNexus so the MCP server has data
     import shutil
-    from workspace import get_safe_repo_dir
+    from .workspace import get_safe_repo_dir
 
     # Keyed by the repository id when the run has one, exactly as the IDE,
     # file and terminal routes key it, so they read the clone written here.
@@ -2144,7 +2144,7 @@ def _github_app_slug() -> Optional[str]:
     if "slug" in cache:
         return cache["slug"]
     try:
-        from github_app import get_github_integration
+        from .github_app import get_github_integration
 
         slug = get_github_integration().get_app().slug
         if isinstance(slug, str) and slug:
@@ -2576,7 +2576,7 @@ async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: st
     Maintainer a head the gate would only ever leave unmerged.
     """
     supabase = get_supabase()
-    import verification
+    from . import verification
 
     run_id = current_run_id.get(None)
     try:
@@ -2691,7 +2691,7 @@ def _evaluate_change_limits(
     reach the run branch. When only the base copy of ``path`` is unreadable,
     the denylist is known and decides as usual.
     """
-    import change_limits
+    from . import change_limits
 
     limits = None
     try:
@@ -2759,7 +2759,7 @@ async def _refuse_protected_change(
     a PR (a later iteration), that PR is held for a human and a ``held``
     merge_decisions row records why. Raises PipelineAbortError
     (PROTECTED_PATH), a terminal run failure, so a redelivery is skipped."""
-    import merge_audit
+    from . import merge_audit
 
     message = (
         f"Refusing to commit {path}: " + " ".join(violations) + " Nothing was "
@@ -2786,7 +2786,7 @@ def _hold_pr_for_human(pr, violations: list[str]) -> None:
     listing ``violations`` and draft state. Idempotent, and it never marks a
     PR ready for review. Failures are logged: the no-merge guarantee rests on
     the run state, not on these markers."""
-    import change_limits
+    from . import change_limits
 
     labels = {getattr(l, "name", l) for l in (getattr(pr, "labels", None) or [])}
     if change_limits.NEEDS_HUMAN_LABEL not in labels:
@@ -3028,7 +3028,7 @@ async def implementer_node(state: AgentState):
             body = f"This PR resolves #{issue_number}.\n\nCloses #{issue_number}"
             extra = {}
             if violations:
-                import change_limits
+                from . import change_limits
 
                 body = change_limits.upsert_pr_section(
                     body, change_limits.render_pr_section(violations)
@@ -3131,7 +3131,7 @@ _PASSING_CHECK_STATES = {"success", "neutral", "skipped"}
 
 def get_merge_policy() -> str:
     """The deployment ceiling: MERGE_POLICY, unknown values mean human."""
-    import merge_policy
+    from . import merge_policy
 
     return merge_policy.deployment_ceiling()
 
@@ -3148,7 +3148,7 @@ async def _effective_merge_policy():
     decisions. That is harmless: every read is fail-closed and the merge
     decision always acts on, and records, the value it read itself."""
     supabase = get_supabase()
-    import merge_policy
+    from . import merge_policy
 
     return await asyncio.to_thread(
         merge_policy.resolve_for_run,
@@ -3188,7 +3188,7 @@ def _ci_checks_passed(gh_repo, sha: str) -> tuple[bool, str]:
     Fails closed: no checks at all, any pending/failed check, or a head without
     a ``success`` verification status (see verification.py) is not a pass.
     """
-    import verification
+    from . import verification
 
     commit = gh_repo.get_commit(sha)
     results = [(s.context, s.state) for s in commit.get_combined_status().statuses]
@@ -3272,7 +3272,7 @@ async def _record_merge_decision(
     (merge_audit.py). Best effort: record_decision never raises and its
     outcome changes nothing. ``actor`` "agent" is the Maintainer's verdict."""
     supabase = get_supabase()
-    import merge_audit
+    from . import merge_audit
 
     if head_sha is None:
         head_sha = getattr(getattr(pr, "head", None), "sha", None)
@@ -3305,8 +3305,8 @@ def _earlier_trigger_hold(run_id):
     iteration. Best effort: when the rows cannot be read, the fresh
     permission lookup (itself fail-closed) decides alone."""
     supabase = get_supabase()
-    import merge_audit
-    import trust
+    from . import merge_audit
+    from . import trust
 
     if supabase is None or not run_id:
         return None
@@ -3339,7 +3339,7 @@ def _earlier_trigger_hold(run_id):
 
 async def _trigger_trust(gh_repo, state):
     """trust.check_trigger for this run, looked up once per run."""
-    import trust
+    from . import trust
 
     cache = _run_trigger_trust.get()
     if cache is not None and "result" in cache:
@@ -3380,7 +3380,7 @@ def _verification_review_section(verification: Optional[dict]) -> str:
     the untrusted block; the command (from .automaintainer.yml), summary and
     output tail are attacker-influenced. The tail uses the PR-body limit.
     """
-    import verification as verification_module
+    from . import verification as verification_module
 
     if not verification:
         return (

@@ -38,12 +38,12 @@ from typing import Callable, Iterable, Optional, Sequence
 
 import yaml
 
-from runners.base import CommandTimeoutError, RunnerError
-from runners.sandbox import SandboxRunner, load_sandbox_backend_factory
+from automaintainer.runners.base import CommandTimeoutError, RunnerError
+from automaintainer.runners.sandbox import SandboxRunner, load_sandbox_backend_factory
 
 from automaintainer.context import active_config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("verification")  # legacy name, kept for log filters
 
 CONFIG_FILE = ".automaintainer.yml"
 
@@ -573,7 +573,7 @@ async def verify_pr_branch(
     The token reaches git through its environment only (see
     workspace.git_auth_env) and never the test process.
     """
-    from workspace import git_auth_env
+    from .workspace import git_auth_env
 
     if not verification_enabled():
         return VerificationResult(

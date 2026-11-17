@@ -61,9 +61,9 @@ from typing import Iterable, Optional
 
 from github import GithubException
 
-import merge_audit
+from . import merge_audit
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("trust")  # legacy name, kept for log filters
 
 # ``permission`` is GitHub's legacy base role: maintain is reported as write
 # and triage as read, so this set covers write, maintain and admin.

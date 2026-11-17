@@ -17,7 +17,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("events")  # legacy name, kept for log filters
 
 
 class AgentPhase(str, Enum):
@@ -237,7 +237,7 @@ class SupabaseEmitter(EventEmitter):
         if self._client is not None:
             return self._client
         try:
-            import agents
+            from . import agents
 
             if getattr(agents, "supabase", None) is not None:
                 return agents.supabase

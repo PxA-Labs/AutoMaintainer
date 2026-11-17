@@ -22,7 +22,7 @@ import threading
 
 from automaintainer.context import active_engine
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rate_limiter")  # legacy name, kept for log filters
 
 # How long a key is benched after repeated key-attributable errors.
 UNHEALTHY_COOLDOWN_SECONDS = 120.0

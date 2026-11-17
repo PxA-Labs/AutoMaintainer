@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from automaintainer.context import active_config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("workspace")  # legacy name, kept for log filters
 
 # owner/repo or a bare name. Used with re.fullmatch: re.match with "$" would
 # also accept a trailing newline ("owner/repo\n").

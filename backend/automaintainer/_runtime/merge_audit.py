@@ -13,7 +13,7 @@ audit".
 import logging
 from typing import Iterable, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("merge_audit")  # legacy name, kept for log filters
 
 AUDIT_TABLE = "merge_decisions"
 
@@ -66,7 +66,7 @@ def evidence(
     target_url, so the link to it is the reviewed commit's page, where GitHub
     lists its statuses; ``verification`` is the result the Maintainer saw.
     """
-    import verification as verification_module
+    from . import verification as verification_module
 
     found: dict = {}
     pr_url = _url(pr_url)

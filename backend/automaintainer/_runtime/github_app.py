@@ -44,7 +44,7 @@ from dotenv import load_dotenv
 
 from automaintainer.context import active_config, secret_value
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("github_app")  # legacy name, kept for log filters
 
 # agents.py imports this module before its own load_dotenv() runs, so load
 # .env here too or the App credentials below would be read too early.
@@ -245,7 +245,7 @@ def _installation_status_client():
     engine run this is the engine's client (#186).
     """
     try:
-        import agents
+        from . import agents
     except Exception:  # pragma: no cover - agents logs its own import errors
         return None
     return agents.get_supabase()
@@ -1018,7 +1018,7 @@ def _claim_setup_nonce(nonce: str, ttl: int, now: float) -> bool:
     covers one process. A Redis error propagates, so the caller fails closed.
     """
     if os.getenv("REDIS_URL"):
-        from redis_locks import get_redis_client
+        from .redis_locks import get_redis_client
 
         key = f"automaintainer:github-setup-state:{nonce}"
         return bool(get_redis_client().set(key, "1", nx=True, ex=ttl))

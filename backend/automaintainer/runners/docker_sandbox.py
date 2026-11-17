@@ -48,7 +48,8 @@ from typing import IO, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from .base import CommandTimeoutError, RunnerError
 from .local import LocalRunner, _to_argv
 
-logger = logging.getLogger(__name__)
+# Legacy logger name (the module moved in #187), kept for log filters.
+logger = logging.getLogger("runners.docker_sandbox")
 
 DEFAULT_IMAGE = "python:3.12-slim"
 DEFAULT_NETWORK = "none"
