@@ -7,10 +7,17 @@ github_sync worker at concurrency above 1, two deliveries for the same issue
 either inserts. The fix #518 proposes is a partial unique index on
 runs(repository_id, target_issue_number) for active statuses plus handling
 the conflict; until then this test documents the race and fails strictly
-(xfail strict=True), so the fix has to flip it.
+(xfail strict=True).
 
 The database is test_webhook_processor's in-memory FakeDB; the two
 deliveries run in two threads, held after the check until both have done it.
+
+What flips it: a fix that serialises check and insert in the process (a
+lock around _start_label_run) makes it XPASS, after the barrier below times
+out (about 15 s). The FakeDB enforces no unique constraints, so the index
+#518 proposes does not flip it on its own: whoever lands that fix must also
+make the fake reject a second active run for the same issue (as the index
+would) and assert the conflict handling, then drop the xfail.
 """
 
 import threading

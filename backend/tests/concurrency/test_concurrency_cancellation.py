@@ -14,6 +14,7 @@ import pytest
 
 import agents
 from automaintainer import engine as engine_module
+from automaintainer.context import active_engine
 from automaintainer.engine import AutoMaintainerEngine, RunAlreadyActive
 from events import ErrorEvent
 
@@ -27,6 +28,7 @@ from concurrency_world import (
     gated_node,
     make_config,
     run_statuses,
+    snapshot,
     wait_until,
 )
 
@@ -86,17 +88,34 @@ async def test_cancel_as_soon_as_the_run_is_registered(tmp_path, grace_seconds):
 async def test_stop_before_the_run_task_takes_its_first_step(tmp_path, how):
     """aclose() (or cancelling the caller) right after run() registered the
     run, before the engine's task ever ran: the task is cancelled before its
-    coroutine starts, so nothing inside it can mark the run."""
+    coroutine starts, so nothing inside it can mark the run.
+
+    run() then marks the run itself, binding the run's ContextVars in the
+    caller's task (not a copied one), so the caller must see none of them
+    once run() returned or raised."""
     calls = []
     db, events = FakeSupabase(), Collector()
     engine = _engine(
         tmp_path, {"architect": _never(calls, "architect")}, db=db, events=events
     )
-    run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
+    seen = {}
+
+    async def caller():
+        seen["before"] = (snapshot(), active_engine())
+        try:
+            return await engine.run(REPO, run_id="run-1")
+        except asyncio.CancelledError:
+            seen["after"] = (snapshot(), active_engine())
+            raise
+        finally:
+            seen.setdefault("after", (snapshot(), active_engine()))
+
+    run = asyncio.create_task(caller())
     # One loop step: run() registers the run and creates its task, which is
     # scheduled after this coroutine resumes, so it has not started yet.
     await asyncio.sleep(0)
     assert engine._runs["run-1"].task is not None
+    assert not engine._runs["run-1"].started
 
     if how == "aclose":
         await engine.aclose()
@@ -107,6 +126,8 @@ async def test_stop_before_the_run_task_takes_its_first_step(tmp_path, how):
         with pytest.raises(asyncio.CancelledError):
             await run
 
+    assert seen["before"][1] is None
+    assert seen["after"] == seen["before"]
     assert calls == []
     assert cancelled_codes(events) == ["RUN_CANCELLED"]
     # No "running" row was ever written; the cancel marker's update is the
@@ -158,8 +179,12 @@ async def test_cancel_during_the_last_node(tmp_path, grace_seconds, status):
     )
     run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
     await entered.wait()
+    task = engine._runs["run-1"].task
     assert engine.cancel("run-1", grace_seconds=grace_seconds)
-    await asyncio.sleep(0.01)
+    if grace_seconds is not None:
+        # cancel() schedules task.cancel() through the loop; release the
+        # node only once the run's task has actually been cancelled.
+        await wait_until(lambda: task.cancelling() > 0)
     release.set()
     result = await run
 
