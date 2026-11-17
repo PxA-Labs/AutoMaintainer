@@ -1,0 +1,23 @@
+{
+  "id": "isoweek_fromstring_dash",
+  "title": "Week.fromstring() rejects the extended ISO form 2011-W08",
+  "body": "In `isoweek.py`, `Week.fromstring` documents that it accepts both\n\"2011W08\" and \"2011-W08\", but the extended form with a dash raises:\n\n```python\n>>> Week.fromstring(\"2011-W08\")\nValueError: Week.tostring argument must be on the form <yyyy>W<ww>; got '2011-W08'\n```\n\nExpected: `Week.fromstring(\"2011-W08\") == Week(2011, 8)`, the same as\nthe compact form. Malformed strings such as \"2011-08\" or \"2011W8\"\nmust still raise ValueError.\n",
+  "target_file": "isoweek.py",
+  "kind": "bugfix",
+  "category": "input-validation",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "isoweek",
+    "repository": "https://github.com/gisle/isoweek",
+    "commit": "4848cc22350568b0a5e5a9c3bf4fe4f03331f888",
+    "path": "isoweek.py",
+    "license": "BSD-2-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The branch that parses the extended 'YYYY-Www' form was removed.",
+  "harness_files": [
+    "tests/test_isoweek_basic.py"
+  ]
+}

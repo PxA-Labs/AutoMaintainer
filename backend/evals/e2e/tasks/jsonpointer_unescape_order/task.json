@@ -1,0 +1,23 @@
+{
+  "id": "jsonpointer_unescape_order",
+  "title": "'~01' is unescaped to '/' instead of '~1'",
+  "body": "RFC 6901 section 4 requires \"~1\" to be replaced by \"/\" first and \"~0\"\nby \"~\" second, so that \"~01\" becomes the literal \"~1\". `unescape` in\n`jsonpointer.py` does it in the other order:\n\n```python\n>>> resolve_pointer({\"a~1b\": 1, \"a/b\": 2}, \"/a~01b\")\n2      # expected 1\n>>> JsonPointer(\"/~01\").parts\n['/']  # expected ['~1']\n```\n\nExpected: pointers decode as RFC 6901 specifies, and\n`JsonPointer.from_parts(parts).parts == parts` for any keys,\nincluding ones that contain \"~\", \"/\" or \"~1\".\n",
+  "target_file": "jsonpointer.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "jsonpointer",
+    "repository": "https://github.com/stefankoegl/python-json-pointer",
+    "commit": "54039218ed8d18e5125742cd0d87e429910333d3",
+    "path": "jsonpointer.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "unescape() replaces '~0' before '~1'.",
+  "harness_files": [
+    "tests/test_jsonpointer_basic.py"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "boltons_daterange_inclusive",
+  "title": "daterange(..., inclusive=True) never yields the stop date",
+  "body": "`daterange` in `boltons/timeutils.py` ignores `inclusive=True` for\nascending ranges:\n\n```python\n>>> list(daterange(date(2017, 5, 1), date(2017, 8, 1), step=(0, 1, 0), inclusive=True))\n[date(2017, 5, 1), date(2017, 6, 1), date(2017, 7, 1)]\n# expected the docstring's output, which ends with date(2017, 8, 1)\n```\n\nExpected: with `inclusive=True` the stop date is yielded when a step\nlands exactly on it; with the default `inclusive=False` it never is.\nDescending ranges already behave this way and must keep doing so.\n",
+  "target_file": "boltons/timeutils.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "boltons",
+    "repository": "https://github.com/mahmoud/boltons",
+    "commit": "4332b35a278d694f30c99881faa61cde695c7a96",
+    "path": "boltons/timeutils.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The ascending case always uses the exclusive comparison.",
+  "harness_files": [
+    "boltons/__init__.py",
+    "tests/test_timeutils_basic.py"
+  ]
+}

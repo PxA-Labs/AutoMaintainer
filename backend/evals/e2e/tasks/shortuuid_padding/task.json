@@ -1,0 +1,24 @@
+{
+  "id": "shortuuid_padding",
+  "title": "encode/decode round trip fails for UUIDs with leading zero bits",
+  "body": "`ShortUUID.encode` in `shortuuid/main.py` pads short encodings on the\nwrong end, so `decode(encode(u))` is not `u` whenever the encoded\nnumber is shorter than the full length:\n\n```python\n>>> from uuid import UUID\n>>> su = ShortUUID()\n>>> su.decode(su.encode(UUID(int=1))) == UUID(int=1)\nFalse   # expected True\n```\n\nThe output is most-significant-digit first, so padding with the first\nalphabet character must add leading (most significant) zeros, e.g.\n`su.encode(UUID(int=0)) == \"2\" * 22` and `su.encode(UUID(int=1))`\nends with \"3\". Expected: `decode(encode(u)) == u` for every UUID and\nevery `pad_length`.\n",
+  "target_file": "shortuuid/main.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "hard",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "shortuuid",
+    "repository": "https://github.com/skorokithakis/shortuuid",
+    "commit": "16374d288c796faa2aee5789ed649c3ed7cdd9be",
+    "path": "shortuuid/main.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "int_to_string() pads on the least significant end.",
+  "harness_files": [
+    "shortuuid/__init__.py",
+    "tests/test_shortuuid_basic.py"
+  ]
+}

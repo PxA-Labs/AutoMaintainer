@@ -1,0 +1,11 @@
+{
+  "id": "bad_update_in_weakened_test",
+  "task_id": "toolz_update_in_copy",
+  "expected_verdict": "reject",
+  "defect_class": "deleted-test",
+  "description": "Leaves the bug and removes an assertion from the repository's tests.",
+  "changed_files": [
+    "tests/test_dicttoolz_basic.py"
+  ],
+  "deleted_files": []
+}

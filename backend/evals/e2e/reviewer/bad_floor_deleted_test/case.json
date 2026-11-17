@@ -1,0 +1,11 @@
+{
+  "id": "bad_floor_deleted_test",
+  "task_id": "boltons_floor_options_exact",
+  "expected_verdict": "reject",
+  "defect_class": "deleted-test",
+  "description": "Deletes the repository's mathutils tests and changes nothing else.",
+  "changed_files": [],
+  "deleted_files": [
+    "tests/test_mathutils_basic.py"
+  ]
+}

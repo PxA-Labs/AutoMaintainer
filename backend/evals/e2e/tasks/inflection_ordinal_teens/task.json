@@ -1,0 +1,23 @@
+{
+  "id": "inflection_ordinal_teens",
+  "title": "ordinalize(12) returns '12nd' and ordinalize(13) returns '13rd'",
+  "body": "English ordinals for numbers ending in 11, 12 and 13 always take \"th\",\nbut `ordinal`/`ordinalize` in `inflection/__init__.py` only handle 11:\n\n```python\n>>> inflection.ordinalize(12)\n'12nd'   # expected '12th'\n>>> inflection.ordinalize(113)\n'113rd'  # expected '113th'\n```\n\nExpected: any number whose last two digits are 11, 12 or 13 gets \"th\"\n(also for negative numbers, e.g. `ordinalize(-12) == '-12th'`); other\nnumbers are unchanged (1st, 2nd, 3rd, 21st, 102nd, ...).\n",
+  "target_file": "inflection/__init__.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "inflection",
+    "repository": "https://github.com/jpvanhal/inflection",
+    "commit": "b00d4d348b32ef5823221b20ee4cbd1d2d924462",
+    "path": "inflection/__init__.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The 12 and 13 cases of the teens rule were dropped.",
+  "harness_files": [
+    "tests/test_inflection_basic.py"
+  ]
+}
