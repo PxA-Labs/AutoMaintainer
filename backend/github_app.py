@@ -1044,6 +1044,15 @@ async def exchange_oauth_code(code: str) -> str:
     return token
 
 
+class WebhookSignatureError(ValueError):
+    """X-Hub-Signature-256 is missing or does not match the body.
+
+    A ValueError subclass so existing callers keep working; POST
+    /webhooks/github maps it to 401 and every other ValueError (a signed but
+    malformed delivery) to 400.
+    """
+
+
 async def handle_github_webhook(
     raw_body: bytes, headers: Dict[str, str], supabase_client
 ) -> Dict[str, Any]:
@@ -1061,7 +1070,7 @@ async def handle_github_webhook(
         raise ValueError("GitHub webhook secret is not configured")
     signature = headers.get("x-hub-signature-256", "")
     if not verify_webhook_signature(raw_body, signature):
-        raise ValueError("Invalid webhook signature")
+        raise WebhookSignatureError("Invalid webhook signature")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
@@ -1146,6 +1155,10 @@ def verify_webhook_signature(raw_body: bytes, signature_header: str) -> bool:
         return False
 
     expected_sig = signature_header[7:]  # Remove "sha256="
+    # compare_digest raises TypeError on non-ASCII str; a forged header must
+    # be a plain mismatch, not a 500.
+    if not expected_sig.isascii():
+        return False
     computed_sig = hmac.new(
         GITHUB_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
     ).hexdigest()
@@ -1179,6 +1192,7 @@ __all__ = [
     "get_installation_repositories",
     "sync_installation_repositories",
     "handle_github_webhook",
+    "WebhookSignatureError",
     "get_github_app_client",
     "generate_app_jwt",
     "verify_webhook_signature",

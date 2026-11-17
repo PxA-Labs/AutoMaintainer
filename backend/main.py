@@ -659,6 +659,7 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
     """Receive and persist signed GitHub App webhook deliveries, then
     enqueue their processing."""
     from agents import supabase as agents_supabase
+    from github_app import WebhookSignatureError
 
     if not os.getenv("GITHUB_WEBHOOK_SECRET"):
         raise HTTPException(
@@ -674,6 +675,12 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks):
             dict(request.headers),
             agents_supabase,
         )
+    # A missing or wrong X-Hub-Signature-256 is 401 with a fixed body; it is
+    # decided before the body is parsed or the database is read. A correctly
+    # signed delivery that is malformed (not JSON, no event or delivery
+    # header) stays 400: the sender is authenticated, the request is bad.
+    except WebhookSignatureError:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
