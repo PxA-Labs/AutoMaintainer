@@ -49,7 +49,8 @@ RUN npm install -g --omit=dev \
 
 # ---------------------------------------------------------------------------
 # Stage 3: build the Python virtualenv (build-essential stays in this stage)
-# Installs exactly what backend/uv.lock pins (runtime deps only, no dev
+# Installs exactly what backend/uv.lock pins (engine deps plus the server
+# extra: FastAPI, uvicorn, Celery, OpenTelemetry; no dev
 # group). --frozen installs the lock as-is and never re-resolves (Backend CI
 # runs `uv lock --check` so the lock always matches pyproject.toml). The venv
 # is created at /opt/venv with the base image's interpreter, which sits at the
@@ -70,7 +71,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_NO_CACHE=1
 WORKDIR /build
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --extra server
 
 # ---------------------------------------------------------------------------
 # Stage 4: runtime

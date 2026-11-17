@@ -451,6 +451,38 @@ event loop without sharing clients, settings or caches.
   subprocesses (`workspace`, `{**os.environ, "GIT_TERMINAL_PROMPT": "0"}`);
   and logging and warnings setup, which is process-global by nature.
 
+**Package and SDK (#187).** `backend/automaintainer` is also an installable
+wheel (`uv build` in `backend/`, hatchling; version from
+`automaintainer.__version__`).
+
+- **Public surface.** `automaintainer` exports `AutoMaintainerConfig`,
+  `AutoMaintainerEngine`, `RunResult`, `RunAlreadyActive`,
+  `cancel_active_run`, the runners (`BaseRunner`, `LocalRunner`,
+  `SandboxRunner`, `SandboxBackend`) and the `RunnerError` family, all
+  resolved lazily: `import automaintainer` does no I/O and loads no runtime
+  module. `automaintainer.runners` is the runner package.
+- **Layout.** The engine runtime (`agents`, `ast_indexer`, `events`,
+  `github_app`, `rate_limiter`, `workspace`, `verification`,
+  `change_limits`, `merge_policy`, `merge_audit`, `trust`, `redis_locks`)
+  lives in the private `automaintainer._runtime` and imports itself
+  relatively; the wheel ships only `automaintainer`, never `main`, `tasks`,
+  `celery_app`, `quotas`, `observability` or a generic top-level module.
+- **Old names.** `backend/agents.py`, `backend/runners/` and the other old
+  paths are aliases: they put the moved module itself in `sys.modules` under
+  the old name, so `import agents`, `mock.patch("agents.x")`, the old logger
+  names and `SANDBOX_BACKEND=runners.docker_sandbox:create` reach the code
+  that runs. They exist only in the source tree (the server); SDK users
+  write `automaintainer.runners.docker_sandbox:create`.
+- **Dependencies.** The base install is what the engine imports (LangGraph,
+  langchain-groq, PyGithub, Supabase, Redis, tree-sitter, MCP, PyJWT, and
+  FastAPI, because `workspace` raises `fastapi.HTTPException`). uvicorn,
+  Celery, OpenTelemetry and the other server-only packages are in the
+  `server` extra; the image, CI and `scripts/export-backend-requirements.sh`
+  install it. `[tool.uv] package = false` stays: `uv sync` manages the
+  server's environment and does not install the project.
+- **CI.** The `sdk-wheel` job of Backend CI builds the wheel, installs it in
+  a fresh venv with no extras and imports the engine outside the source tree.
+
 ### Errors
 
 A node raises `PipelineAbortError(error_code, message, phase)` to end a run

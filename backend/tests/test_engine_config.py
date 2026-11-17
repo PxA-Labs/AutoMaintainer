@@ -18,6 +18,8 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 BACKEND = Path(__file__).resolve().parent.parent
+# The engine runtime modules (agents, verification, ...) live here (#187).
+RUNTIME = BACKEND / "automaintainer" / "_runtime"
 sys.path.insert(0, str(BACKEND))
 
 from automaintainer import AutoMaintainerConfig  # noqa: E402
@@ -103,7 +105,7 @@ def test_default_model_routing_is_what_the_agents_use():
 
 def test_default_models_appear_in_the_runtime_source():
     """Drift guard: the defaults are the literals agents.py passes to ChatGroq."""
-    agents = (BACKEND / "agents.py").read_text(encoding="utf-8")
+    agents = (RUNTIME / "agents.py").read_text(encoding="utf-8")
     assert f'model="{config_module.DEFAULT_MODEL}"' in agents
     assert f'ChatGroq(model="{config_module.DEFAULT_FALLBACK_MODEL}"' in agents
     assert (
@@ -112,7 +114,7 @@ def test_default_models_appear_in_the_runtime_source():
 
 
 def test_merge_policies_match_merge_policy_module():
-    source = (BACKEND / "merge_policy.py").read_text(encoding="utf-8")
+    source = (RUNTIME / "merge_policy.py").read_text(encoding="utf-8")
     quoted = ", ".join(f'"{p}"' for p in config_module.MERGE_POLICIES)
     assert f"POLICIES = ({quoted})" in source
     assert 'DEFAULT_POLICY = "human"' in source
@@ -267,7 +269,7 @@ def test_from_env_groq_key_pool_order_and_range():
 
 
 def test_key_pool_names_match_rate_limiter():
-    source = (BACKEND / "rate_limiter.py").read_text(encoding="utf-8")
+    source = (RUNTIME / "rate_limiter.py").read_text(encoding="utf-8")
     assert 'os.getenv("GROQ_API_KEY")' in source
     assert "for i in range(1, 20):" in source
     assert GROQ_KEY_POOL_ENV[0] == "GROQ_API_KEY"
@@ -341,7 +343,7 @@ def test_from_env_invalid_allow_local_is_reported_with_other_problems(env, other
 
 def runtime_flag_spellings() -> tuple[set[str], set[str]]:
     """The true/false spellings of verification._env_flag, read as text."""
-    source = (BACKEND / "verification.py").read_text(encoding="utf-8")
+    source = (RUNTIME / "verification.py").read_text(encoding="utf-8")
     body = source.split("def _env_flag", 1)[1].split("\ndef ", 1)[0]
     true_part, false_part = re.findall(r"in \(([^)]*)\)", body)[:2]
     return (
@@ -676,6 +678,9 @@ _IMPORT_PROBE = textwrap.dedent("""
                         "verification", "change_limits", "merge_policy",
                         "tasks", "celery_app", "main", "runners")
             if m in sys.modules
+        ) + sorted(
+            m for m in sys.modules
+            if m.startswith(("automaintainer._runtime", "automaintainer.runners"))
         ),
     }))
     """)
@@ -793,15 +798,17 @@ def test_parity_scanner_resolves_named_constants():
 
 
 def runtime_env_vars() -> set[str]:
-    """Variables the runtime reads (backend/*.py and backend/runners/*.py).
+    """Variables the runtime reads (backend/*.py, automaintainer/_runtime, runners).
 
     evals/ is not scanned: it is a developer tool (it reads GROQ_API_KEY to
     run the evaluation harness), not part of the engine. A name built at run
     time other than the GROQ_API_KEY_{i} f-string would still be missed.
     """
     names = set()
-    sources = [p for p in BACKEND.glob("*.py")] + list(
-        (BACKEND / "runners").glob("*.py")
+    sources = (
+        list(BACKEND.glob("*.py"))
+        + list(RUNTIME.glob("*.py"))
+        + list((BACKEND / "automaintainer" / "runners").glob("*.py"))
     )
     for path in sources:
         if path.name.startswith("test_") or path.name == "conftest.py":
@@ -863,7 +870,7 @@ def _graph_node_names(source: str) -> set:
 
 
 def test_model_routing_roles_are_the_graph_nodes():
-    agents = (BACKEND / "agents.py").read_text(encoding="utf-8")
+    agents = (RUNTIME / "agents.py").read_text(encoding="utf-8")
     nodes = _graph_node_names(agents)
     assert nodes, "could not find the graph nodes in agents.py"
     roles = set(ModelRouting.model_fields) - {"fallback", "inline_assist"}
@@ -871,7 +878,7 @@ def test_model_routing_roles_are_the_graph_nodes():
 
 
 def test_change_limit_defaults_match_change_limits_module():
-    source = (BACKEND / "change_limits.py").read_text(encoding="utf-8")
+    source = (RUNTIME / "change_limits.py").read_text(encoding="utf-8")
     defaults = make()
     assert f"DEFAULT_MAX_FILES = {defaults.change_max_files}" in source
     assert f"DEFAULT_MAX_LINES = {defaults.change_max_lines}" in source

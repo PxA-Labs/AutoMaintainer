@@ -116,9 +116,119 @@ jobs:
       # Audits every locked package (runtime and dev group), exported from
       # uv.lock, so the scan covers exactly what CI and the image install.
       run: |
-        uv export --frozen --all-groups --no-emit-project --no-hashes \
+        uv export --frozen --all-groups --all-extras --no-emit-project --no-hashes \
           --format requirements-txt -o "$RUNNER_TEMP/requirements-locked.txt"
         pip-audit -r "$RUNNER_TEMP/requirements-locked.txt"
+
+  sdk-wheel:
+    # #187: the SDK wheel installs on its own. Builds the sdist and the wheel
+    # (from the sdist), installs the wheel into a fresh venv with no extras,
+    # and checks that importing the engine loads no server module and that
+    # no generic top-level module (events, agents, ...) was installed.
+    name: SDK wheel (clean venv import)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+    env:
+      UV_PYTHON: "3.11"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Build the sdist and wheel
+      run: |
+        uv build --out-dir "$RUNNER_TEMP/dist"
+
+    - name: Check the wheel ships only the automaintainer package
+      # Every top-level entry must be automaintainer/ or the dist-info, so no
+      # moved runtime module (rate_limiter, merge_policy, ...) can leak into
+      # site-packages under a generic name.
+      run: |
+        python - "$RUNNER_TEMP"/dist/*.whl <<'EOF'
+        import sys
+        import zipfile
+
+        (wheel,) = sys.argv[1:]
+        tops = {name.split("/", 1)[0] for name in zipfile.ZipFile(wheel).namelist()}
+        extra = sorted(
+            t for t in tops if t != "automaintainer" and not t.endswith(".dist-info")
+        )
+        assert "automaintainer" in tops, tops
+        assert not extra, f"unexpected top-level wheel entries: {extra}"
+        print("wheel top-level entries:", sorted(tops))
+        EOF
+
+    - name: Install the wheel into a fresh venv (no extras)
+      run: |
+        uv venv "$RUNNER_TEMP/sdk-venv"
+        uv pip install --python "$RUNNER_TEMP/sdk-venv/bin/python" "$RUNNER_TEMP"/dist/*.whl
+
+    - name: Import the SDK outside the source tree
+      # -I and a cwd outside backend/: only the installed wheel is importable.
+      working-directory: ${{ runner.temp }}
+      run: |
+        "$RUNNER_TEMP/sdk-venv/bin/python" -I - <<'EOF'
+        import importlib.util
+        import sys
+
+        import automaintainer
+        from automaintainer import AutoMaintainerEngine, LocalRunner, SandboxRunner
+
+        loaded = sorted({"fastapi", "main", "celery", "tasks"} & set(sys.modules))
+        assert not loaded, f"server modules loaded: {loaded}"
+        generic = [
+            name
+            for name in ("events", "trust", "workspace", "agents", "runners", "github_app")
+            if importlib.util.find_spec(name) is not None
+        ]
+        assert not generic, f"generic top-level modules installed: {generic}"
+        assert "site-packages" in automaintainer.__file__, automaintainer.__file__
+        print("automaintainer", automaintainer.__version__, "imports cleanly")
+        EOF
+
+    - name: Import every module the engine loads at run time
+      # A separate interpreter: these imports load fastapi (a base dependency
+      # of workspace), which the check above must not see. A base dependency
+      # missing for a lazily imported module fails here, not in a user's run.
+      # Dependencies resolve from PyPI without the lock on purpose: this job
+      # checks what `pip install` gives a user.
+      working-directory: ${{ runner.temp }}
+      run: |
+        "$RUNNER_TEMP/sdk-venv/bin/python" -I - <<'EOF'
+        import importlib
+        import pkgutil
+
+        import automaintainer
+
+        names = [
+            m.name
+            for m in pkgutil.walk_packages(automaintainer.__path__, "automaintainer.")
+        ]
+        assert "automaintainer._runtime.agents" in names, names
+        assert "automaintainer.runners.docker_sandbox" in names, names
+        for name in names:
+            importlib.import_module(name)
+        print(f"{len(names)} automaintainer modules import cleanly")
+        EOF
 
   test:
     name: Test (${{ matrix.os }} - Py${{ matrix.python-version }})
@@ -159,7 +269,7 @@ jobs:
 
     - name: Install dependencies from uv.lock
       run: |
-        uv sync --frozen --group dev
+        uv sync --frozen --extra server --group dev
 
     - name: Run Tests with pytest and coverage
       run: |

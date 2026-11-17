@@ -301,7 +301,7 @@ def _seed(conn):
 def db():
     if psycopg2 is None:
         pytest.fail(
-            "psycopg2 is required for the RLS tests (uv sync --frozen --group dev)"
+            "psycopg2 is required for the RLS tests (uv sync --frozen --extra server --group dev)"
         )
 
     admin = psycopg2.connect(DATABASE_URL)

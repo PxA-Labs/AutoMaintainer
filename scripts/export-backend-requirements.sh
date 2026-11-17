@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../backend"
 
-args=(export --frozen --no-dev --no-emit-project --no-hashes --format requirements-txt)
+args=(export --frozen --no-dev --extra server --no-emit-project --no-hashes --format requirements-txt)
 if [[ $# -gt 0 ]]; then
   # Redirect instead of -o: uv -o also echoes to stdout and embeds the path.
   uv "${args[@]}" > "$1"

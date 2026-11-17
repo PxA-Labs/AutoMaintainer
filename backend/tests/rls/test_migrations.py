@@ -86,7 +86,7 @@ def fresh_database(*, migrate=True):
     """A connection to a new database with the shim (and the migrations)."""
     if psycopg2 is None:
         pytest.fail(
-            "psycopg2 is required for the RLS tests (uv sync --frozen --group dev)"
+            "psycopg2 is required for the RLS tests (uv sync --frozen --extra server --group dev)"
         )
     admin = psycopg2.connect(DATABASE_URL)
     admin.autocommit = True
