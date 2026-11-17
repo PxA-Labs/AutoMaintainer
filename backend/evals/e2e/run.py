@@ -129,6 +129,30 @@ def _live_keys() -> list:
     ]
 
 
+REDACTED = "[REDACTED]"
+
+
+def redact(value, secrets):
+    """``value`` with every occurrence of each secret replaced, recursively
+    through dicts (keys and values), lists and strings."""
+    secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
+    if not secrets:
+        return value
+
+    def walk(v):
+        if isinstance(v, str):
+            for secret in secrets:
+                v = v.replace(secret, REDACTED)
+            return v
+        if isinstance(v, dict):
+            return {walk(k): walk(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [walk(x) for x in v]
+        return v
+
+    return walk(value)
+
+
 class _Agents:
     """Builds the transport for each run of the chosen mode."""
 
@@ -278,14 +302,21 @@ async def _run_all(args, tasks, cases, by_id, agents, prices, run_kwargs):
     return records, recorded
 
 
-def _save_cassettes(args, recorded):
+def _save_cassettes(args, recorded, secrets=()):
     source = args.mode
     groups: dict = {}
     for (kind, key, repeat), transport in recorded.items():
-        groups.setdefault((kind, key), {})[repeat] = [
-            {k: v for k, v in call.items() if k not in ("stale", "recorded_latency_ms")}
-            for call in transport.calls
-        ]
+        groups.setdefault((kind, key), {})[repeat] = redact(
+            [
+                {
+                    k: v
+                    for k, v in call.items()
+                    if k not in ("stale", "recorded_latency_ms")
+                }
+                for call in transport.calls
+            ],
+            secrets,
+        )
     for (kind, key), runs in sorted(groups.items()):
         ordered = [runs[r] for r in sorted(runs)]
         note = f"recorded with python -m evals.e2e.run --mode {source} --record"
@@ -427,6 +458,10 @@ def main(argv=None, live_transport_factory=None) -> int:
             "supabase": "in-memory fake",
         },
     }
+    # Model-written code runs in this process and could print a key into
+    # its test output; nothing written or printed below may carry one.
+    secrets = _live_keys()
+    records = redact(records, secrets)
     pipeline = [r for r in records if r["kind"] == "pipeline"]
     reviewer = [r for r in records if r["kind"] == "reviewer"]
     report = build_report(
@@ -439,7 +474,7 @@ def main(argv=None, live_transport_factory=None) -> int:
     markdown = args.markdown or args.out.with_suffix(".md")
     markdown.write_text(render_markdown(report) + "\n", encoding="utf-8")
     if args.record is not None:
-        _save_cassettes(args, recorded)
+        _save_cassettes(args, recorded, secrets)
     print(render_markdown(report))
     errors = [r for r in records if r.get("error")]
     if errors:

@@ -207,3 +207,41 @@ def test_live_mode_uses_the_key_pool_and_records_usage(tmp_path, monkeypatch):
     assert overall["prompt_tokens"]["mean"] == 30
     assert overall["cost_usd"]["mean"] is not None
     assert data["metadata"]["synthetic"] is False
+
+
+def test_live_outputs_never_contain_a_key(tmp_path, monkeypatch, capsys):
+    # Model-written code runs in the process that holds the key; if it
+    # prints the key, the reports, cassettes and log must not carry it.
+    secret = "gsk_eval_secret_0123456789"
+    monkeypatch.setenv("GROQ_API_KEY", secret)
+    item = run.load_e2e_tasks(["inflection_ordinal_teens"])[0]
+    leaky = item.task.read_target() + f"\nraise RuntimeError({secret!r})\n"
+    oracle = oracle_pipeline(item)
+
+    def policy(role, system, user):
+        return leaky if role == "implementer" else oracle(role, system, user)
+
+    cassettes = tmp_path / "cassettes"
+    code, data, out = _run(
+        tmp_path, "live", "--mode", "live", "--suite", "pipeline", "--repeats", "1",
+        "--tasks", "inflection_ordinal_teens", "--record", str(cassettes),
+        live_transport_factory=lambda args: ScriptedTransport(policy),
+    )  # fmt: skip
+    assert code == 0
+    [record] = data["pipeline"]["runs"]
+    assert "[REDACTED]" in record["test_output"]
+    cassette = cassettes / "pipeline" / "inflection_ordinal_teens.json"
+    assert "[REDACTED]" in cassette.read_text(encoding="utf-8")
+    for path in (out, out.with_suffix(".md"), cassette):
+        assert secret not in path.read_text(encoding="utf-8")
+    printed = capsys.readouterr()
+    assert secret not in printed.out and secret not in printed.err
+
+
+def test_redact_replaces_every_key_in_nested_values():
+    value = {"a": ["x key-1 y", {"b": "key-2"}], "c": 3, "key-1": None}
+    assert run.redact(value, ["key-1", "key-2", ""]) == {
+        "a": ["x [REDACTED] y", {"b": "[REDACTED]"}],
+        "c": 3,
+        "[REDACTED]": None,
+    }
