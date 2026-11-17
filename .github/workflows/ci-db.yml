@@ -80,7 +80,7 @@ jobs:
         cache-dependency-glob: "backend/uv.lock"
 
     - name: Install dependencies from uv.lock
-      run: uv sync --frozen --group dev
+      run: uv sync --frozen --extra server --group dev
 
     - name: supabase_schema.sql is generated from supabase/migrations
       run: |
