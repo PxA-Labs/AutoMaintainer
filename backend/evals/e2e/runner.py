@@ -215,9 +215,8 @@ async def run_pipeline_task(
     record["attempted"] = record["fix_iterations"] > 0
     record["maintainer_approved"] = raw.get("merge_status") in APPROVED_STATUSES
     record["verification"] = _verification_status(world)
-    pulls = sorted(world.repo.pulls.values(), key=lambda pr: pr.number)
-    if pulls:
-        pr = pulls[0]
+    pr = final_pull(world.repo)
+    if pr is not None:
         record["pr_opened"] = True
         record["changed_files"] = [f.filename for f in pr.get_files()]
         tree = world.repo.tree(pr.head.sha)
@@ -230,6 +229,15 @@ async def run_pipeline_task(
         record["maintainer_approved"] and record["resolved"]
     )
     return record
+
+
+def final_pull(repo):
+    """The pull request whose head is scored: the newest one.
+
+    The engine reuses one branch and PR across iterations, so there is one;
+    if an iteration ever opened another, the newest holds the final head.
+    """
+    return max(repo.pulls.values(), key=lambda pr: pr.number, default=None)
 
 
 # --- Reviewer --------------------------------------------------------------------

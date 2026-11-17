@@ -68,6 +68,32 @@ def test_branch_commit_and_pull_request(gh):
     assert repo.comments == [(pr.number, "hello")]
 
 
+def test_scoring_takes_the_newest_pull_request_as_the_final_head(gh):
+    # The engine reuses one PR across iterations today; if an iteration ever
+    # opened another, scoring the first one would score a stale head.
+    from evals.e2e.runner import final_pull
+
+    client, repo = gh
+    gh_repo = client.get_repo("eval/demo")
+    assert final_pull(repo) is None
+    base = gh_repo.get_branch("main").commit.sha
+    opened = []
+    for branch, value in (("first", "2"), ("second", "3")):
+        gh_repo.create_git_ref(ref=f"refs/heads/{branch}", sha=base)
+        current = gh_repo.get_contents("pkg/mod.py", ref=branch)
+        gh_repo.update_file(
+            path="pkg/mod.py",
+            message=branch,
+            content=f"x = {value}\n",
+            sha=current.sha,
+            branch=branch,
+        )
+        opened.append(
+            gh_repo.create_pull(title=branch, body="b", head=branch, base="main")
+        )
+    assert final_pull(repo) is opened[1]
+
+
 def test_pull_request_without_changes_is_refused(gh):
     client, _ = gh
     gh_repo = client.get_repo("eval/demo")
