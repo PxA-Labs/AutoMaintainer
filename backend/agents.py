@@ -1,6 +1,7 @@
 import ast
 import os
 import logging
+import threading
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -133,15 +134,49 @@ def _clean_env(val: str | None) -> str | None:
 
 SUPABASE_URL = _clean_env(os.getenv("SUPABASE_URL"))
 SUPABASE_SERVICE_KEY = _clean_env(os.getenv("SUPABASE_SERVICE_KEY"))
-supabase: Client | None = None
-if SUPABASE_URL and SUPABASE_SERVICE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+# Importing this module performs no I/O: the Supabase client and the compiled
+# graph are built on first use (get_supabase / get_default_graph) and cached
+# as the module globals ``supabase`` and ``app``, which the module
+# ``__getattr__`` (end of file) serves to ``agents.supabase`` and
+# ``from agents import app``. Caching in the module dict rather than in an
+# lru_cache keeps assigning ``agents.supabase`` / ``agents.app`` (as the tests
+# do) an override that every use in this module honours.
+_UNSET = object()
+_lazy_globals_lock = threading.RLock()
+
+
+def _lazy_global(name: str, factory):
+    """Module global ``name``, built once by ``factory`` (thread-safe)."""
+    value = globals().get(name, _UNSET)
+    if value is _UNSET:
+        with _lazy_globals_lock:
+            value = globals().get(name, _UNSET)
+            if value is _UNSET:
+                value = factory()
+                globals()[name] = value
+    return value
+
+
+def _create_supabase_client() -> Client | None:
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    return None
+
+
+def get_supabase() -> Client | None:
+    """The service-role Supabase client, or None when it is not configured.
+
+    Created on first call; ``agents.supabase`` is the same object.
+    """
+    return _lazy_global("supabase", _create_supabase_client)
 
 
 async def emit_event(event: BaseEvent) -> None:
     """
     Emit a strongly-typed domain event to the current emitter or fallback Supabase sink.
     """
+    supabase = get_supabase()
     emitter = current_emitter.get(None)
     if emitter is not None:
         await emitter.emit(event)
@@ -151,6 +186,7 @@ async def emit_event(event: BaseEvent) -> None:
 
 
 async def broadcast_log(message: Union[dict, BaseEvent]):
+    supabase = get_supabase()
     if isinstance(message, BaseEvent):
         await emit_event(message)
         return
@@ -1922,6 +1958,7 @@ def run_branch_name(run_id: str | None, issue_number: int) -> str:
 
 async def _load_checkpoint(run_id: str | None) -> dict:
     """The run's completed steps from runs.checkpoint ({} when unavailable)."""
+    supabase = get_supabase()
     if not run_id or not supabase:
         return {}
     try:
@@ -1948,6 +1985,7 @@ async def _save_checkpoint(run_id: str | None, **updates) -> None:
     raised: the GitHub lookups below still prevent duplicates, the re-run only
     repeats LLM work.
     """
+    supabase = get_supabase()
     if not run_id or not supabase:
         return
     checkpoint = {**await _load_checkpoint(run_id), **updates}
@@ -2408,6 +2446,7 @@ async def _verify_and_report(gh_repo, pr_number: int, branch_name: str, path: st
     GitHub refuses the write) the run stops instead of handing the
     Maintainer a head the gate would only ever leave unmerged.
     """
+    supabase = get_supabase()
     import verification
 
     run_id = current_run_id.get(None)
@@ -2978,6 +3017,7 @@ async def _effective_merge_policy():
     than once per run, so a setting changed mid-run can differ between those
     decisions. That is harmless: every read is fail-closed and the merge
     decision always acts on, and records, the value it read itself."""
+    supabase = get_supabase()
     import merge_policy
 
     return await asyncio.to_thread(
@@ -3101,6 +3141,7 @@ async def _record_merge_decision(
     """Write the merge_decisions audit row of a decision on ``pr``
     (merge_audit.py). Best effort: record_decision never raises and its
     outcome changes nothing. ``actor`` "agent" is the Maintainer's verdict."""
+    supabase = get_supabase()
     import merge_audit
 
     if head_sha is None:
@@ -3133,6 +3174,7 @@ def _earlier_trigger_hold(run_id):
     only one for the current head SHA: the trigger is the same for every
     iteration. Best effort: when the rows cannot be read, the fresh
     permission lookup (itself fail-closed) decides alone."""
+    supabase = get_supabase()
     import merge_audit
     import trust
 
@@ -3530,23 +3572,62 @@ def should_iterate(state: AgentState):
     return "implementer"
 
 
-# Build the Graph
-workflow = StateGraph(AgentState)
+# Nodes of the agent graph, in the order they are added.
+GRAPH_NODE_NAMES = ("architect", "brainstormer", "pm", "implementer", "maintainer")
 
-workflow.add_node("architect", architect_node)
-workflow.add_node("brainstormer", brainstormer_node)
-workflow.add_node("pm", pm_node)
-workflow.add_node("implementer", implementer_node)
-workflow.add_node("maintainer", maintainer_node)
 
-workflow.set_entry_point("architect")
-workflow.add_edge("architect", "brainstormer")
-workflow.add_edge("brainstormer", "pm")
-workflow.add_conditional_edges("pm", should_implement)
-workflow.add_edge("implementer", "maintainer")
-workflow.add_conditional_edges("maintainer", should_iterate)
+def build_graph(nodes: Optional[dict] = None):
+    """Build and compile a new agent graph.
 
-app = workflow.compile()
+    ``nodes`` maps node names (GRAPH_NODE_NAMES) to replacement node
+    functions; nodes it leaves out use the default implementation. The graph
+    shape (edges and routing) is fixed. Each call returns an independent
+    compiled graph; get_default_graph() is the shared one with the default
+    nodes.
+    """
+    implementations = {
+        "architect": architect_node,
+        "brainstormer": brainstormer_node,
+        "pm": pm_node,
+        "implementer": implementer_node,
+        "maintainer": maintainer_node,
+    }
+    unknown = set(nodes or {}) - set(implementations)
+    if unknown:
+        raise ValueError(f"Unknown graph node(s): {', '.join(sorted(unknown))}")
+    implementations.update(nodes or {})
+
+    workflow = StateGraph(AgentState)
+    for name in GRAPH_NODE_NAMES:
+        workflow.add_node(name, implementations[name])
+
+    workflow.set_entry_point("architect")
+    workflow.add_edge("architect", "brainstormer")
+    workflow.add_edge("brainstormer", "pm")
+    workflow.add_conditional_edges("pm", should_implement)
+    workflow.add_edge("implementer", "maintainer")
+    workflow.add_conditional_edges("maintainer", should_iterate)
+
+    return workflow.compile()
+
+
+def get_default_graph():
+    """The process-wide compiled graph with the default nodes, compiled on
+    first call; ``agents.app`` is the same object."""
+    return _lazy_global("app", build_graph)
+
+
+def __getattr__(name: str):
+    # Module __getattr__ (PEP 562) only runs for names missing from the module
+    # dict, i.e. before the first get_supabase() / get_default_graph() call.
+    # It keeps ``agents.supabase``, ``from agents import supabase`` and
+    # ``agents.app`` (used by many routes and tests) working without building
+    # either at import time.
+    if name == "supabase":
+        return get_supabase()
+    if name == "app":
+        return get_default_graph()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def _fail_run(
@@ -3557,6 +3638,7 @@ async def _fail_run(
     final_state: dict | None,
 ) -> dict:
     """Emit a fatal ErrorEvent, mark the run failed and build the failed result."""
+    supabase = get_supabase()
     await emit_event(
         ErrorEvent(
             run_id=run_id,
@@ -3661,6 +3743,7 @@ async def run_agent_loop(
     database. Only a run started directly without the id (a local script)
     writes a name-keyed clone the IDE routes do not read.
     """
+    supabase = get_supabase()
     if not run_id:
         import uuid
 
@@ -3756,7 +3839,9 @@ async def run_agent_loop(
     last_idx = 0
     final_state: dict | None = None
     try:
-        async for state in app.astream(initial_state, stream_mode="values"):
+        async for state in get_default_graph().astream(
+            initial_state, stream_mode="values"
+        ):
 
             new_msgs = state["log_messages"][last_idx:]
             for msg in new_msgs:
