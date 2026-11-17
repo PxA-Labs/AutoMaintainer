@@ -9,6 +9,7 @@ none and its row ends ``completed``.
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -220,12 +221,27 @@ class _CancelOnFinalLog(FakeSupabase):
 async def test_cancel_just_after_the_last_node(tmp_path, grace_seconds, status):
     """The cancel arrives from another thread after the last node returned.
     Without a grace period there is no node left to stop; with one the
-    run's task is interrupted before it writes ``completed``."""
+    run's task is interrupted before it writes ``completed``.
+
+    With a grace period the log write is held until the cancellation has
+    reached the run's task: cancel() schedules task.cancel() through the
+    loop, and if the write finished first the cancel would land during the
+    shielded ``completed`` write instead (#524), which keeps the run
+    completed (see test_cancel_during_the_completed_write_*)."""
     events = Collector()
     holder = {}
-    db = _CancelOnFinalLog(
-        lambda: holder["engine"].cancel("run-1", grace_seconds=grace_seconds)
-    )
+
+    def cancel_from_the_log_thread():
+        engine = holder["engine"]
+        task = engine._runs["run-1"].task
+        assert engine.cancel("run-1", grace_seconds=grace_seconds)
+        if grace_seconds is not None:
+            deadline = time.monotonic() + 30
+            while task.cancelling() == 0:
+                assert time.monotonic() < deadline, "cancel never reached the task"
+                time.sleep(0.001)
+
+    db = _CancelOnFinalLog(cancel_from_the_log_thread)
     engine = _engine(tmp_path, {}, db=db, events=events)
     holder["engine"] = engine
     result = await engine.run(REPO, run_id="run-1")
