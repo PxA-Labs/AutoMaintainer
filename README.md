@@ -201,6 +201,17 @@ See [SECURITY.md](./SECURITY.md) for how to report a vulnerability and for a sum
 
 ---
 
+## Roadmap
+Work in progress, in order. Each step is measured against the one before it.
+
+1. **Evaluation baseline.** A fixed set of 20–30 real tasks with known fixes, run several times each: PRs merged without help, fix iterations, cost and latency per run.
+2. **GCP production deployment** ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)). Terraform, Cloud Run, Secret Manager, keyless CI through Workload Identity Federation, Cloud Trace, and sandboxed verification before other users' repositories are allowed.
+3. **ADK specialist agents** ([#525](https://github.com/PxA-Labs/AutoMaintainer/issues/525)). Tool-using agents built with Google's Agent Development Kit, called from the LangGraph engine, which keeps all authority. The first is the Reviewer. Design: [docs/design/adk-specialist-agents.md](https://github.com/PxA-Labs/AutoMaintainer/blob/feat/adk-migration/docs/design/adk-specialist-agents.md).
+4. **RAG over the codebase** ([#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526)). Function-level chunks in pgvector with org-scoped RLS, a retriever tool for planning and review, and prompt-injection tests for retrieved text.
+5. **Metrics and alerting.** Per-run latency, tokens and cost in Cloud Monitoring, with alerts.
+
+---
+
 ## Contributing
 Want to add a new Agent or improve the dashboard? Check out our [Contributing Guidelines](./CONTRIBUTING.md).
 
