@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import agents
 import main
+import worker_probe
 from main import app
 
 client = TestClient(app)
@@ -54,14 +55,14 @@ class FakeConnection:
 @pytest.fixture(autouse=True)
 def fresh_probe(monkeypatch):
     monkeypatch.delenv("AGENT_WORKER_CHECK", raising=False)
-    monkeypatch.setattr(main, "_worker_check_off_warned", False)
+    monkeypatch.setattr(worker_probe, "_worker_check_off_warned", False)
     monkeypatch.setattr(
-        main,
+        worker_probe,
         "_worker_probe",
         {"checked_at": float("-inf"), "available": False, "future": None},
     )
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr(main, "_worker_probe_executor", executor)
+    monkeypatch.setattr(worker_probe, "_worker_probe_executor", executor)
 
     async def user():
         return {"user_id": "u1", "org_id": "org-1", "role": "member", "email": "e"}
@@ -80,7 +81,7 @@ def use_inspect(monkeypatch, inspect):
         return connections[-1]
 
     monkeypatch.setattr(
-        main,
+        worker_probe,
         "celery_app",
         SimpleNamespace(
             control=SimpleNamespace(inspect=inspect),
@@ -147,7 +148,7 @@ def test_start_with_agent_worker_queues_the_run(monkeypatch):
     assert response.json()["celery_task_id"] == "celery-1"
     task.apply_async.assert_called_once()
     sb.table.return_value.insert.assert_called_once()
-    assert inspect.calls == [main.WORKER_PING_TIMEOUT_SECONDS]
+    assert inspect.calls == [worker_probe.WORKER_PING_TIMEOUT_SECONDS]
 
 
 @pytest.mark.parametrize("value", ["false", "0", "off", " No "])
@@ -181,16 +182,16 @@ def test_check_stays_on_for_other_values(monkeypatch, value):
 
 def test_probe_result_is_cached_for_a_few_seconds(monkeypatch):
     clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(main.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(worker_probe.time, "monotonic", lambda: clock.now)
     inspect = FakeInspect(replies=None)
     use_inspect(monkeypatch, inspect)
 
     def available():
-        return asyncio.run(main.agent_worker_available())
+        return asyncio.run(worker_probe.agent_worker_available())
 
     assert available() is False
     inspect.replies = AGENT_WORKER
-    clock.now += main.WORKER_PING_CACHE_SECONDS - 0.5
+    clock.now += worker_probe.WORKER_PING_CACHE_SECONDS - 0.5
     assert available() is False  # still cached
     assert len(inspect.calls) == 1
 
@@ -202,9 +203,9 @@ def test_probe_result_is_cached_for_a_few_seconds(monkeypatch):
 def test_probe_connects_with_short_timeouts_and_one_retry(monkeypatch):
     connections = use_inspect(monkeypatch, FakeInspect(replies=AGENT_WORKER))
 
-    assert asyncio.run(main.agent_worker_available()) is True
+    assert asyncio.run(worker_probe.agent_worker_available()) is True
 
-    timeout = main.WORKER_PING_TIMEOUT_SECONDS
+    timeout = worker_probe.WORKER_PING_TIMEOUT_SECONDS
     (conn,) = connections
     assert conn.transport_options == {
         "socket_connect_timeout": timeout,
@@ -215,7 +216,7 @@ def test_probe_connects_with_short_timeouts_and_one_retry(monkeypatch):
 
 def test_hung_probe_answers_503_by_the_deadline_and_blocks_no_one(monkeypatch):
     # A blackholed broker host: the probe blocks far past its timeout.
-    monkeypatch.setattr(main, "WORKER_PROBE_DEADLINE_SECONDS", 0.3)
+    monkeypatch.setattr(worker_probe, "WORKER_PROBE_DEADLINE_SECONDS", 0.3)
     sb = supabase_with_repo(monkeypatch)
     task = queued_task(monkeypatch)
     release = threading.Event()
@@ -249,7 +250,7 @@ def test_probe_failure_log_and_body_leave_out_broker_credentials(monkeypatch, ca
     error = ConnectionError("Error connecting to redis://user:s3cret@host:6379/0")
     use_inspect(monkeypatch, FakeInspect(error=error))
 
-    with caplog.at_level("WARNING", logger=main.logger.name):
+    with caplog.at_level("WARNING", logger=worker_probe.logger.name):
         response = client.post("/start", json={"repo_name": "o/r"})
 
     assert response.status_code == 503
@@ -273,7 +274,7 @@ def test_disabled_check_warns_once_in_production(
     queued_task(monkeypatch)
     use_inspect(monkeypatch, FakeInspect(replies=None))
 
-    with caplog.at_level("WARNING", logger=main.logger.name):
+    with caplog.at_level("WARNING", logger=worker_probe.logger.name):
         for _ in range(2):
             assert client.post("/start", json={"repo_name": "o/r"}).status_code == 200
 

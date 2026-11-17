@@ -19,6 +19,7 @@ import github_app
 import tasks
 import trust
 import webhook_processor
+import worker_probe
 from test_webhook_processor import FakeDB, event, installation
 from webhook_processor import process_event, process_pending_events
 
@@ -111,6 +112,10 @@ def test_trigger_label_queues_one_run_like_start(trigger):
     assert run["mode"] == "autonomous"
     assert run["status"] == "queued"
     assert run["celery_task_id"] == "celery-1"
+    # The real trigger is recorded in the row (#518), not only in the log.
+    assert run["trigger_source"] == "label"
+    assert run["trigger_github_id"] == 1001
+    assert run["trigger_login"] == "maintainer"
     trigger.task.apply_async.assert_called_once_with(
         args=[run["id"], "acme/widgets", "org-1", OWNER_ID, 55, 7],
         kwargs={
@@ -409,22 +414,134 @@ def test_processing_the_event_twice_starts_one_run(trigger):
 
 
 def test_worker_check_uses_starts_check(monkeypatch):
-    import main
-
     check = AsyncMock(return_value=False)
-    monkeypatch.setattr(main, "agent_worker_available", check)
+    monkeypatch.setattr(worker_probe, "agent_worker_available", check)
     assert webhook_processor._agent_worker_available() is False
     check.return_value = True
     assert webhook_processor._agent_worker_available() is True
+    assert check.await_count == 2
 
 
 def test_worker_check_fails_closed(monkeypatch):
-    import main
-
     monkeypatch.setattr(
-        main, "agent_worker_available", AsyncMock(side_effect=RuntimeError("x"))
+        worker_probe,
+        "agent_worker_available",
+        AsyncMock(side_effect=RuntimeError("x")),
     )
     assert webhook_processor._agent_worker_available() is False
+
+
+# --- One active run per issue, enforced by the database (#518) ---------------------
+
+
+def _unique_violation(index=webhook_processor.ACTIVE_RUN_INDEX):
+    from postgrest.exceptions import APIError
+
+    return APIError(
+        {
+            "code": "23505",
+            "message": f'duplicate key value violates unique constraint "{index}"',
+            "details": "Key (repository_id, target_issue_number)=(55, 12) "
+            "already exists.",
+        }
+    )
+
+
+class GuardedDB(FakeDB):
+    """FakeDB whose runs inserts can fail at execute(), as postgrest-py's do.
+
+    ``refuse(db, row)`` returns the exception to raise, or None to insert.
+    """
+
+    def __init__(self, refuse, **tables):
+        super().__init__(**tables)
+        self.refuse = refuse
+
+    def table(self, name):
+        query = super().table(name)
+        if name != "runs":
+            return query
+        insert = query.insert
+
+        def guarded_insert(row):
+            error = self.refuse(self, row)
+            if error is None:
+                return insert(row)
+
+            def fail():
+                raise error
+
+            return SimpleNamespace(execute=fail)
+
+        query.insert = guarded_insert
+        return query
+
+
+def unique_index(db, row):
+    """runs_one_active_per_issue as the migration defines it."""
+    if row.get("target_issue_number") is None:
+        return None
+    clash = any(
+        r["repository_id"] == row["repository_id"]
+        and r["target_issue_number"] == row["target_issue_number"]
+        and r["status"] in webhook_processor.ACTIVE_RUN_STATUSES
+        for r in db["runs"]
+    )
+    return _unique_violation() if clash else None
+
+
+def guarded_world(refuse, *events):
+    return GuardedDB(refuse, **world(*events))
+
+
+def test_concurrent_deliveries_start_one_run(trigger, monkeypatch):
+    # Both deliveries pass the active-run check before either inserts (two
+    # github_sync workers at the same moment); the index decides.
+    monkeypatch.setattr(webhook_processor, "_active_run", lambda *_: None)
+    first = labeled(id="ev-1", github_delivery_id="d-1")
+    second = labeled(id="ev-2", github_delivery_id="d-2")
+    db = guarded_world(unique_index, first, second)
+
+    assert process_pending_events(db) == {"completed": 1, "ignored": 1}
+
+    [run] = db["runs"]
+    assert run["status"] == "queued"
+    trigger.task.apply_async.assert_called_once()
+    tasks.log_run_event.assert_awaited_once()
+    statuses = {e["id"]: e["status"] for e in db["webhook_events"]}
+    assert statuses == {"ev-1": "completed", "ev-2": "ignored"}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _unique_violation(index="runs_pkey"),
+        ConnectionError("database unreachable"),
+    ],
+    ids=["other-unique-violation", "connection-error"],
+)
+def test_other_insert_errors_are_retried_not_ignored(trigger, error):
+    ev = labeled()
+    db = guarded_world(lambda *_: error, ev)
+
+    assert _process(db, ev) == "pending"
+
+    assert db["runs"] == []
+    assert db["webhook_events"][0]["retry_count"] == 1
+    trigger.task.apply_async.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (_unique_violation(), True),
+        (_unique_violation(index="runs_pkey"), False),
+        (ValueError(webhook_processor.ACTIVE_RUN_INDEX), False),  # no SQLSTATE
+        (SimpleNamespace(code="23505", message=None, details=None), False),
+    ],
+)
+def test_is_active_run_conflict(error, expected):
+    assert webhook_processor.is_active_run_conflict(error) is expected
 
 
 # --- Through the HTTP route --------------------------------------------------------
