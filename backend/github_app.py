@@ -39,7 +39,10 @@ from typing import Optional, Dict, Any
 import github
 from github import Github, GithubIntegration
 import logging
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
+
+from automaintainer.context import active_config, secret_value
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,10 @@ AUTH_MODE_PAT = "pat"
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 # Cache for installation tokens:
-# (installation_id, repository or None, permissions key) -> (token, expires_at)
+# (installation_id, repository or None, permissions key, App id)
+#   -> (token, expires_at)
+# The App id keeps two engines bound to different GitHub Apps (#186) from
+# ever being handed each other's token for the same installation id.
 _installation_token_cache: Dict[tuple, tuple[str, float]] = {}
 _installation_token_lock = threading.Lock()
 
@@ -75,12 +81,38 @@ class GitHubAuthError(RuntimeError):
     """No acceptable GitHub credential exists for the requested operation."""
 
 
-def app_credentials_configured() -> bool:
+@dataclass(frozen=True)
+class GitHubAppIdentity:
+    """The GitHub App a credential acts for: its id and private key."""
+
+    app_id: Optional[str]
+    private_key: Optional[str] = field(default=None, repr=False)
+    private_key_path: Optional[str] = None
+
+
+def current_app_identity() -> GitHubAppIdentity:
+    """The App of the engine running in this context (#186), else the App
+    configured by GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY(_PATH)."""
+    config = active_config()
+    if config is not None:
+        path = config.github_private_key_path
+        return GitHubAppIdentity(
+            app_id=secret_value(config.github_app_id),
+            private_key=secret_value(config.github_private_key),
+            private_key_path=str(path) if path is not None else None,
+        )
+    return GitHubAppIdentity(
+        GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PRIVATE_KEY_PATH
+    )
+
+
+def app_credentials_configured(app: Optional[GitHubAppIdentity] = None) -> bool:
     """True when an App id and a private key (inline or file) are configured."""
-    if not GITHUB_APP_ID:
+    app = app or current_app_identity()
+    if not app.app_id:
         return False
-    return bool(GITHUB_APP_PRIVATE_KEY) or bool(
-        GITHUB_APP_PRIVATE_KEY_PATH and os.path.exists(GITHUB_APP_PRIVATE_KEY_PATH)
+    return bool(app.private_key) or bool(
+        app.private_key_path and os.path.exists(app.private_key_path)
     )
 
 
@@ -91,6 +123,11 @@ def get_auth_mode() -> str:
     on a typo would silently put a multi-tenant deployment on one global
     credential.
     """
+    config = active_config()
+    if config is not None:
+        if config.github_auth_mode is not None:
+            return config.github_auth_mode
+        return AUTH_MODE_APP if app_credentials_configured() else AUTH_MODE_PAT
     raw = (os.getenv("GITHUB_AUTH_MODE") or "").strip().lower()
     if raw in (AUTH_MODE_APP, AUTH_MODE_PAT):
         return raw
@@ -116,12 +153,13 @@ def _log_auth_mode_at_startup() -> None:
         )
 
 
-def load_private_key() -> str:
+def load_private_key(app: Optional[GitHubAppIdentity] = None) -> str:
     """Load GitHub App private key from env or file."""
-    if GITHUB_APP_PRIVATE_KEY:
-        return GITHUB_APP_PRIVATE_KEY
-    if GITHUB_APP_PRIVATE_KEY_PATH and os.path.exists(GITHUB_APP_PRIVATE_KEY_PATH):
-        with open(GITHUB_APP_PRIVATE_KEY_PATH, "r") as f:
+    app = app or current_app_identity()
+    if app.private_key:
+        return app.private_key
+    if app.private_key_path and os.path.exists(app.private_key_path):
+        with open(app.private_key_path, "r") as f:
             return f.read()
     raise ValueError(
         "GitHub App private key not configured. "
@@ -131,26 +169,28 @@ def load_private_key() -> str:
 
 def get_github_integration() -> GithubIntegration:
     """Get authenticated GitHub Integration client."""
-    if not GITHUB_APP_ID:
+    app = current_app_identity()
+    if not app.app_id:
         raise ValueError("GITHUB_APP_ID not configured")
 
-    private_key = load_private_key()
+    private_key = load_private_key(app)
     return GithubIntegration(
-        auth=github.Auth.AppAuth(app_id=int(GITHUB_APP_ID), private_key=private_key)
+        auth=github.Auth.AppAuth(app_id=int(app.app_id), private_key=private_key)
     )
 
 
-def generate_app_jwt() -> str:
+def generate_app_jwt(app: Optional[GitHubAppIdentity] = None) -> str:
     """Generate a JWT for GitHub App authentication."""
-    if not GITHUB_APP_ID:
+    app = app or current_app_identity()
+    if not app.app_id:
         raise ValueError("GITHUB_APP_ID not configured")
 
-    private_key = load_private_key()
+    private_key = load_private_key(app)
     now = int(time.time())
     payload = {
         "iat": now - 60,  # Issued 60 seconds ago (clock skew tolerance)
         "exp": now + 600,  # Expires in 10 minutes (max allowed)
-        "iss": GITHUB_APP_ID,
+        "iss": app.app_id,
     }
     return jwt.encode(payload, private_key, algorithm="RS256")
 
@@ -187,9 +227,12 @@ def _app_api_client() -> httpx.Client:
     return httpx.Client(base_url=GITHUB_API_URL, timeout=15.0)
 
 
-def _app_headers() -> Dict[str, str]:
+def _app_headers(app: Optional[GitHubAppIdentity] = None) -> Dict[str, str]:
+    # Called without an argument for the process App, so a test double of
+    # generate_app_jwt that takes none keeps working.
+    jwt_token = generate_app_jwt() if app is None else generate_app_jwt(app)
     return {
-        "Authorization": f"Bearer {generate_app_jwt()}",
+        "Authorization": f"Bearer {jwt_token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
@@ -198,13 +241,14 @@ def _app_headers() -> Dict[str, str]:
 def _installation_status_client():
     """The service-role Supabase client, or None when it is not configured.
 
-    Imported lazily: agents imports this module at import time.
+    Imported lazily: agents imports this module at import time. Inside an
+    engine run this is the engine's client (#186).
     """
     try:
         import agents
     except Exception:  # pragma: no cover - agents logs its own import errors
         return None
-    return getattr(agents, "supabase", None)
+    return agents.get_supabase()
 
 
 def _installation_row_suspended_at(installation_id: int) -> Optional[str]:
@@ -286,6 +330,7 @@ def _mint_installation_token(
     repository: Optional[str],
     required: Dict[str, str],
     optional: Dict[str, str],
+    app: Optional[GitHubAppIdentity] = None,
 ) -> tuple[str, float]:
     """POST /app/installations/{id}/access_tokens with a narrowed scope.
 
@@ -297,7 +342,7 @@ def _mint_installation_token(
         raise _suspended(installation_id, "suspended or uninstalled")
 
     with _app_api_client() as client:
-        headers = _app_headers()
+        headers = _app_headers(app)
         resp = client.get(f"/app/installations/{installation_id}", headers=headers)
         if resp.status_code == 404:
             raise _suspended(installation_id, "uninstalled (not found on GitHub)")
@@ -356,11 +401,15 @@ def _token_cache_key(
     installation_id: int,
     repository: Optional[str],
     permissions: Optional[Dict[str, str]],
+    app_id: Optional[str],
 ) -> tuple:
+    # The installation id stays first: invalidate_installation_tokens and
+    # callers that inspect the cache rely on k[0].
     return (
         installation_id,
         repository.lower() if repository else None,
         None if permissions is None else tuple(sorted(permissions.items())),
+        app_id,
     )
 
 
@@ -386,6 +435,7 @@ def get_installation_token_sync(
     *,
     repository: Optional[str] = None,
     permissions: Optional[Dict[str, str]] = None,
+    app: Optional[GitHubAppIdentity] = None,
 ) -> str:
     """Installation access token for ``installation_id``, cached until shortly
     before it expires (TOKEN_REFRESH_MARGIN_SECONDS).
@@ -402,7 +452,10 @@ def get_installation_token_sync(
     both are valid and the later one simply replaces the earlier.
     """
     installation_id = int(installation_id)
-    key = _token_cache_key(installation_id, repository, permissions)
+    # ``app``: the App the caller's credential was created for (an engine's,
+    # #186); by default the App of this context.
+    identity = app or current_app_identity()
+    key = _token_cache_key(installation_id, repository, permissions, identity.app_id)
     with _installation_token_lock:
         cached = _installation_token_cache.get(key)
     if cached and time.time() < cached[1] - TOKEN_REFRESH_MARGIN_SECONDS:
@@ -414,7 +467,7 @@ def get_installation_token_sync(
         required, optional = dict(permissions), {}
     try:
         token, expires_at = _mint_installation_token(
-            installation_id, repository, required, optional
+            installation_id, repository, required, optional, app
         )
     except Exception as e:
         logger.error(f"Failed to get installation token for {installation_id}: {e}")
@@ -455,10 +508,14 @@ class GitHubCredentials:
         installation_id: Optional[int] = None,
         pat: Optional[str] = None,
         repository: Optional[str] = None,
+        app: Optional[GitHubAppIdentity] = None,
     ):
         if (installation_id is None) == (pat is None):
             raise ValueError("Pass exactly one of installation_id or pat")
         self.installation_id = installation_id
+        # The App the token is minted for when it is not the process App (an
+        # engine's, #186). Bound here because token() also runs in threads.
+        self._app = app
         # App mode: the token is scoped to this repository when it is known.
         self.repository = repository
         self._pat = pat
@@ -472,6 +529,10 @@ class GitHubCredentials:
     def token(self) -> str:
         if self._pat is not None:
             return self._pat
+        if self._app is not None:
+            return get_installation_token_sync(
+                self.installation_id, repository=self.repository, app=self._app
+            )
         return get_installation_token_sync(
             self.installation_id, repository=self.repository
         )
@@ -518,11 +579,18 @@ def credentials_for_installation(
             raise GitHubAuthError(
                 "GITHUB_AUTH_MODE is 'app' but GitHub App credentials are not configured"
             )
+        engine_app = current_app_identity() if active_config() else None
         return GitHubCredentials(
-            installation_id=int(installation_id), repository=repository
+            installation_id=int(installation_id),
+            repository=repository,
+            app=engine_app,
         )
 
-    pat = os.getenv("GITHUB_TOKEN")
+    config = active_config()
+    if config is not None:
+        pat = secret_value(config.github_token)
+    else:
+        pat = os.getenv("GITHUB_TOKEN")
     if not pat:
         raise GitHubAuthError("GITHUB_AUTH_MODE is 'pat' but GITHUB_TOKEN is not set")
     return GitHubCredentials(pat=pat)

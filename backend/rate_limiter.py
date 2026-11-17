@@ -15,10 +15,12 @@ import re
 import time
 import asyncio
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Sequence
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 import threading
+
+from automaintainer.context import active_engine
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +204,17 @@ class RateLimitManager:
     and automatic key rotation.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        keys: Optional[Sequence[str]] = None,
+        *,
+        requests_per_minute: Optional[int] = None,
+        tokens_per_minute: Optional[int] = None,
+    ):
+        """``keys`` and the per-key budgets default to the environment
+        (GROQ_API_KEY..., GROQ_REQUESTS_PER_MINUTE, GROQ_TOKENS_PER_MINUTE),
+        read here and in ``initialize``; an engine passes its own (#186)."""
+        self._configured_keys = tuple(keys) if keys is not None else None
         self.keys: List[APIKeyState] = []
         self.current_key_index: int = 0
         # threading.Lock, not asyncio.Lock: the critical sections below never
@@ -213,23 +225,32 @@ class RateLimitManager:
 
         # Configuration
         self.min_healthy_keys = 1
-        self.default_request_rpm = int(os.getenv("GROQ_REQUESTS_PER_MINUTE", "30"))
-        self.default_token_rpm = int(os.getenv("GROQ_TOKENS_PER_MINUTE", "6000"))
+        if requests_per_minute is None:
+            requests_per_minute = int(os.getenv("GROQ_REQUESTS_PER_MINUTE", "30"))
+        if tokens_per_minute is None:
+            tokens_per_minute = int(os.getenv("GROQ_TOKENS_PER_MINUTE", "6000"))
+        self.default_request_rpm = requests_per_minute
+        self.default_token_rpm = tokens_per_minute
 
     async def initialize(self):
-        """Load API keys from environment."""
+        """Load the API keys given to the constructor, else from environment."""
         if self._initialized:
             return
 
         keys = []
-        primary = os.getenv("GROQ_API_KEY")
-        if primary:
-            keys.append(("primary", primary))
+        if self._configured_keys is not None:
+            # Same names as the environment pool: GROQ_API_KEY is "primary".
+            names = ["primary"] + [f"key_{i}" for i in range(1, 20)]
+            keys = list(zip(names, self._configured_keys))
+        else:
+            primary = os.getenv("GROQ_API_KEY")
+            if primary:
+                keys.append(("primary", primary))
 
-        for i in range(1, 20):
-            k = os.getenv(f"GROQ_API_KEY_{i}")
-            if k:
-                keys.append((f"key_{i}", k))
+            for i in range(1, 20):
+                k = os.getenv(f"GROQ_API_KEY_{i}")
+                if k:
+                    keys.append((f"key_{i}", k))
 
         if not keys:
             raise ValueError("No GROQ_API_KEY found in environment")
@@ -395,7 +416,13 @@ _rate_limit_manager: Optional[RateLimitManager] = None
 
 
 async def get_rate_limit_manager() -> RateLimitManager:
-    """Get or create the global rate limit manager."""
+    """The rate limit manager of the engine running in this context (#186),
+    else the process-wide one (created on first call)."""
+    engine = active_engine()
+    if engine is not None:
+        manager = engine.rate_limiter()
+        await manager.initialize()
+        return manager
     global _rate_limit_manager
     if _rate_limit_manager is None:
         _rate_limit_manager = RateLimitManager()

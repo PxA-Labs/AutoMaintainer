@@ -15,6 +15,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
 
+from automaintainer.context import active_config
+
 logger = logging.getLogger(__name__)
 
 # owner/repo or a bare name. Used with re.fullmatch: re.match with "$" would
@@ -29,10 +31,14 @@ DENIED_TOP_LEVEL = {".git"}
 def get_base_workspace_dir() -> Path:
     """Returns the base directory for cloned repositories and local workspaces.
 
-    Prefers AUTOMAINTAINER_WORKSPACE_DIR if set, otherwise falls back to the
+    Prefers the ``workspace_dir`` of the engine running in this context
+    (#186), then AUTOMAINTAINER_WORKSPACE_DIR if set, otherwise falls back to the
     OS-standard temporary directory (e.g., %TEMP%\\automaintainer on Windows or
     /tmp/automaintainer on Linux/macOS).
     """
+    config = active_config()
+    if config is not None and config.workspace_dir is not None:
+        return Path(os.path.abspath(config.workspace_dir))
     env_path = os.getenv("AUTOMAINTAINER_WORKSPACE_DIR")
     if env_path:
         return Path(os.path.abspath(env_path))
@@ -173,11 +179,24 @@ def get_safe_target_path(repo_dir: Path, file_path: str) -> Path:
 
 GIT_TIMEOUT_SECONDS = float(os.getenv("GIT_TIMEOUT_SECONDS", "300"))
 
+
+def git_timeout_seconds() -> float:
+    """The running engine's ``git_timeout_seconds`` (#186), else
+    GIT_TIMEOUT_SECONDS."""
+    config = active_config()
+    if config is not None:
+        return config.git_timeout_seconds
+    return GIT_TIMEOUT_SECONDS
+
+
 # The only URL prefix the auth header is sent to. Scoping it means a remote
 # pointing anywhere else never receives the token.
 _GITHUB_URL_PREFIX = "https://github.com/"
 
-_workspace_scrubbed = False
+# Workspace roots already scrubbed by this process. Per root, so engines
+# with different workspace directories (#186) each scrub their own once and
+# never treat another's as done.
+_scrubbed_roots: set = set()
 
 
 def git_auth_env(token: Optional[str]) -> dict:
@@ -260,16 +279,17 @@ async def scrub_clone_credentials(repo_dir: str) -> None:
 
 
 async def scrub_workspace_credentials() -> None:
-    """Scrub persisted tokens from every clone in the workspace, once per process.
+    """Scrub persisted tokens from every clone in the workspace, once per
+    process and workspace root.
 
     This also reaches clones under the previous directory naming scheme, which
     get_safe_repo_dir no longer returns and so would otherwise never be touched.
     """
-    global _workspace_scrubbed
-    if _workspace_scrubbed:
-        return
-    _workspace_scrubbed = True
     base = get_base_workspace_dir()
+    with _locks_guard:
+        if str(base) in _scrubbed_roots:
+            return
+        _scrubbed_roots.add(str(base))
     if not base.is_dir():
         return
     for entry in base.iterdir():
@@ -303,11 +323,11 @@ async def sync_repo_clone(
     token: Optional[str],
     *,
     remote_url: Optional[str] = None,
-    timeout: float = GIT_TIMEOUT_SECONDS,
+    timeout: Optional[float] = None,
 ) -> bool:
     """Clone ``repo_name`` into ``repo_dir``, or bring an existing clone up to date.
 
-    Returns True on success. On failure the reason is logged and an existing
+    ``timeout`` defaults to git_timeout_seconds(). Returns True on success. On failure the reason is logged and an existing
     clone is left as it was, so callers can continue with the cached copy.
 
     The clone is a server-managed mirror of the default branch, so an existing
@@ -320,6 +340,8 @@ async def sync_repo_clone(
     """
     remote = remote_url or f"{_GITHUB_URL_PREFIX}{repo_name}.git"
     env = git_auth_env(token)
+    if timeout is None:
+        timeout = git_timeout_seconds()
     await scrub_workspace_credentials()
 
     if not os.path.exists(repo_dir):
@@ -394,9 +416,12 @@ _PRUNE_INTERVAL_SECONDS = 60.0
 NO_BRANCH_CACHE_SECONDS = 300.0
 
 _locks_guard = threading.Lock()
+# Keyed by absolute clone (or view) path, which includes the workspace root,
+# so engines with different roots (#186) never share a lock or an entry.
 _clone_locks: dict = {}
 _no_branch_seen: dict = {}
-_last_prune = 0.0
+# Workspace root -> time.monotonic() of its last prune.
+_last_prune: dict = {}
 
 
 def ide_user_key(org_id: str, user_id: str) -> str:
@@ -810,10 +835,11 @@ def prune_ide_views(keep=(), *, now: Optional[float] = None, force: bool = False
 
     Returns the removed views. Blocking; call from a worker thread.
     """
-    global _last_prune
-    if not force and time.monotonic() - _last_prune < _PRUNE_INTERVAL_SECONDS:
+    root = str(get_base_workspace_dir())
+    last = _last_prune.get(root, 0.0)
+    if not force and time.monotonic() - last < _PRUNE_INTERVAL_SECONDS:
         return []
-    _last_prune = time.monotonic()
+    _last_prune[root] = time.monotonic()
     now = time.time() if now is None else now
     keep = {os.path.abspath(str(k)) for k in keep}
 

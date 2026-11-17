@@ -24,8 +24,8 @@ requires_git = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def isolated_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path / "ws"))
-    # The legacy-clone scrub runs once per process; re-arm it for every test.
-    monkeypatch.setattr(workspace, "_workspace_scrubbed", False)
+    # The legacy-clone scrub runs once per process and root; re-arm it.
+    monkeypatch.setattr(workspace, "_scrubbed_roots", set())
     yield
 
 

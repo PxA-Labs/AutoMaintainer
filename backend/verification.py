@@ -20,6 +20,7 @@ reading files the server user can read or from using the network.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -39,6 +40,8 @@ import yaml
 
 from runners.base import CommandTimeoutError, RunnerError
 from runners.sandbox import SandboxRunner, load_sandbox_backend_factory
+
+from automaintainer.context import active_config
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +144,11 @@ def _env_int(name: str, default: int) -> int:
 
 def verification_enabled() -> bool:
     """VERIFY_CHANGES: unset or true runs verification whenever a test
-    command is found; false turns it off (the result is then ``skipped``)."""
+    command is found; false turns it off (the result is then ``skipped``).
+    Inside an engine run, its ``verify_changes`` (#186)."""
+    config = active_config()
+    if config is not None:
+        return config.verify_changes
     return _env_flag("VERIFY_CHANGES") is not False
 
 
@@ -154,9 +161,15 @@ def local_execution_refusal() -> Optional[str]:
 
     Opt-in in every environment, not only when ENVIRONMENT=production: the
     test command is untrusted repository code, and a deployment that does
-    not set ENVIRONMENT must not quietly run it on the host.
+    not set ENVIRONMENT must not quietly run it on the host. Inside an
+    engine run the opt-in is its ``runner_type="local"`` (#186).
     """
-    if _env_flag("VERIFY_ALLOW_LOCAL") is not True:
+    config = active_config()
+    if config is not None:
+        allowed = config.runner_type == "local"
+    else:
+        allowed = _env_flag("VERIFY_ALLOW_LOCAL") is True
+    if not allowed:
         where = "production" if _is_production() else "this environment"
         return (
             f"refused to run repository tests on the API/worker host in {where}; "
@@ -164,6 +177,26 @@ def local_execution_refusal() -> Optional[str]:
             "accept the risk)"
         )
     return None
+
+
+def _sandbox_backend_factory():
+    """The sandbox factory of the engine running in this context (its
+    ``sandbox_backend``, #186), else the one SANDBOX_BACKEND names."""
+    config = active_config()
+    if config is None:
+        return load_sandbox_backend_factory()
+    spec = config.sandbox_backend
+    if spec is None:
+        return None
+    # The config already checked the "package.module:factory" syntax.
+    module_name, _, attr = spec.partition(":")
+    try:
+        factory = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        raise RunnerError(f"Cannot load sandbox_backend={spec!r}: {e}") from e
+    if not callable(factory):
+        raise RunnerError(f"sandbox_backend={spec!r} is not callable")
+    return factory
 
 
 # --- Test command detection ---------------------------------------------------
@@ -185,8 +218,13 @@ def _load_config(repo_dir: Path) -> Optional[dict]:
 
 
 def _config_timeout(config: dict) -> int:
-    default = _env_int("VERIFY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
-    ceiling = _env_int("VERIFY_MAX_TIMEOUT_SECONDS", MAX_TIMEOUT_SECONDS)
+    engine_config = active_config()
+    if engine_config is not None:
+        default = engine_config.timeout_seconds
+        ceiling = engine_config.max_timeout_seconds
+    else:
+        default = _env_int("VERIFY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+        ceiling = _env_int("VERIFY_MAX_TIMEOUT_SECONDS", MAX_TIMEOUT_SECONDS)
     value = config.get("timeout_seconds", default)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise VerificationConfigError("timeout_seconds must be a positive integer")
@@ -440,7 +478,7 @@ async def verify_working_copy(
         )
     try:
         if sandbox_factory is _UNSET:
-            sandbox_factory = load_sandbox_backend_factory()
+            sandbox_factory = _sandbox_backend_factory()
         plan = detect_test_plan(repo_dir)
     except (RunnerError, VerificationConfigError) as e:
         return VerificationResult(ERROR, str(e))
@@ -549,7 +587,7 @@ async def verify_pr_branch(
         )
     # Refuse before spending a clone when the result is known to be a refusal.
     try:
-        sandbox_factory = load_sandbox_backend_factory()
+        sandbox_factory = _sandbox_backend_factory()
     except RunnerError as e:
         return VerificationResult(ERROR, str(e), head_sha=head_sha)
     refusal = local_execution_refusal() if sandbox_factory is None else None
@@ -717,7 +755,11 @@ def audit_row(
     tail, cut = _audit_text(result.output_tail, AUDIT_OUTPUT_TAIL_CHARS)
     summary, _ = _audit_text(result.summary, AUDIT_SUMMARY_CHARS)
     if result.runner == "sandbox":
-        backend = (os.getenv("SANDBOX_BACKEND") or "").strip() or "sandbox"
+        config = active_config()
+        if config is not None:
+            backend = config.sandbox_backend or "sandbox"
+        else:
+            backend = (os.getenv("SANDBOX_BACKEND") or "").strip() or "sandbox"
     else:
         backend = result.runner
     checkpoint = run.get("checkpoint") or {}
