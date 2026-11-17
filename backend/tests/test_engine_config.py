@@ -5,6 +5,7 @@ and the runtime modules are only read as text (the parity test), never
 imported.
 """
 
+import ast
 import json
 import os
 import re
@@ -840,9 +841,30 @@ def test_env_vars_name_real_fields():
     }
 
 
+def _graph_node_names(source: str) -> set:
+    """Node names of the agent graph, read from agents.py's source.
+
+    Covers both the literal ``workflow.add_node("name", ...)`` calls and the
+    ``GRAPH_NODE_NAMES`` tuple that build_graph() loops over.
+    """
+    nodes = set(re.findall(r'workflow\.add_node\("(\w+)"', source))
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == "GRAPH_NODE_NAMES"
+                for t in node.targets
+            )
+            and isinstance(node.value, ast.Tuple)
+        ):
+            nodes |= {e.value for e in node.value.elts if isinstance(e, ast.Constant)}
+    return nodes
+
+
 def test_model_routing_roles_are_the_graph_nodes():
     agents = (BACKEND / "agents.py").read_text(encoding="utf-8")
-    nodes = set(re.findall(r'workflow\.add_node\("(\w+)"', agents))
+    nodes = _graph_node_names(agents)
+    assert nodes, "could not find the graph nodes in agents.py"
     roles = set(ModelRouting.model_fields) - {"fallback", "inline_assist"}
     assert roles == nodes
 
