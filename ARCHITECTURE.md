@@ -419,7 +419,11 @@ event loop without sharing clients, settings or caches.
   also when the cancel lands before the graph starts (during the `runs`
   upsert, whose write is awaited first so it cannot overwrite `cancelled`,
   or credential binding: the engine marks the run itself) and when
-  its task is cancelled (this used to write `failed`). `aclose()` stops its
+  its task is cancelled (this used to write `failed`). The final `completed`
+  write is shielded (#524): a grace cancel that lands during it lets it
+  finish and the run stays `completed`, since its work (possibly a merge) is
+  done; a cancelled caller of `run()` still gets `CancelledError` after the
+  write. `aclose()` stops its
   runs the same way, so their `run()` calls return `cancelled`.
   `tasks.cancel_run_task` calls `cancel_active_run`, which reaches a run in
   the same process, and still revokes the Celery task for runs in other
@@ -441,11 +445,11 @@ event loop without sharing clients, settings or caches.
   task took a step) emits one `RUN_CANCELLED`. Installation tokens never
   cross Apps under thread contention, but two threads missing the same cache
   entry at once may both mint (both tokens are valid). Clone locks serialise
-  one clone and never block clones under another root. Not guaranteed yet:
-  a cancel with `grace_seconds` that interrupts the final `completed` write
-  can leave the row `completed` while `run()` returns `cancelled`, and two
-  concurrent trigger-label deliveries for one issue can both start a run
-  (#518); both are pinned by `xfail(strict=True)` tests.
+  one clone and never block clones under another root. Two concurrent
+  trigger-label deliveries for one issue start one run: both may pass the
+  active-run check, but the `runs_one_active_per_issue` index refuses the
+  second insert, which is recorded as `ignored` (#518; the suite's in-memory
+  database enforces the same index).
 - **Workspace root.** An engine's `workspace_dir=None` is `<tmp>/automaintainer`;
   the engine never reads `AUTOMAINTAINER_WORKSPACE_DIR`. Two engines that
   both leave it unset share that root (and its clone locks), as two
