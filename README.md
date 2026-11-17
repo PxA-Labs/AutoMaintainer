@@ -142,7 +142,7 @@ docker compose up --build   # http://localhost:8000
 ```
 
 ### Python SDK
-The engine also installs on its own as the `automaintainer` package (no FastAPI server, Celery or OpenTelemetry; `pip install "./backend[server]"` adds them):
+The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`); `pip install "./backend[server]"` adds the server dependencies:
 ```bash
 cd backend && uv build        # dist/automaintainer_backend-<version>-py3-none-any.whl
 ```

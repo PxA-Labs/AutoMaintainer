@@ -1,7 +1,8 @@
 """Docker sandbox backend for change verification (epic #411).
 
-Select it with ``SANDBOX_BACKEND=runners.docker_sandbox:create``. The factory
-receives the host path of a working copy; every ``exec_command`` then runs in
+Select it with ``SANDBOX_BACKEND=automaintainer.runners.docker_sandbox:create``
+(the pre-#187 ``runners.docker_sandbox:create`` still works in the server
+source tree, not in the SDK wheel). The factory receives the host path of a working copy; every ``exec_command`` then runs in
 a fresh, ephemeral container started through the ``docker`` CLI:
 
 - the working copy is streamed into the container as a tar archive on stdin
@@ -560,5 +561,5 @@ class DockerSandbox:
 
 
 def create(repo_path: Union[str, Path]) -> DockerSandbox:
-    """``SANDBOX_BACKEND`` factory: ``runners.docker_sandbox:create``."""
+    """``SANDBOX_BACKEND`` factory: ``automaintainer.runners.docker_sandbox:create``."""
     return DockerSandbox(repo_path)

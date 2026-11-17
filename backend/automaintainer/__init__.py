@@ -3,7 +3,7 @@
     from automaintainer import AutoMaintainerConfig, AutoMaintainerEngine
 
     engine = AutoMaintainerEngine(AutoMaintainerConfig(...))
-    result = await engine.run("owner/repo", issue_number=42)
+    result = await engine.run("owner/repo", target_issue=42)
 
 Importing it has no side effects and loads none of the engine runtime
 (``automaintainer._runtime``: agents, GitHub, Supabase, LangGraph) or the

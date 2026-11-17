@@ -186,6 +186,31 @@ jobs:
         print("automaintainer", automaintainer.__version__, "imports cleanly")
         EOF
 
+    - name: Import every module the engine loads at run time
+      # A separate interpreter: these imports load fastapi (a base dependency
+      # of workspace), which the check above must not see. A base dependency
+      # missing for a lazily imported module fails here, not in a user's run.
+      # Dependencies resolve from PyPI without the lock on purpose: this job
+      # checks what `pip install` gives a user.
+      working-directory: ${{ runner.temp }}
+      run: |
+        "$RUNNER_TEMP/sdk-venv/bin/python" -I - <<'EOF'
+        import importlib
+        import pkgutil
+
+        import automaintainer
+
+        names = [
+            m.name
+            for m in pkgutil.walk_packages(automaintainer.__path__, "automaintainer.")
+        ]
+        assert "automaintainer._runtime.agents" in names, names
+        assert "automaintainer.runners.docker_sandbox" in names, names
+        for name in names:
+            importlib.import_module(name)
+        print(f"{len(names)} automaintainer modules import cleanly")
+        EOF
+
   test:
     name: Test (${{ matrix.os }} - Py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}

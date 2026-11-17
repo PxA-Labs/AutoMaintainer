@@ -237,6 +237,19 @@ def test_old_runner_module_name_is_the_moved_module(name):
     assert importlib.import_module("runners") is automaintainer.runners
 
 
+def test_every_subpackage_is_a_regular_package():
+    """No implicit namespace packages: tooling (mypy, coverage, pkgutil)
+    treats those differently."""
+    for directory in PACKAGE_DIR.rglob("*"):
+        if directory.is_dir() and any(directory.glob("*.py")):
+            assert (directory / "__init__.py").is_file(), directory
+    import automaintainer._runtime as runtime
+
+    assert runtime.__file__ is not None
+    found = {m.name for m in pkgutil.iter_modules(runtime.__path__)}
+    assert found == set(RUNTIME_MODULES)
+
+
 def test_every_runner_submodule_is_aliased():
     """An unaliased submodule would load a second copy as runners.<name>."""
     import automaintainer.runners as package
