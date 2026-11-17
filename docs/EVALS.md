@@ -370,7 +370,10 @@ the ADK Reviewer (#525) and RAG (#526) are measured against. It runs the
 **whole `AutoMaintainerEngine`** on each task: a targeted run on the task's
 issue through the real LangGraph graph (Architect, Visionary, PM, Implementer,
 Maintainer and the retry loop), the real verification step, change limits and
-merge policy. Only three things are replaced, all through the engine's own
+merge policy. On a targeted run the Architect and Visionary nodes run but
+take the issue as given and make no model call: every recorded run holds
+only PM, Implementer and Maintainer calls, so only those three agents'
+model behaviour is measured. Only three things are replaced, all through the engine's own
 injection points (`AutoMaintainerEngine(supabase=, llm=, github=, emitter=,
 nodes=)`); the engine's runtime code is not modified:
 
@@ -534,8 +537,10 @@ replay it with `--mode replay --cassettes evals/e2e/cassettes/<name>
 
 ### Live mode
 
-- Manual only: `workflow_dispatch` of `.github/workflows/evals.yml` (inputs
-  `e2e_tasks`, `e2e_cases`, `e2e_repeats`, `model`), or locally.
+- Manual only: `workflow_dispatch` of `.github/workflows/evals.yml` with
+  `suite` set to `e2e` (or `both`; the default `implementer` runs only the
+  Implementer live job) and inputs `e2e_tasks`, `e2e_cases`, `e2e_repeats`,
+  `model`, or locally.
 - It uses plain completions through the injected transport, at a fixed
   temperature (0) and seed: production's GitNexus tool loop and its silent
   8B fallback are not exercised, because they cannot report per-call usage.
@@ -546,7 +551,19 @@ replay it with `--mode replay --cassettes evals/e2e/cassettes/<name>
   key, run only where that exposure is acceptable, and rotate the key after a
   run. Unlike the Implementer harness, generation and scoring cannot be split
   into two processes, because the pipeline interleaves model calls with test
-  runs.
+  runs. Every key in `GROQ_API_KEY*` is replaced with `[REDACTED]` in the
+  JSON and Markdown reports, the printed summary and recorded cassettes, so
+  a key printed by model code does not reach the uploaded artifact; a key
+  that model code encodes or splits first is not caught.
+- **The answers are on the same host.** The leak guards keep the hidden
+  tests and the fix out of the fake GitHub API and the clone the agents see,
+  but model-written code runs on the host and could read
+  `evals/e2e/tasks/*/solution/`, `hidden_tests/` or the committed cassettes
+  (whose Implementer answers hold the oracle fix) by absolute path. That
+  takes deliberately adversarial code, so the risk is low, but a resolved
+  task in live mode is not proof the model never saw the answer. The harness
+  does not isolate these files (scoring needs the hidden tests); check
+  resolved diffs by hand before quoting a live number.
 - 24 tasks plus 27 Reviewer cases at 3 repeats is about 150 runs and up to
   ~700 model calls; use `--tasks`/`--cases` subsets to bound cost.
 
