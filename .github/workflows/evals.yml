@@ -5,6 +5,9 @@ name: Agent Evals
 #   oracle/no-op baselines and cassette replay. No secrets; the harness makes
 #   no network calls in these modes (only pip install does).
 # - Manual dispatch: a live run against Groq using the GROQ_API_KEY secret.
+# End-to-end evaluation of the whole engine (backend/evals/e2e, docs/EVALS.md):
+# - Pull requests: data validation, oracle, no-op and fixture replay, offline.
+# - Manual dispatch: live runs against Groq, repeated per task.
 
 on:
   pull_request:
@@ -27,6 +30,18 @@ on:
         description: 'Groq model id'
         required: false
         default: 'llama-3.3-70b-versatile'
+      e2e_tasks:
+        description: "End-to-end task ids (comma-separated), 'all'"
+        required: false
+        default: 'all'
+      e2e_cases:
+        description: "End-to-end Reviewer case ids (comma-separated), 'all'"
+        required: false
+        default: 'all'
+      e2e_repeats:
+        description: 'End-to-end repeats per task and case'
+        required: false
+        default: '3'
 
 permissions:
   contents: read
@@ -76,8 +91,9 @@ jobs:
         uv sync --frozen --extra server --group dev
         echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
+    # The end-to-end tests run in the e2e-offline job.
     - name: Harness unit tests
-      run: python -m pytest -q -p no:cacheprovider evals
+      run: python -m pytest -q -p no:cacheprovider evals --ignore=evals/e2e
 
     # The oracle must resolve everything and the no-op nothing; anything else
     # means a broken task or a broken harness, not a model result.
@@ -171,4 +187,143 @@ jobs:
       with:
         name: eval-results-live
         path: backend/eval-results/
+        retention-days: 30
+
+  e2e-offline:
+    name: End-to-end (data, oracle, no-op, replay)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
+      run: |
+        uv sync --frozen --extra server --group dev
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+    # Data validation (oracle fixes pass and snapshots fail the hidden tests,
+    # hidden tests and fixes unreachable through the fake GitHub), fakes,
+    # runner, metrics and CLI tests.
+    - name: End-to-end data validation and unit tests
+      run: python -m pytest -q -p no:cacheprovider evals/e2e
+
+    # The whole engine with scripted agents. The oracle must resolve and get
+    # approved everywhere and its Reviewer must be right on every change.
+    - name: Oracle (must be 100%)
+      run: |
+        python -m evals.e2e.run --mode oracle --jobs 4 --out e2e-results/oracle.json \
+          --min-resolve-rate 1.0 --min-merged-rate 1.0 \
+          --max-false-approval-rate 0 --max-false-rejection-rate 0
+
+    # The no-op resolves nothing; its rubber-stamp Reviewer approves every
+    # defective change.
+    - name: No-op (must be 0%)
+      run: |
+        python -m evals.e2e.run --mode noop --jobs 4 --out e2e-results/noop.json \
+          --max-resolve-rate 0 --min-false-approval-rate 1.0 --max-false-rejection-rate 0
+
+    # Committed synthetic fixtures with a known score (16/24 resolved, 3/14
+    # false approvals). --fail-on-stale: a prompt change must regenerate them
+    # on purpose (python -m evals.e2e.make_fixtures).
+    - name: Fixture replay
+      run: |
+        python -m evals.e2e.run --mode replay --jobs 4 --out e2e-results/replay.json \
+          --fail-on-stale --min-resolve-rate 0.66 --max-resolve-rate 0.67 \
+          --min-false-approval-rate 0.21 --max-false-approval-rate 0.22 \
+          --max-false-rejection-rate 0
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: e2e-results-offline
+        path: backend/e2e-results/
+        retention-days: 14
+
+  e2e-live:
+    name: End-to-end live (Groq)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install dependencies from uv.lock
+      run: |
+        uv sync --frozen --extra server --group dev
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+    - name: Oracle (harness sanity check)
+      env:
+        EVAL_TASKS: ${{ inputs.e2e_tasks }}
+        EVAL_CASES: ${{ inputs.e2e_cases }}
+      run: |
+        python -m evals.e2e.run --mode oracle --jobs 4 --tasks "$EVAL_TASKS" --cases "$EVAL_CASES" \
+          --out e2e-results/oracle.json --min-resolve-rate 1.0 --max-false-approval-rate 0
+
+    # Inputs reach the shell through env vars, never ${{ }} inside the script.
+    # Unlike the Implementer-only live job, the engine runs model-written code
+    # (verification and hidden tests) in the process that holds the key, so
+    # use a dedicated, low-limit evaluation key (docs/EVALS.md, End-to-end).
+    - name: Live run (records cassettes)
+      env:
+        GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        EVAL_TASKS: ${{ inputs.e2e_tasks }}
+        EVAL_CASES: ${{ inputs.e2e_cases }}
+        EVAL_REPEATS: ${{ inputs.e2e_repeats }}
+        EVAL_MODEL: ${{ inputs.model }}
+      run: |
+        python -m evals.e2e.run --mode live --tasks "$EVAL_TASKS" --cases "$EVAL_CASES" \
+          --repeats "$EVAL_REPEATS" --model "$EVAL_MODEL" --jobs 1 \
+          --record e2e-results/cassettes --out e2e-results/live.json
+
+    - name: Upload results and recorded cassettes
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: e2e-results-live
+        path: backend/e2e-results/
         retention-days: 30
