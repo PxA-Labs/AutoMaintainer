@@ -6,20 +6,23 @@ caused the run has ``write``, ``maintain`` or ``admin`` permission on the
 repository. Tests passing and the Maintainer's approval are not enough,
 because a prompt-injected run controls both the change and the approval.
 
-Who caused the run, per trigger path (the only one today is ``api``):
+Who caused the run, per trigger path (``trigger_source``):
 
 * ``api`` (POST /start from the dashboard or the API): the caller's numeric
   GitHub user id, taken from the GitHub identity of their Supabase account
   (main.github_id_of), plus the login stored with it. A caller without a
   linked GitHub identity (e.g. the local dev-auth bypass) is an unknown actor.
-* A run that targets an issue (``target_issue``) also needs the issue's
-  author to be trusted: the issue body is the task the models follow, so an
-  outsider's issue must not steer an auto-merged change even when a writer
-  started the run.
-* There is no webhook-started run (webhook_processor.py only handles
-  installation events). A future trigger must pass its actor's id (issue
-  author, labeler, commenter) as ``trigger_github_id`` with its own
-  ``trigger_source``.
+* ``label`` (AUTOMAINTAINER_TRIGGER_LABEL added to an open issue,
+  webhook_processor.py): the GitHub user who added the label (the
+  delivery's ``sender``), by numeric id, plus the login in that delivery.
+  Users with triage access can add labels without being able to write, so
+  their runs start and open a PR that is never merged automatically.
+* A run that targets an issue (``target_issue``, always set for ``label``)
+  also needs the issue's author to be trusted: the issue body is the task
+  the models follow, so an outsider's issue must not steer an auto-merged
+  change even when a writer started the run.
+* A future trigger (a commenter, say) must pass its actor's id as
+  ``trigger_github_id`` with its own ``trigger_source``.
 
 Every actor is identified by its numeric GitHub user id, never by a login
 alone (#491). Logins can change: the one Supabase stored at the caller's
