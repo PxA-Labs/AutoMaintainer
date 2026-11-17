@@ -1,0 +1,126 @@
+name: Deploy to Google Cloud
+
+# Builds the image, pushes it to Artifact Registry, deploys it to the Cloud
+# Run API and rolls the worker VM (infra/terraform, #527).
+#
+# - Runs only by hand or for a release tag, never for a pull request.
+# - The job uses the "production" environment: protect it (required
+#   reviewers, deployment tags only) under Settings > Environments. The
+#   workload identity provider accepts only tokens issued for that
+#   environment in this repository.
+# - Authenticates through Workload Identity Federation; no key is stored.
+# - Inert until the owner sets the repository variables Terraform prints
+#   (`terraform output github_repository_variables`): the job is skipped
+#   while GCP_WORKLOAD_IDENTITY_PROVIDER is empty.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: [ 'v*.*.*' ]
+
+permissions:
+  contents: read
+
+# One deploy at a time; a second one waits instead of cancelling a rollout.
+concurrency:
+  group: deploy-gcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, push and deploy
+    if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      IMAGE_REPOSITORY: ${{ vars.GCP_IMAGE_REPOSITORY }}
+      RUN_SERVICE: ${{ vars.GCP_RUN_SERVICE }}
+      WORKER_INSTANCE: ${{ vars.GCP_WORKER_INSTANCE }}
+      WORKER_ZONE: ${{ vars.GCP_WORKER_ZONE }}
+
+    steps:
+      - name: Check the repository variables
+        shell: bash
+        run: |
+          missing=""
+          for v in PROJECT_ID REGION IMAGE_REPOSITORY RUN_SERVICE WORKER_INSTANCE WORKER_ZONE; do
+            [ -n "${!v}" ] || missing="$missing GCP_$v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Deploy not configured::Repository variable(s) not set:$missing. See docs/DEPLOYMENT.md (Google Cloud)."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Log Docker in to Artifact Registry
+        shell: bash
+        run: gcloud auth configure-docker "${IMAGE_REPOSITORY%%/*}" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+          # Public values inlined into the dashboard bundle (never secrets).
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            NEXT_PUBLIC_BACKEND_URL=${{ vars.NEXT_PUBLIC_BACKEND_URL }}
+
+      # The API and the worker run the same image, addressed by digest so a
+      # re-pushed tag can never change what is running.
+      - name: Deploy the API to Cloud Run
+        id: deploy
+        shell: bash
+        env:
+          IMAGE: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+        run: |
+          gcloud run deploy "$RUN_SERVICE" --image "$IMAGE" \
+            --region "$REGION" --project "$PROJECT_ID" --quiet
+          url="$(gcloud run services describe "$RUN_SERVICE" \
+            --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)')"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Check the API's liveness route
+        shell: bash
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: curl -fsS --retry 5 --retry-delay 5 --retry-all-errors "$URL/healthz"
+
+      # The VM watches this metadata key and restarts the worker container
+      # with the new image (infra/terraform/modules/worker/watch-image.sh),
+      # giving running tasks worker_stop_timeout_seconds to finish.
+      - name: Roll the worker
+        shell: bash
+        env:
+          IMAGE: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+        run: |
+          gcloud compute instances add-metadata "$WORKER_INSTANCE" \
+            --zone "$WORKER_ZONE" --project "$PROJECT_ID" \
+            --metadata "automaintainer-image=$IMAGE"

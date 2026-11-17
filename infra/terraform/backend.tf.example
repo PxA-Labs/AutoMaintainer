@@ -1,0 +1,12 @@
+# Remote state in a GCS bucket the owner creates once (README.md, step 1).
+# Copy this file to backend.tf (git-ignored) and initialise with:
+#
+#   terraform init -backend-config="bucket=<project id>-tfstate"
+#
+# The configuration is partial on purpose: the bucket name is supplied at
+# init time and never committed. Without backend.tf, state stays local.
+terraform {
+  backend "gcs" {
+    prefix = "automaintainer/prod"
+  }
+}

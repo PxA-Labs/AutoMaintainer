@@ -1,0 +1,33 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. No secret belongs in
+# this file: secret values go into Secret Manager as versions (README.md).
+
+project_id = "automaintainer-prod"
+region     = "us-central1"
+zone       = "us-central1-a"
+
+# `gcloud billing projects describe automaintainer-prod` prints it.
+billing_account_id         = "000000-000000-000000"
+budget_amount              = 100
+budget_currency            = "USD"
+budget_notification_emails = ["owner@example.com"]
+
+# "vm" (default, cheapest) or "memorystore"; see variables.tf.
+redis_mode = "vm"
+
+# false for the first apply; true once every mounted secret has a version.
+mount_secrets = false
+
+cloud_trace_enabled = false
+
+api_max_instances  = 3
+worker_concurrency = 2
+
+app_env = {
+  SUPABASE_URL         = "https://<project ref>.supabase.co"
+  GITHUB_APP_ID        = "<app id>"
+  GITHUB_APP_SLUG      = "<app slug>"
+  GITHUB_APP_CLIENT_ID = "<client id>"
+  ALLOWED_ORIGINS      = "https://<dashboard origin>"
+  DASHBOARD_URL        = "https://<dashboard origin>"
+  MERGE_POLICY         = "human"
+}
