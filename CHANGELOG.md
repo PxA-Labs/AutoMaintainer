@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **deploy**: Bound the /start worker probe and read REDIS_URL from Render's connectionString ([#512](https://github.com/PxA-Labs/AutoMaintainer/pull/512)) - @purvanshjoshi
 - **ide**: Give each user their own view of their IDE working branch ([#507](https://github.com/PxA-Labs/AutoMaintainer/pull/507)) (closes [#505](https://github.com/PxA-Labs/AutoMaintainer/issues/505)) - @purvanshjoshi
 - Start the GitHub App install with the Supabase session only ([#509](https://github.com/PxA-Labs/AutoMaintainer/pull/509)) - @purvanshjoshi
 - **dashboard**: Label every run error code and stop retrying refused terminal sessions ([#508](https://github.com/PxA-Labs/AutoMaintainer/pull/508)) - @purvanshjoshi
