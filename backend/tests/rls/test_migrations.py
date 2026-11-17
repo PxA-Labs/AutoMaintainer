@@ -21,6 +21,7 @@ import pytest
 
 try:
     import psycopg2
+    import psycopg2.errors
     from psycopg2 import sql
     from psycopg2.extensions import make_dsn
 except ImportError:  # pragma: no cover - psycopg2 is a runtime dependency
@@ -217,12 +218,15 @@ def test_upgrades_a_database_built_from_an_older_schema(db):
     with db.cursor() as cur:
         expected_catalog = catalog(cur)
         expected_data = data(cur)
-        # Undo, in place, what #452, #466, #472 and the security_invoker views
-        # added to the old single-file schema. Seeded checkpoint/repo_name
+        # Undo, in place, what #452, #466, #472, #518 and the security_invoker
+        # views added to the old single-file schema. Seeded checkpoint/repo_name
         # values go with their columns; every other row stays.
         cur.execute("""
             DROP VIEW recent_runs_detailed;
             ALTER TABLE runs DROP COLUMN checkpoint, DROP COLUMN repo_name;
+            DROP INDEX runs_one_active_per_issue;
+            ALTER TABLE runs DROP COLUMN trigger_source,
+                DROP COLUMN trigger_github_id, DROP COLUMN trigger_login;
             DROP POLICY runs_insert_own ON runs;
             DROP POLICY runs_update_own ON runs;
             DROP POLICY ide_insert_own ON ide_sessions;
@@ -310,3 +314,146 @@ def test_a_failing_migration_is_rolled_back_and_not_recorded(db, tmp_path):
         )
         assert cur.fetchone() == (0,)
     db.rollback()
+
+
+# --------------------------------------------------------------------------
+# 20261117140000_run_trigger_and_active_issue.sql (#518)
+# --------------------------------------------------------------------------
+
+TRIGGER_MIGRATION = "20261117140000"
+ACTIVE = ("queued", "running", "awaiting_review")
+
+
+def insert_run(cur, status, issue, *, repository_id=1002, age_minutes=0):
+    """Insert one run of the seeded org; return its id."""
+    run_id = str(uuid.uuid4())
+    cur.execute(
+        "INSERT INTO runs (id, org_id, user_id, repository_id, github_installation_id,"
+        " repo_name, target_issue_number, status, created_at)"
+        " VALUES (%s, %s, %s, %s, 1001, 'a/repo', %s, %s,"
+        " now() - make_interval(mins => %s))",
+        (run_id, ORG, USER, repository_id, issue, status, age_minutes),
+    )
+    return run_id
+
+
+def insert_refused(cur, *args, **kwargs):
+    """True if the insert hits runs_one_active_per_issue."""
+    cur.execute("SAVEPOINT refused")
+    try:
+        insert_run(cur, *args, **kwargs)
+    except psycopg2.errors.UniqueViolation as exc:
+        cur.execute("ROLLBACK TO SAVEPOINT refused")
+        assert exc.diag.constraint_name == "runs_one_active_per_issue"
+        return True
+    cur.execute("RELEASE SAVEPOINT refused")
+    return False
+
+
+@pytest.mark.parametrize("first", ACTIVE)
+@pytest.mark.parametrize("second", ACTIVE)
+def test_one_active_run_per_issue(db, first, second):
+    with db.cursor() as cur:
+        insert_run(cur, first, 7)
+        assert insert_refused(cur, second, 7)
+    db.rollback()
+
+
+def test_index_leaves_other_runs_alone(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO repositories (id, org_id, github_installation_id, full_name,"
+            " name, owner_login, owner_type) VALUES (1003, %s, 1001, 'a/other',"
+            " 'other', 'a', 'Organization')",
+            (ORG,),
+        )
+        active = insert_run(cur, "queued", 7)
+        # Finished runs of the same issue, runs without an issue (/start
+        # with no target), another issue and another repository.
+        for status in ("completed", "failed", "cancelled"):
+            assert not insert_refused(cur, status, 7)
+        for status in ACTIVE:
+            assert not insert_refused(cur, status, None)
+            assert not insert_refused(cur, status, None)
+        assert not insert_refused(cur, "queued", 8)
+        assert not insert_refused(cur, "queued", 7, repository_id=1003)
+        # The active run moves through its own statuses...
+        for status in ("running", "awaiting_review", "completed"):
+            cur.execute("UPDATE runs SET status = %s WHERE id = %s", (status, active))
+        # ...and once it is finished the issue can get a new run.
+        assert not insert_refused(cur, "queued", 7)
+    db.rollback()
+
+
+def test_trigger_columns_are_nullable_and_shown_in_the_recent_runs_view(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns"
+            " WHERE table_name = 'runs' AND column_name LIKE 'trigger%%' ORDER BY 1"
+        )
+        assert cur.fetchall() == [
+            ("trigger_github_id", "bigint", "YES"),
+            ("trigger_login", "text", "YES"),
+            ("trigger_source", "text", "YES"),
+        ]
+        cur.execute(
+            "UPDATE runs SET trigger_source = 'label', trigger_github_id = 1001,"
+            " trigger_login = 'maintainer' WHERE id = %s",
+            (RUN,),
+        )
+        cur.execute(
+            "SELECT trigger_source, trigger_github_id, trigger_login"
+            " FROM recent_runs_detailed WHERE id = %s",
+            (RUN,),
+        )
+        assert cur.fetchone() == ("label", 1001, "maintainer")
+    db.rollback()
+
+
+def test_migration_cancels_duplicate_active_runs_and_keeps_the_furthest_along():
+    earlier = [m for m in MIGRATIONS if m.version < TRIGGER_MIGRATION]
+    with fresh_database(migrate=False) as conn:
+        db_migrate.up(conn, earlier, log=_quiet)
+        seed(conn)
+        with conn.cursor() as cur:
+            # Issue 7: the running run is kept, whatever its age.
+            old_queued = insert_run(cur, "queued", 7, age_minutes=30)
+            running = insert_run(cur, "running", 7, age_minutes=10)
+            review = insert_run(cur, "awaiting_review", 7, age_minutes=20)
+            # Issue 8: no running run, so the run awaiting review is kept.
+            queued_8 = insert_run(cur, "queued", 8, age_minutes=30)
+            review_8 = insert_run(cur, "awaiting_review", 8, age_minutes=5)
+            # Issue 9: only queued runs, the oldest is kept.
+            oldest_9 = insert_run(cur, "queued", 9, age_minutes=30)
+            newer_9 = insert_run(cur, "queued", 9, age_minutes=5)
+            # Not duplicates: one active run, finished runs, no target issue.
+            single = insert_run(cur, "queued", 10)
+            done = insert_run(cur, "completed", 10)
+            loose = [insert_run(cur, "queued", None) for _ in range(2)]
+        conn.commit()
+
+        applied = db_migrate.up(conn, MIGRATIONS, log=_quiet)
+        assert [m.version for m in applied] == [
+            m.version for m in MIGRATIONS if m.version >= TRIGGER_MIGRATION
+        ]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id::text, status, error_message, completed_at FROM runs"
+            )
+            rows = {r[0]: r[1:] for r in cur.fetchall()}
+        conn.rollback()
+
+    for kept, status in [
+        (running, "running"),
+        (review_8, "awaiting_review"),
+        (oldest_9, "queued"),
+        (single, "queued"),
+        (done, "completed"),
+        *[(run, "queued") for run in loose],
+    ]:
+        assert rows[kept][0] == status, kept
+    for cancelled in (old_queued, review, queued_8, newer_9):
+        status, error, completed_at = rows[cancelled]
+        assert status == "cancelled"
+        assert TRIGGER_MIGRATION in error
+        assert completed_at is not None

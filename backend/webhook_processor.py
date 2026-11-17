@@ -48,24 +48,35 @@ insider chose to spend one:
   template carrying the trigger label would otherwise let any outsider start
   runs (#411: act only on a maintainer-applied label).
 
-The run's ``user_id``. ``runs.user_id`` is a non-null AutoMaintainer user,
-and a label adder need not have an AutoMaintainer account. The run is
-attributed to the org's first owner, the account that answers for the
-installation; the actual trigger is the GitHub id above, which is also
-written to the run's log. A nullable ``user_id`` (or trigger columns) would
-be more precise and needs a migration.
+The run's ``user_id`` and trigger. ``runs.user_id`` is a non-null
+AutoMaintainer user, and a label adder need not have an AutoMaintainer
+account. The run is attributed to the org's first owner, the account that
+answers for the installation. Who actually started it is recorded in the
+row's trigger columns (``trigger_source`` "label", ``trigger_github_id``,
+``trigger_login``; POST /start fills them with "api" and the caller's GitHub
+identity) and in the run's log. ``user_id`` stays non-null: the runs RLS
+policies, the ``user_display_name`` of recent_runs_detailed and the usage
+rows all key on it, and the trigger columns already say who it was.
 
 Guards, each recorded as 'ignored' with a log line: the repository must be
 registered to the event's org under the event's installation, and that
 installation must not be suspended; no run may be queued, running or
 awaiting review for the same (repository, issue); and an agent worker must
 be available (worker_probe, the check POST /start makes, #512), so no run
-is created that nobody consumes. GitHub needs no error for any of these. A redelivery (same
+is created that nobody consumes. A label added while no worker is available
+is not remembered: it must be removed and added again once a worker runs.
+GitHub needs no error for any of these. A redelivery (same
 X-GitHub-Delivery) is never stored twice (github_app.handle_github_webhook),
-and a stored row is processed once (see Idempotency). Known limit: the
-active-run check and the insert are not one transaction, so two different
-deliveries for the same issue processed at the same moment could both start
-a run; the repository lock (tasks.py) still runs them one at a time.
+and a stored row is processed once (see Idempotency).
+
+One active run per issue (#518). The active-run check above is only the
+cheap path. The database enforces the rule: the partial unique index
+``runs_one_active_per_issue`` (repository_id, target_issue_number) over
+queued, running and awaiting_review runs rejects a second active run for the
+same issue, so two deliveries processed at the same moment (the github_sync
+worker with concurrency above 1, a label removed and re-added quickly)
+cannot both start one. The insert that loses is recorded as 'ignored', with
+no run row and no Celery task. POST /start answers 409 in the same case.
 
 Deleted installations are deactivated, not deleted: repositories, runs and
 webhook_events all reference github_installations with ON DELETE CASCADE,
@@ -111,6 +122,10 @@ TRIGGER_LABEL_ENV = "AUTOMAINTAINER_TRIGGER_LABEL"
 TRIGGER_SOURCE = "label"
 # The runs.status values outside tasks.TERMINAL_RUN_STATUSES.
 ACTIVE_RUN_STATUSES = ("queued", "running", "awaiting_review")
+# Partial unique index over runs in ACTIVE_RUN_STATUSES with a target issue
+# (supabase/migrations/20261117140000_run_trigger_and_active_issue.sql).
+ACTIVE_RUN_INDEX = "runs_one_active_per_issue"
+UNIQUE_VIOLATION = "23505"
 # author_association values of people the repository's owner let in.
 INSIDER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
@@ -159,6 +174,16 @@ def trigger_label() -> Optional[str]:
     """The configured trigger label, or None when the feature is off."""
     value = (os.getenv(TRIGGER_LABEL_ENV) or "").strip()
     return value or None
+
+
+def is_active_run_conflict(exc: BaseException) -> bool:
+    """True if ``exc`` is the database refusing a second active run for an
+    issue (unique violation of ACTIVE_RUN_INDEX). postgrest-py's APIError
+    carries the SQLSTATE in ``code`` and the index name in ``message``."""
+    if str(getattr(exc, "code", "") or "") != UNIQUE_VIOLATION:
+        return False
+    text = f"{getattr(exc, 'message', '') or ''} {getattr(exc, 'details', '') or ''}"
+    return ACTIVE_RUN_INDEX in f"{text} {exc}"
 
 
 def _agent_worker_available() -> bool:
@@ -336,22 +361,38 @@ def _queue_run(
 
     run_id = str(uuid.uuid4())
     now = _now()
-    sb.table("runs").insert(
-        {
-            "id": run_id,
-            "org_id": org_id,
-            "user_id": user_id,
-            "repository_id": repository_id,
-            "github_installation_id": installation_id,
-            "repo_name": repo_name,
-            "target_issue_number": issue_number,
-            "mode": "autonomous",
-            "status": "queued",
-            "queued_at": now,
-            "created_at": now,
-            "updated_at": now,
-        }
-    ).execute()
+    try:
+        sb.table("runs").insert(
+            {
+                "id": run_id,
+                "org_id": org_id,
+                "user_id": user_id,
+                "repository_id": repository_id,
+                "github_installation_id": installation_id,
+                "repo_name": repo_name,
+                "target_issue_number": issue_number,
+                "mode": "autonomous",
+                "status": "queued",
+                "trigger_source": TRIGGER_SOURCE,
+                "trigger_github_id": sender_id,
+                "trigger_login": sender_login,
+                "queued_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+        ).execute()
+    except Exception as exc:
+        if not is_active_run_conflict(exc):
+            raise
+        # Another delivery queued a run for this issue after _active_run
+        # looked: the index kept it to one run (#518).
+        logger.info(
+            "Trigger label on %s#%s ignored: another run for the issue was "
+            "queued concurrently",
+            repo_name,
+            issue_number,
+        )
+        raise Ignored(f"a run for #{issue_number} is already active") from exc
     try:
         task = run_agent_loop_task.apply_async(
             args=[run_id, repo_name, org_id, user_id, repository_id, installation_id],

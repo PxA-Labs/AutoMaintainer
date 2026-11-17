@@ -58,6 +58,7 @@ from github_app import (
 )
 from quotas import assist_limiter
 from webhook_processor import (
+    is_active_run_conflict,
     process_pending_events,
     process_webhook_events_task,
 )
@@ -756,6 +757,10 @@ class InlineAssistRequest(BaseModel):
 # --- New Celery-based endpoints ---
 
 
+# Machine-readable code in the 409 body of /start.
+RUN_ALREADY_ACTIVE = "RUN_ALREADY_ACTIVE"
+
+
 @app.post("/start")
 async def start_agents(
     req: StartRequest,
@@ -816,6 +821,10 @@ async def start_agents(
         "target_issue_number": req.target_issue,
         "mode": req.mode,
         "status": "queued",
+        # Who started the run, as passed to the worker below (#518).
+        "trigger_source": "api",
+        "trigger_github_id": user.get("github_id"),
+        "trigger_login": user.get("github_login"),
         "queued_at": datetime.utcnow().isoformat(),
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
@@ -824,6 +833,19 @@ async def start_agents(
     try:
         await asyncio.to_thread(lambda: sb.table("runs").insert(run_data).execute())
     except Exception as e:
+        # One queued, running or awaiting_review run per (repository, issue),
+        # enforced by the runs_one_active_per_issue index (#518). Runs
+        # without a target issue are never refused.
+        if is_active_run_conflict(e):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": f"A run for issue #{req.target_issue} in "
+                    f"{req.repo_name} is already queued, running or awaiting "
+                    "review. Wait for it to finish or cancel it first.",
+                    "code": RUN_ALREADY_ACTIVE,
+                },
+            )
         raise internal_error(500, "Failed to create run record", e)
 
     # Queue the Celery task
