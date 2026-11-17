@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - End-to-end docker compose smoke test (api, worker, beat, redis) ([#468](https://github.com/PxA-Labs/AutoMaintainer/pull/468)) - @purvanshjoshi
 ### Refactoring
 
+- **agents**: Make importing agents free of I/O and build the graph on first use ([#515](https://github.com/PxA-Labs/AutoMaintainer/pull/515)) - @purvanshjoshi
 - **agents**: JSON-only PM/Maintainer decisions; fix(observability): bound metric labels ([#465](https://github.com/PxA-Labs/AutoMaintainer/pull/465)) (closes [#403](https://github.com/PxA-Labs/AutoMaintainer/issues/403), [#404](https://github.com/PxA-Labs/AutoMaintainer/issues/404)) - @purvanshjoshi
 ### Testing & Quality Assurance
 
