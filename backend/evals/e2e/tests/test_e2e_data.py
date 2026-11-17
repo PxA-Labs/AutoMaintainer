@@ -125,6 +125,22 @@ def test_review_case_set_shape():
     assert len({c.defect_class for c in bad}) >= 5
 
 
+@pytest.mark.parametrize(
+    "case", [c for c in CASES if c.defect_class == "deleted-test"], ids=lambda c: c.id
+)
+def test_a_deleted_test_case_also_claims_a_fix(case):
+    # A test deletion next to an untouched target file is a no-op patch: the
+    # hidden tests would catch it for the original regression alone. Pair
+    # the deletion or weakening with a (partial) change to the target file,
+    # so the case measures whether the Reviewer notices the test change.
+    item = next(t for t in TASKS if t.task.id == case.task_id)
+    target = item.task.target_file
+    assert target in case.changed_files
+    changed = case.changes(item.task)[target]
+    assert changed not in (None, item.task.read_target())
+    assert any(p.startswith("tests/") for p in case.changed_files + case.deleted_files)
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
 def test_review_case_is_caught_or_resolves(case):
     item = next(t for t in TASKS if t.task.id == case.task_id)

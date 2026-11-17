@@ -3,9 +3,10 @@
   "task_id": "toolz_update_in_copy",
   "expected_verdict": "reject",
   "defect_class": "deleted-test",
-  "description": "Leaves the bug and removes an assertion from the repository's tests.",
+  "description": "Copies the outer dictionary with dict() instead of factory(), so the factory is still ignored, and removes an assertion from the repository's tests.",
   "changed_files": [
-    "tests/test_dicttoolz_basic.py"
+    "tests/test_dicttoolz_basic.py",
+    "toolz/dicttoolz.py"
   ],
   "deleted_files": []
 }

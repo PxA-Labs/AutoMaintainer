@@ -9,7 +9,7 @@
     "finish_reason": "stop",
     "latency_ms": 1,
     "model": "llama-3.3-70b-versatile",
-    "prompt_sha256": "eec588dd0a1ecf9f5d32f86dbda4e17d392584c2aba73032ea5e3d84d14a543f",
+    "prompt_sha256": "c3f25446dea61dd016d0053406ba981138ee3b8bace0b7b8d3f87f02ab255ba7",
     "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
     "role": "maintainer",
     "usage": null
