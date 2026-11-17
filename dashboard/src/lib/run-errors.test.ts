@@ -8,7 +8,7 @@ import { describeRunError, formatRunErrorLog, KNOWN_RUN_ERROR_CODES } from "@/li
 // snapshot nor any shared file lists them (they only appear in ErrorEvents).
 // This runs with the dashboard tests only, so a backend-only change adding a
 // code is caught at the next dashboard change.
-const AGENTS_PY = resolve(import.meta.dirname, "../../../backend/agents.py");
+const AGENTS_PY = resolve(import.meta.dirname, "../../../backend/automaintainer/_runtime/agents.py");
 
 function backendErrorCodes(source: string): Set<string> {
   const patterns = [
