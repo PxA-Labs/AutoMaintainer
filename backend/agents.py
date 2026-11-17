@@ -29,7 +29,7 @@ from langgraph.prebuilt import create_react_agent
 import httpx
 from typing import TypedDict, Annotated, Literal, Optional, Union
 import asyncio
-import functools
+import inspect
 from github import Github, GithubException
 from github.IssuePullRequest import IssuePullRequest
 import uuid
@@ -3717,29 +3717,53 @@ _run_should_stop: ContextVar[Optional[object]] = ContextVar(
 )
 
 
+def _is_async_node(node) -> bool:
+    """Whether calling ``node`` returns a coroutine: an async function, a
+    functools.partial of one (inspect unwraps partials), or an object whose
+    ``__call__`` is async."""
+    if inspect.iscoroutinefunction(node):
+        return True
+    call = getattr(node, "__call__", None)
+    return not inspect.isroutine(node) and inspect.iscoroutinefunction(call)
+
+
 def _stoppable(node):
     """``node``, raising RunCancelled instead of starting when the run's
-    engine was asked to stop."""
+    engine was asked to stop.
+
+    The wrapper passes its arguments through and carries the node's
+    signature (``__signature__``), so LangGraph injects what the node asks
+    for (``config``, ...) as it would unwrapped. It does not set
+    ``__wrapped__``; ``guarded.node`` is the node.
+    """
 
     def check():
         should_stop = _run_should_stop.get()
         if should_stop is not None and should_stop():
             raise RunCancelled()
 
-    if asyncio.iscoroutinefunction(node):
+    if _is_async_node(node):
 
-        @functools.wraps(node)
-        async def guarded(state):
+        async def guarded(*args, **kwargs):
             check()
-            return await node(state)
+            return await node(*args, **kwargs)
 
     else:
 
-        @functools.wraps(node)
-        def guarded(state):
+        def guarded(*args, **kwargs):
             check()
-            return node(state)
+            return node(*args, **kwargs)
 
+    try:
+        guarded.__signature__ = inspect.signature(node)
+    except (TypeError, ValueError):
+        # No introspectable signature: LangGraph passes the state only.
+        guarded.__signature__ = inspect.Signature(
+            [inspect.Parameter("state", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        )
+    guarded.__name__ = getattr(node, "__name__", type(node).__name__)
+    guarded.__doc__ = getattr(node, "__doc__", None)
+    guarded.node = node
     return guarded
 
 
@@ -3932,23 +3956,38 @@ async def run_agent_loop(
     A thin wrapper over the process-default AutoMaintainerEngine (#186),
     which keeps reading the environment and the module-level clients as
     before; ``automaintainer.engine.cancel_active_run`` cancels it.
+
+    A second call with the ``run_id`` of a run still in progress in this
+    process returns a failed result (RUN_ALREADY_ACTIVE) without touching
+    the run's row or events, which belong to the run in progress.
     """
     # Imported here: automaintainer.engine imports this module.
-    from automaintainer.engine import default_engine
+    from automaintainer.engine import RunAlreadyActive, default_engine
 
-    return await default_engine()._run_loop(
-        repo_name,
-        target_issue=target_issue,
-        run_id=run_id,
-        emitter=emitter,
-        installation_id=github_installation_id,
-        repository_id=repository_id,
-        trigger={
-            "source": trigger_source,
-            "login": trigger_login,
-            "github_id": trigger_github_id,
-        },
-    )
+    try:
+        return await default_engine()._run_loop(
+            repo_name,
+            target_issue=target_issue,
+            run_id=run_id,
+            emitter=emitter,
+            installation_id=github_installation_id,
+            repository_id=repository_id,
+            trigger={
+                "source": trigger_source,
+                "login": trigger_login,
+                "github_id": trigger_github_id,
+            },
+        )
+    except RunAlreadyActive as e:
+        logger.warning("%s", e)
+        return {
+            "status": "failed",
+            "error": str(e),
+            "error_code": "RUN_ALREADY_ACTIVE",
+            "issue_number": 0,
+            "pr_number": 0,
+            "branch_name": "",
+        }
 
 
 class RunCancelled(Exception):
@@ -3995,6 +4034,28 @@ async def _mark_run_cancelled(run_id: str) -> None:
             print(f"Failed to update run status in Supabase: {e}")
 
 
+async def _mark_run_cancelled_once(run_id: str, progress: Optional[dict]) -> None:
+    """``_mark_run_cancelled`` unless ``progress`` says it already ran.
+
+    The flag lets the engine mark a run that was cancelled outside the
+    pipeline's guarded section (before the graph starts, or while a failure
+    is being recorded) without emitting RUN_CANCELLED twice.
+    """
+    if progress is not None:
+        if progress.get("cancel_marked"):
+            return
+        progress["cancel_marked"] = True
+        # A cancel during the "running" upsert does not stop its thread: let
+        # it land first so it cannot overwrite the "cancelled" status.
+        row_write = progress.pop("row_write", None)
+        if row_write is not None:
+            try:
+                await row_write
+            except Exception:
+                pass  # already reported by _run_pipeline
+    await _mark_run_cancelled(run_id)
+
+
 def cancelled_result(final_state: Optional[dict]) -> dict:
     """The result of a run stopped by its engine (RUN_CANCELLED)."""
     state = final_state or {}
@@ -4025,10 +4086,14 @@ async def _run_pipeline(
 
     The caller (AutoMaintainerEngine) binds ``current_run_id``, the trust
     cache and, for its own runs, the engine context, and resets them
-    afterwards. ``should_stop`` is checked after every graph step: when it
-    returns True the run ends there as ``cancelled`` (RunCancelled), without
-    interrupting a node in flight. ``progress["final_state"]`` tracks the
-    latest state for a caller that cancels the task itself.
+    afterwards. ``should_stop`` is checked before every graph node starts
+    (_stoppable): when it returns True the run ends there as ``cancelled``
+    (RunCancelled), without interrupting a node in flight; a cancel after
+    the last node leaves the run completed. ``progress["final_state"]`` tracks the
+    latest state for a caller that cancels the task itself, and
+    ``progress["cancel_marked"]`` whether RUN_CANCELLED was already emitted
+    (a task cancellation before the graph starts is not caught here: the
+    engine marks that run, see AutoMaintainerEngine._execute).
     """
     supabase = get_supabase()
 
@@ -4040,8 +4105,8 @@ async def _run_pipeline(
         current_emitter.set(NullEmitter())
 
     if supabase:
-        try:
-            await asyncio.to_thread(
+        row_write = asyncio.ensure_future(
+            asyncio.to_thread(
                 lambda: supabase.table("runs")
                 .upsert(
                     {
@@ -4054,8 +4119,17 @@ async def _run_pipeline(
                 )
                 .execute()
             )
+        )
+        if progress is not None:
+            progress["row_write"] = row_write
+        try:
+            # Shielded: a cancel here leaves the write to finish, and
+            # _mark_run_cancelled_once waits for it before writing "cancelled".
+            await asyncio.shield(row_write)
         except Exception as e:
             print(f"Failed to create run in Supabase: {e}")
+        if progress is not None:
+            progress.pop("row_write", None)
 
     repo_name = normalize_repo_name(repo_name)
 
@@ -4124,10 +4198,9 @@ async def _run_pipeline(
                 final_state = dict(state)
                 if progress is not None:
                     progress["final_state"] = final_state
-                # Cooperative cancellation at a node boundary: the next node
-                # has not started, and nothing in flight is interrupted.
-                if should_stop is not None and should_stop():
-                    raise RunCancelled()
+                # No should_stop check here: each node checks before it
+                # starts (_stoppable), so a cancel that arrives after the
+                # last node finished leaves the run completed.
         finally:
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
@@ -4154,7 +4227,7 @@ async def _run_pipeline(
             "merge_status": (final_state or {}).get("merge_status") or "",
         }
     except RunCancelled:
-        await _mark_run_cancelled(run_id)
+        await _mark_run_cancelled_once(run_id, progress)
         return cancelled_result(final_state)
     except PipelineAbortError as e:
         return await _fail_run(run_id, e.error_code, str(e), e.phase, final_state)
@@ -4170,7 +4243,7 @@ async def _run_pipeline(
             final_state,
         )
     except asyncio.CancelledError:
-        await _mark_run_cancelled(run_id)
+        await _mark_run_cancelled_once(run_id, progress)
         raise
     finally:
         _run_should_stop.reset(stop_token)

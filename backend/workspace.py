@@ -31,15 +31,18 @@ DENIED_TOP_LEVEL = {".git"}
 def get_base_workspace_dir() -> Path:
     """Returns the base directory for cloned repositories and local workspaces.
 
-    Prefers the ``workspace_dir`` of the engine running in this context
-    (#186), then AUTOMAINTAINER_WORKSPACE_DIR if set, otherwise falls back to the
-    OS-standard temporary directory (e.g., %TEMP%\\automaintainer on Windows or
-    /tmp/automaintainer on Linux/macOS).
+    Inside an engine run (#186) this is the engine's ``workspace_dir``, or
+    the OS temporary directory below when it is None: an engine never reads
+    AUTOMAINTAINER_WORKSPACE_DIR (its config is the whole configuration, see
+    AutoMaintainerConfig.workspace_dir). Outside one it is
+    AUTOMAINTAINER_WORKSPACE_DIR if set, otherwise the OS-standard temporary
+    directory (e.g., %TEMP%\\automaintainer on Windows or /tmp/automaintainer
+    on Linux/macOS).
     """
     config = active_config()
     if config is not None and config.workspace_dir is not None:
         return Path(os.path.abspath(config.workspace_dir))
-    env_path = os.getenv("AUTOMAINTAINER_WORKSPACE_DIR")
+    env_path = None if config is not None else os.getenv("AUTOMAINTAINER_WORKSPACE_DIR")
     if env_path:
         return Path(os.path.abspath(env_path))
     return Path(os.path.abspath(os.path.join(tempfile.gettempdir(), "automaintainer")))

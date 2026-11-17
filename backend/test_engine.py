@@ -342,6 +342,21 @@ async def test_rate_limiter_uses_the_config_pool_and_budgets(tmp_path):
     assert {k.tokens_per_minute for k in manager.keys} == {900}
 
 
+async def test_rate_limiter_uses_every_configured_key(tmp_path):
+    """The environment pool stops at GROQ_API_KEY_19; a configured pool does
+    not drop keys past the 20th."""
+    keys = [f"k{i}" for i in range(25)]
+    engine = AutoMaintainerEngine(make_config(tmp_path, "a", groq_api_keys=keys))
+    manager = engine.rate_limiter()
+    await manager.initialize()
+    try:
+        assert [k.key for k in manager.keys] == keys
+        assert manager.keys[0].name == "primary"
+        assert manager.keys[24].name == "key_24"
+    finally:
+        await engine.aclose()
+
+
 def test_installation_tokens_are_cached_per_app(tmp_path):
     contexts = [
         AutoMaintainerEngine(
@@ -520,6 +535,261 @@ async def test_cancelling_the_caller_still_raises(tmp_path):
         "RUN_CANCELLED"
     ]
     assert engine._runs == {}
+
+
+class SlowCreds(FakeCreds):
+    """Credentials whose token takes a while (a slow token mint)."""
+
+    def token(self):
+        time.sleep(0.3)
+        return self._token
+
+
+def _never_runs_node(calls):
+    async def node(state):  # pragma: no cover - must never run
+        calls.append("node")
+        return {}
+
+    return node
+
+
+@pytest.mark.parametrize("grace_seconds", [0, None])
+async def test_cancel_during_credential_binding_ends_the_run_cancelled(
+    tmp_path, grace_seconds
+):
+    """A cancel landing before the graph starts still leaves a terminal
+    status and one RUN_CANCELLED: with a grace period the task is cancelled
+    in the preamble (outside the pipeline's guarded section), without one the
+    run stops before its first node."""
+    calls = []
+    db, events = FakeSupabase(), Collector()
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"),
+        supabase=db,
+        emitter=events,
+        github=lambda *a, **k: SlowCreds("tok"),
+        nodes={**NOOP_NODES, "architect": _never_runs_node(calls)},
+    )
+    run = asyncio.create_task(engine.run("o/r", run_id="run-1"))
+    await asyncio.sleep(0.05)  # inside creds.token()
+    assert engine.cancel("run-1", grace_seconds=grace_seconds)
+    result = await run
+
+    assert result.status == "cancelled" and result.error_code == "RUN_CANCELLED"
+    assert calls == []
+    assert [e.error_code for e in events.events if isinstance(e, ErrorEvent)] == [
+        "RUN_CANCELLED"
+    ]
+    assert [w[:3] for w in db.writes if w[0] == "runs"] == [
+        (
+            "runs",
+            "upsert",
+            {
+                "id": "run-1",
+                "repo_name": "o/r",
+                "target_issue_number": None,
+                "status": "running",
+            },
+        ),
+        ("runs", "update", {"status": "cancelled"}),
+    ]
+    assert engine._runs == {}
+
+
+class _SlowUpsertSupabase(FakeSupabase):
+    """The "running" upsert takes a while (a slow database round trip)."""
+
+    def table(self, name):
+        query = super().table(name)
+        execute = query.execute
+
+        def slow_execute():
+            if query.op == "upsert":
+                time.sleep(0.3)
+            return execute()
+
+        query.execute = slow_execute
+        return query
+
+
+async def test_cancel_during_the_runs_upsert_is_not_overwritten(tmp_path):
+    """The upsert's thread outlives a task cancel; "cancelled" is written
+    after it, so the row does not end "running"."""
+    db, events = _SlowUpsertSupabase(), Collector()
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"), supabase=db, emitter=events, nodes=NOOP_NODES
+    )
+    run = asyncio.create_task(engine.run("o/r", run_id="run-1"))
+    await asyncio.sleep(0.05)  # inside the upsert
+    assert engine.cancel("run-1", grace_seconds=0)
+    result = await run
+
+    assert result.status == "cancelled" and result.error_code == "RUN_CANCELLED"
+    assert [w[1] for w in db.writes if w[0] == "runs"] == ["upsert", "update"]
+    assert db.writes[-1][:3] == ("runs", "update", {"status": "cancelled"})
+    assert [e.error_code for e in events.events if isinstance(e, ErrorEvent)] == [
+        "RUN_CANCELLED"
+    ]
+
+
+async def test_caller_cancel_during_credential_binding_marks_the_run(tmp_path):
+    db, events = FakeSupabase(), Collector()
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"),
+        supabase=db,
+        emitter=events,
+        github=lambda *a, **k: SlowCreds("tok"),
+        nodes=NOOP_NODES,
+    )
+    run = asyncio.create_task(engine.run("o/r", run_id="run-1"))
+    await asyncio.sleep(0.05)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert [e.error_code for e in events.events if isinstance(e, ErrorEvent)] == [
+        "RUN_CANCELLED"
+    ]
+    assert db.writes[-1][:3] == ("runs", "update", {"status": "cancelled"})
+
+
+async def test_aclose_ends_runs_cancelled_without_raising_into_callers(tmp_path):
+    db, events = FakeSupabase(), Collector()
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"),
+        supabase=db,
+        emitter=events,
+        nodes={**NOOP_NODES, "architect": _slow_node},
+    )
+    run = asyncio.create_task(engine.run("o/r", run_id="run-1"))
+    await asyncio.sleep(0.05)
+    await engine.aclose()
+    result = await run
+
+    assert result.status == "cancelled" and result.error_code == "RUN_CANCELLED"
+    assert [e.error_code for e in events.events if isinstance(e, ErrorEvent)] == [
+        "RUN_CANCELLED"
+    ]
+    assert db.writes[-1][:3] == ("runs", "update", {"status": "cancelled"})
+    with pytest.raises(RuntimeError, match="closed"):
+        await engine.run("o/r")
+
+
+async def test_run_agent_loop_refuses_a_run_id_already_in_progress(monkeypatch):
+    db = FakeSupabase()
+    monkeypatch.setattr(agents, "supabase", db)
+    monkeypatch.setattr(
+        agents, "app", agents.build_graph({**NOOP_NODES, "architect": _slow_node})
+    )
+    first = asyncio.create_task(
+        agents.run_agent_loop("o/r", run_id="run-1", emitter=Collector())
+    )
+    await asyncio.sleep(0.05)
+    writes_before = list(db.writes)
+    second_events = Collector()
+
+    second = await agents.run_agent_loop("o/r", run_id="run-1", emitter=second_events)
+
+    assert second["status"] == "failed"
+    assert second["error_code"] == "RUN_ALREADY_ACTIVE"
+    assert db.writes == writes_before  # the first run's row is untouched
+    assert second_events.events == []
+    assert engine_module.cancel_active_run("run-1", grace_seconds=0)
+    assert (await first)["status"] == "cancelled"
+
+
+class _AsyncCallableNode:
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def __call__(self, state):
+        self.calls.append("callable")
+        return {}
+
+
+async def _partial_target(calls, state):
+    calls.append("partial")
+    return {}
+
+
+async def test_injected_async_callables_are_awaited(tmp_path):
+    """A functools.partial of an async function and an object with an async
+    __call__ are async nodes too (agents._stoppable)."""
+    import functools
+
+    calls = []
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"),
+        nodes={
+            **NOOP_NODES,
+            "architect": functools.partial(_partial_target, calls),
+            "brainstormer": _AsyncCallableNode(calls),
+        },
+    )
+    result = await engine.run("o/r", run_id="run-1")
+
+    assert result.status == "completed"
+    assert calls == ["partial", "callable"]
+
+
+async def test_stoppable_keeps_the_node_signature_and_arguments():
+    """LangGraph inspects a node's signature to decide what to inject; the
+    cancel guard shows the node's own and passes everything through."""
+    import inspect
+
+    seen = []
+
+    async def node(state, config):
+        seen.append(config)
+        return {"done": True}
+
+    guarded = agents._stoppable(node)
+    assert list(inspect.signature(guarded).parameters) == ["state", "config"]
+    assert guarded.node is node
+    assert not hasattr(guarded, "__wrapped__")
+    assert await guarded({}, config={"x": 1}) == {"done": True}
+    assert seen == [{"x": 1}]
+
+
+async def test_node_asking_for_config_gets_it_through_the_guard(tmp_path):
+    seen = []
+
+    async def architect(state, config):
+        seen.append("configurable" in config)
+        return {}
+
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"), nodes={**NOOP_NODES, "architect": architect}
+    )
+    result = await engine.run("o/r", run_id="run-1")
+
+    assert result.status == "completed"
+    assert seen == [True]
+
+
+async def test_cancel_during_the_last_node_keeps_the_run_completed(tmp_path):
+    """pm is the last node here (no approved verdict): a cancel arriving while
+    it runs has no next node to stop, so the run's outcome stands."""
+    db, events = FakeSupabase(), Collector()
+    holder = {}
+
+    async def pm(state):
+        assert holder["engine"].cancel("run-1")
+        await asyncio.sleep(0.05)
+        return {}
+
+    engine = AutoMaintainerEngine(
+        make_config(tmp_path, "a"),
+        supabase=db,
+        emitter=events,
+        nodes={**NOOP_NODES, "pm": pm},
+    )
+    holder["engine"] = engine
+    result = await engine.run("o/r", run_id="run-1")
+
+    assert result.status == "completed"
+    assert not [e for e in events.events if isinstance(e, ErrorEvent)]
+    assert db.writes[-1][:3] == ("runs", "update", {"status": "completed"})
 
 
 async def test_cancel_active_run_reaches_the_default_engine(monkeypatch):
@@ -800,6 +1070,22 @@ def test_settings_resolve_from_the_engine_else_the_environment(tmp_path, monkeyp
     with pytest.raises(verification.RunnerError, match="sandbox_backend"):
         _in_engine(config, verification._sandbox_backend_factory)
     assert verification._sandbox_backend_factory() is None  # SANDBOX_BACKEND unset
+
+
+def test_engine_without_workspace_dir_ignores_the_environment(tmp_path, monkeypatch):
+    """workspace_dir=None is the documented runtime default, <tmp>/automaintainer,
+    not whatever AUTOMAINTAINER_WORKSPACE_DIR the host process has."""
+    import tempfile
+
+    monkeypatch.setenv("AUTOMAINTAINER_WORKSPACE_DIR", str(tmp_path / "env-ws"))
+    config = make_config(tmp_path, "a", workspace_dir=None)
+
+    assert _in_engine(config, workspace.get_base_workspace_dir) == Path(
+        os.path.abspath(os.path.join(tempfile.gettempdir(), "automaintainer"))
+    )
+    assert workspace.get_base_workspace_dir() == Path(
+        os.path.abspath(tmp_path / "env-ws")
+    )
 
 
 def test_github_auth_mode_and_pat_come_from_the_engine(tmp_path, monkeypatch):

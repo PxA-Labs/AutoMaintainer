@@ -413,20 +413,43 @@ event loop without sharing clients, settings or caches.
 - **Cancellation.** `cancel(run_id, grace_seconds=None)` stops the run
   before its next node starts (every graph node checks first, because
   LangGraph's `astream` runs ahead of its consumer); a node in flight
-  finishes. With `grace_seconds` the task is also cancelled after that delay.
-  The run emits `RUN_CANCELLED` and is marked `cancelled` (also when its task
-  is cancelled; this used to write `failed`). `tasks.cancel_run_task` calls
-  `cancel_active_run`, which reaches a run in the same process, and still
-  revokes the Celery task for runs in other processes.
+  finishes. A cancel that arrives during the last node leaves the run
+  `completed` (there is no next node to stop). With `grace_seconds` the task
+  is also cancelled after that delay. Either way the run emits `RUN_CANCELLED` once and is marked `cancelled`,
+  also when the cancel lands before the graph starts (during the `runs`
+  upsert, whose write is awaited first so it cannot overwrite `cancelled`,
+  or credential binding: the engine marks the run itself) and when
+  its task is cancelled (this used to write `failed`). `aclose()` stops its
+  runs the same way, so their `run()` calls return `cancelled`.
+  `tasks.cancel_run_task` calls `cancel_active_run`, which reaches a run in
+  the same process, and still revokes the Celery task for runs in other
+  processes.
 - **`run_agent_loop`** is a thin wrapper over the process-default engine,
   which has no config and publishes no engine context, so the API and Celery
   path keep their behaviour. It is not built from
   `AutoMaintainerConfig.from_env()` on purpose: that validation is stricter
   than the runtime and snapshots the environment, which would change when
-  and how a misconfigured run fails.
-- Not per engine yet: the runners' `dry_run`, `GITHUB_APP_SLUG` (the slug
-  fallback when GET /app fails), the host environment copied into test
-  processes, and logging setup, which is process-global by nature.
+  and how a misconfigured run fails. A second call with the `run_id` of a run
+  still in progress in the process returns a `failed` result
+  (`RUN_ALREADY_ACTIVE`) and leaves that run's row and events alone.
+- **Workspace root.** An engine's `workspace_dir=None` is `<tmp>/automaintainer`;
+  the engine never reads `AUTOMAINTAINER_WORKSPACE_DIR`. Two engines that
+  both leave it unset share that root (and its clone locks), as two
+  processes would.
+- **Denylist.** `forbidden_paths=()` denies nothing but `.automaintainer.yml`,
+  the same as `CHANGE_LIMIT_DENYLIST=","` on the environment path; the
+  built-in list (workflows, Dockerfiles, ...) applies only when it is None.
+- **Nodes.** Every node is wrapped by the cancel check, which carries the
+  node's signature and passes its arguments through, so LangGraph injects
+  `config` and the like as for an unwrapped node. Async functions, partials
+  of them and objects with an async `__call__` are awaited.
+- Not per engine yet (still read from the host process inside an engine
+  run): the runners' `dry_run`; `GITHUB_APP_SLUG` (the slug fallback when
+  GET /app fails); `ENVIRONMENT` (`verification._is_production`);
+  `VERIFY_PYTHON`; `VERIFY_MAX_OUTPUT_BYTES`; the host environment copied
+  into test processes (`verification._ENV_ALLOWLIST`) and into git
+  subprocesses (`workspace`, `{**os.environ, "GIT_TERMINAL_PROMPT": "0"}`);
+  and logging and warnings setup, which is process-global by nature.
 
 ### Errors
 

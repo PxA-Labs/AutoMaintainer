@@ -239,9 +239,12 @@ class RateLimitManager:
 
         keys = []
         if self._configured_keys is not None:
-            # Same names as the environment pool: GROQ_API_KEY is "primary".
-            names = ["primary"] + [f"key_{i}" for i in range(1, 20)]
-            keys = list(zip(names, self._configured_keys))
+            # Same names as the environment pool (GROQ_API_KEY is "primary"),
+            # but not capped at its 20 variables: every configured key is used.
+            keys = [
+                ("primary" if i == 0 else f"key_{i}", key)
+                for i, key in enumerate(self._configured_keys)
+            ]
         else:
             primary = os.getenv("GROQ_API_KEY")
             if primary:

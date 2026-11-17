@@ -42,6 +42,7 @@ from .context import EngineContext, current_engine
 
 __all__ = [
     "AutoMaintainerEngine",
+    "RunAlreadyActive",
     "RunResult",
     "cancel_active_run",
     "default_engine",
@@ -93,6 +94,10 @@ class RunResult:
             error=raw.get("error"),
             raw=raw,
         )
+
+
+class RunAlreadyActive(RuntimeError):
+    """``run_id`` is already running on the engine; the new call did nothing."""
 
 
 class _ActiveRun:
@@ -179,9 +184,17 @@ class AutoMaintainerEngine:
     # --- Lifecycle ------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Cancel the engine's runs in progress and release its clients."""
+        """Cancel the engine's runs in progress and release its clients.
+
+        The runs are stopped as by ``cancel(run_id, grace_seconds=0)``: their
+        ``run()`` calls return a ``cancelled`` RunResult rather than raising
+        CancelledError into callers that were never cancelled.
+        """
         self._closed = True
-        tasks = [r.task for r in list(self._runs.values()) if r.task is not None]
+        active_runs = [r for r in list(self._runs.values()) if r.task is not None]
+        for active in active_runs:
+            active.stop.set()
+        tasks = [r.task for r in active_runs]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -269,7 +282,7 @@ class AutoMaintainerEngine:
             raise RuntimeError("AutoMaintainerEngine is closed")
         run_id = run_id or str(uuid.uuid4())
         if run_id in self._runs:
-            raise RuntimeError(f"Run {run_id} is already running on this engine")
+            raise RunAlreadyActive(f"Run {run_id} is already running on this engine")
         trigger = dict(trigger or {})
         trigger = {
             "source": trigger.get("source"),
@@ -332,6 +345,14 @@ class AutoMaintainerEngine:
                 should_stop=active.stop.is_set,
                 progress=active.progress,
             )
+        except asyncio.CancelledError:
+            # A cancellation the pipeline did not record: it landed before
+            # the graph started (the runs upsert, credential binding) or
+            # while a failure was being written. Mark it here, still inside
+            # the run's context (engine, emitter), so the run never stays
+            # "running" and RUN_CANCELLED is emitted exactly once.
+            await agents._mark_run_cancelled_once(run_id, active.progress)
+            raise
         finally:
             agents.current_emitter.reset(emitter_token)
             agents._run_github_credentials.reset(creds_token)
