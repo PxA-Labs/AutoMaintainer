@@ -347,8 +347,18 @@ themselves until the engine refactor (#186) passes a config object through.
   errors contain their values.
 - Validation is stricter than the runtime: a malformed or unknown value
   (e.g. `MERGE_POLICY=yolo`) is an error instead of a logged fallback, and
-  so are an App id without a private key, an empty Groq key pool, and a
-  relative `workspace_dir`.
+  so are an App id without a private key, an empty Groq key pool, a blank
+  Groq key, a relative `workspace_dir`, and `timeout_seconds` above
+  `max_timeout_seconds` (the runtime silently caps it). All problems are
+  reported together in one `ValidationError`.
+- Boolean variables (`VERIFY_CHANGES`, `VERIFY_ALLOW_LOCAL`) accept exactly
+  the runtime's spellings, `1/true/yes/on` and `0/false/no/off`; anything
+  else is an error, never pydantic's lax `f`/`n` = false, which would turn
+  the verification gate off where the runtime keeps it on.
+- `github_auth_mode="pat"` without `GITHUB_TOKEN` is accepted, as in the
+  runtime: such a run proceeds without GitHub access.
+- `model_copy(update=...)` skips validation (pydantic's behaviour); derive
+  variants by constructing a new config instead.
 - `enable_hitl` is derived (`merge_policy == "human"`), not a separate flag.
   There are no OpenAI/Anthropic keys, command denylist or cost ceiling,
   because the runtime has no provider, mechanism or meter they would map to.

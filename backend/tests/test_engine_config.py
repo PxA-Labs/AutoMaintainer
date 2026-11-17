@@ -309,10 +309,92 @@ def test_from_env_runner_type(env, expected):
 
 
 def test_from_env_invalid_allow_local_is_refused():
-    with pytest.raises(ValueError, match="VERIFY_ALLOW_LOCAL"):
+    with pytest.raises(ValidationError) as info:
         AutoMaintainerConfig.from_env(
             {"GROQ_API_KEY": GROQ, "VERIFY_ALLOW_LOCAL": "maybe"}
         )
+    assert [e["loc"] for e in info.value.errors()] == [("runner_type",)]
+    assert "VERIFY_ALLOW_LOCAL must be one of" in str(info.value)
+    assert "maybe" not in str(info.value) + info.value.json()
+
+
+@pytest.mark.parametrize(
+    "env, other",
+    [
+        # A field error (cross-field checks only run once fields are valid).
+        ({"GROQ_API_KEY": GROQ, "CHANGE_LIMIT_MAX_FILES": "ten"}, "change_max_files"),
+        # A cross-field error.
+        ({}, "groq_api_keys"),
+    ],
+)
+def test_from_env_invalid_allow_local_is_reported_with_other_problems(env, other):
+    with pytest.raises(ValidationError) as info:
+        AutoMaintainerConfig.from_env({"VERIFY_ALLOW_LOCAL": "maybe", **env})
+    locs = {e["loc"][0] for e in info.value.errors()}
+    assert locs == {"runner_type", other}
+    assert_no_secret(str(info.value) + info.value.json())
+
+
+# --- Boolean flags: exactly the runtime's spellings ------------------------------------
+
+
+def runtime_flag_spellings() -> tuple[set[str], set[str]]:
+    """The true/false spellings of verification._env_flag, read as text."""
+    source = (BACKEND / "verification.py").read_text(encoding="utf-8")
+    body = source.split("def _env_flag", 1)[1].split("\ndef ", 1)[0]
+    true_part, false_part = re.findall(r"in \(([^)]*)\)", body)[:2]
+    return (
+        set(re.findall(r'"([^"]*)"', true_part)),
+        set(re.findall(r'"([^"]*)"', false_part)),
+    )
+
+
+def test_flag_spellings_match_verification_env_flag():
+    assert runtime_flag_spellings() == (
+        set(config_module._TRUE),
+        set(config_module._FALSE),
+    )
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("1", True),
+        ("true", True),
+        (" Yes ", True),
+        ("ON", True),
+        ("0", False),
+        ("false", False),
+        ("No", False),
+        (" off", False),
+    ],
+)
+def test_from_env_verify_changes_runtime_spellings(raw, expected):
+    config = AutoMaintainerConfig.from_env(
+        {"GROQ_API_KEY": GROQ, "VERIFY_CHANGES": raw}
+    )
+    assert config.verify_changes is expected
+
+
+# verification._env_flag returns None for these, and verification_enabled()
+# then keeps verification ON. Pydantic's lax bool would read 'f'/'n' as False
+# and silently turn the gate off, so they must be refused instead.
+@pytest.mark.parametrize("raw", ["f", "n", "t", "y", "maybe", "2", "disabled"])
+def test_from_env_verify_changes_other_spellings_are_refused(raw):
+    with pytest.raises(ValidationError) as info:
+        AutoMaintainerConfig.from_env({"GROQ_API_KEY": GROQ, "VERIFY_CHANGES": raw})
+    errors = info.value.errors()
+    assert [e["loc"] for e in errors] == [("verify_changes",)]
+    assert "VERIFY_CHANGES" in str(info.value)
+
+
+@pytest.mark.parametrize("value", ["f", "n", 0, 1, None])
+def test_explicit_verify_changes_must_be_a_bool_or_runtime_spelling(value):
+    with pytest.raises(ValidationError) as info:
+        make(verify_changes=value)
+    assert info.value.errors()[0]["loc"] == ("verify_changes",)
+    assert make(verify_changes="off").verify_changes is False
+    assert make(verify_changes=False).verify_changes is False
 
 
 def test_explicit_argument_beats_environment():
@@ -369,6 +451,27 @@ def test_secret_provider_not_asked_for_explicit_values():
         github_private_key=None,
         groq_api_keys=[GROQ],
     )
+
+
+@pytest.mark.parametrize("returned", [12345, b"bytes", ["list"]])
+def test_secret_provider_must_return_str_or_none(returned):
+    with pytest.raises(TypeError) as info:
+        AutoMaintainerConfig.from_env({}, secret_provider=lambda name: returned)
+    message = str(info.value)
+    assert "GITHUB_TOKEN" in message
+    assert type(returned).__name__ in message
+    assert "12345" not in message
+
+
+def test_secret_provider_exceptions_propagate_unwrapped():
+    class VaultDown(Exception):
+        pass
+
+    def provider(name):
+        raise VaultDown(name)
+
+    with pytest.raises(VaultDown):
+        AutoMaintainerConfig.from_env({}, secret_provider=provider)
 
 
 def test_from_env_unknown_override_is_refused():
@@ -440,6 +543,20 @@ def test_from_env_malformed_number_is_refused():
             {"GROQ_API_KEY": GROQ, "CHANGE_LIMIT_MAX_FILES": "ten"}
         )
     assert info.value.errors()[0]["loc"] == ("change_max_files",)
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan", "Infinity"])
+def test_from_env_non_finite_git_timeout_is_refused(raw):
+    with pytest.raises(ValidationError) as info:
+        AutoMaintainerConfig.from_env(
+            {"GROQ_API_KEY": GROQ, "GIT_TIMEOUT_SECONDS": raw}
+        )
+    assert [e["loc"] for e in info.value.errors()] == [("git_timeout_seconds",)]
+
+
+def test_non_finite_ratio_is_refused():
+    with pytest.raises(ValidationError):
+        make(implementer_min_size_ratio=float("nan"))
 
 
 def test_from_env_without_any_groq_key_is_refused():
@@ -649,9 +766,37 @@ _ENV_READ_RE = re.compile(
     r"(?:getenv|environ\.get|environ\[|\benv\.get|_env_\w+|_setting\(\s*env,)"
     r"\(?\s*f?[\"']([A-Z][A-Z0-9_]*)"
 )
+# The same reads through a module-level constant, e.g. runners/sandbox.py's
+# os.getenv(SANDBOX_BACKEND_ENV) with SANDBOX_BACKEND_ENV = "SANDBOX_BACKEND".
+_ENV_READ_CONST_RE = re.compile(
+    r"(?:getenv|environ\.get|environ\[|\benv\.get|_env_\w+)\(?\s*([A-Z][A-Z0-9_]*)\b"
+)
+_STR_CONST_RE = re.compile(
+    r"^([A-Z][A-Z0-9_]*)\s*=\s*[\"']([A-Z][A-Z0-9_]*)[\"']", re.M
+)
+
+
+def env_reads_in(source: str) -> set[str]:
+    names = set(_ENV_READ_RE.findall(source))
+    constants = dict(_STR_CONST_RE.findall(source))
+    for const in _ENV_READ_CONST_RE.findall(source):
+        if const in constants:
+            names.add(constants[const])
+    return names
+
+
+def test_parity_scanner_resolves_named_constants():
+    source = 'FOO_ENV = "FOO"\nx = os.getenv(FOO_ENV)\ny = os.getenv("BAR")\n'
+    assert env_reads_in(source) == {"FOO", "BAR"}
 
 
 def runtime_env_vars() -> set[str]:
+    """Variables the runtime reads (backend/*.py and backend/runners/*.py).
+
+    evals/ is not scanned: it is a developer tool (it reads GROQ_API_KEY to
+    run the evaluation harness), not part of the engine. A name built at run
+    time other than the GROQ_API_KEY_{i} f-string would still be missed.
+    """
     names = set()
     sources = [p for p in BACKEND.glob("*.py")] + list(
         (BACKEND / "runners").glob("*.py")
@@ -659,7 +804,7 @@ def runtime_env_vars() -> set[str]:
     for path in sources:
         if path.name.startswith("test_") or path.name == "conftest.py":
             continue
-        names.update(_ENV_READ_RE.findall(path.read_text(encoding="utf-8")))
+        names.update(env_reads_in(path.read_text(encoding="utf-8")))
     return names
 
 

@@ -117,8 +117,13 @@ COVERED_ENV_VARS: frozenset[str] = frozenset(
 # environment supplies them (the Groq pool names are asked for as well).
 _SECRET_FIELDS = ("github_token", "github_app_id", "github_private_key")
 
+# verification._env_flag: the only spellings of a boolean variable the runtime
+# understands. Anything else is "unset" there (VERIFY_CHANGES then keeps
+# verification on), so pydantic's lax bool ("f", "n", "t", "y") must not be
+# used for these: it would read "f" as False and turn the gate off.
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
+_FLAG_SPELLINGS = ", ".join(sorted(_TRUE | _FALSE))
 # runners.sandbox.load_sandbox_backend_factory: "package.module:factory".
 _FACTORY_SPEC_RE = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
 _REDACTED = "[redacted]"
@@ -129,9 +134,11 @@ _CONFIG_ERROR = "config_error"
 class SecretProvider(Protocol):
     """Looks up a credential by its environment variable name.
 
-    Returns the value, or None when it has none. Implementations must not
-    log the value. No vault client ships with the project; this is the hook
-    a deployment plugs one into.
+    Returns the value (a ``str``), or None when it has none; any other type
+    makes ``from_env`` raise ``TypeError``. Exceptions it raises propagate
+    unwrapped, so a vault outage surfaces as the vault's own error.
+    Implementations must not log the value. No vault client ships with the
+    project; this is the hook a deployment plugs one into.
     """
 
     def __call__(self, name: str) -> Optional[str]: ...
@@ -163,7 +170,9 @@ class ModelRouting(BaseModel):
         return getattr(self, role)
 
 
-def _redacted(exc: ValidationError, title: str) -> ValidationError:
+def _redacted(
+    exc: ValidationError, title: str, extra: tuple[dict, ...] = ()
+) -> ValidationError:
     """``exc`` with every input value replaced.
 
     ``hide_input_in_errors`` only hides inputs from ``str(exc)``;
@@ -184,6 +193,7 @@ def _redacted(exc: ValidationError, title: str) -> ValidationError:
             if "ctx" in err:
                 detail["ctx"] = err["ctx"]
         details.append(detail)
+    details.extend(extra)
     return ValidationError.from_exception_data(title, details, hide_input=True)
 
 
@@ -200,6 +210,11 @@ class AutoMaintainerConfig(BaseModel):
 
     Immutable (``frozen``) and strict about its keys (``extra="forbid"``).
     Build it directly with keyword arguments, or with ``from_env``.
+
+    Derive a variant with ``AutoMaintainerConfig(**{**c.model_dump(), ...})``
+    or ``model_validate``, not ``model_copy(update=...)``: pydantic's
+    ``model_copy`` skips validation, so it would accept, say, a relative
+    ``workspace_dir`` or an empty Groq key pool.
 
     Not covered on purpose:
 
@@ -221,6 +236,8 @@ class AutoMaintainerConfig(BaseModel):
         extra="forbid",
         hide_input_in_errors=True,
         validate_default=True,
+        # "inf"/"nan" parse as floats; a timeout or ratio must be finite.
+        allow_inf_nan=False,
     )
 
     # --- Credentials -----------------------------------------------------------
@@ -233,7 +250,9 @@ class AutoMaintainerConfig(BaseModel):
     github_private_key_path: Optional[Path] = None
     # None: ``app`` when App credentials are set, else ``pat`` (as today).
     github_auth_mode: Optional[Literal["app", "pat"]] = None
-    # The rotation pool, in rate_limiter order.
+    # The rotation pool, in rate_limiter order. Keys are stripped and a blank
+    # one is an error; rate_limiter uses them raw and would count a
+    # whitespace-only key as a (useless) key.
     groq_api_keys: tuple[SecretStr, ...] = ()
 
     # --- LLM -------------------------------------------------------------------
@@ -259,6 +278,7 @@ class AutoMaintainerConfig(BaseModel):
     timeout_seconds: PositiveInt = 300
     max_timeout_seconds: PositiveInt = 900
     git_timeout_seconds: PositiveFloat = 300.0
+    # VERIFY_CHANGES: a bool, or one of the runtime's spellings (_TRUE/_FALSE).
     verify_changes: bool = True
     # Deployment ceiling; repositories may only be stricter.
     merge_policy: Literal["human", "ci", "auto"] = "human"
@@ -319,6 +339,23 @@ class AutoMaintainerConfig(BaseModel):
                 keys.append(raw)
             return tuple(keys)
         return value
+
+    @field_validator("verify_changes", mode="before")
+    @classmethod
+    def _runtime_flag(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            flag = value.strip().lower()
+            if flag in _TRUE:
+                return True
+            if flag in _FALSE:
+                return False
+        raise PydanticCustomError(
+            _CONFIG_ERROR,
+            "verify_changes (VERIFY_CHANGES) must be a bool or one of "
+            f"{_FLAG_SPELLINGS}",
+        )
 
     @field_validator("merge_policy", "github_auth_mode", "runner_type", mode="before")
     @classmethod
@@ -445,8 +482,12 @@ class AutoMaintainerConfig(BaseModel):
         credentials that neither supplies. Empty or blank variables count as
         unset, as in the runtime. Unlike the runtime, which logs a warning
         and keeps the default for a malformed value (or falls back to
-        ``human`` for an unknown MERGE_POLICY), this raises: a typo in a
-        safety setting should stop a deployment, not be ignored.
+        ``human`` for an unknown MERGE_POLICY), this raises
+        ``ValidationError``, listing every problem at once: a typo in a
+        safety setting should stop a deployment, not be ignored. Boolean
+        variables accept exactly the runtime's spellings (1/true/yes/on,
+        0/false/no/off). A ``secret_provider`` returning neither ``str`` nor
+        None raises ``TypeError``; its own exceptions propagate unwrapped.
         """
         env = os.environ if environ is None else environ
 
@@ -460,6 +501,12 @@ class AutoMaintainerConfig(BaseModel):
             value = lookup(name)
             if value is None and secret_provider is not None:
                 value = secret_provider(name)
+                if value is not None and not isinstance(value, str):
+                    # The type only: the value may be a secret.
+                    raise TypeError(
+                        f"secret_provider returned {type(value).__name__} for "
+                        f"{name}; expected str or None"
+                    )
                 if value is not None and not value.strip():
                     value = None
             return value
@@ -482,15 +529,19 @@ class AutoMaintainerConfig(BaseModel):
             if keys:
                 values["groq_api_keys"] = keys
 
+        pre_problems: list[dict] = []
         if "runner_type" not in overrides:
             # verification.py: a configured sandbox wins; the host runs tests
             # only with VERIFY_ALLOW_LOCAL=true; otherwise sandbox (which
             # reports an error until a backend is configured).
             allow_local = lookup(_ALLOW_LOCAL_ENV)
             if allow_local is not None and allow_local.lower() not in (_TRUE | _FALSE):
-                raise ValueError(
-                    f"{_ALLOW_LOCAL_ENV} must be one of "
-                    f"{', '.join(sorted(_TRUE | _FALSE))}"
+                # Reported with the model's own errors below. Not echoed.
+                pre_problems.append(
+                    _config_error(
+                        "runner_type",
+                        f"{_ALLOW_LOCAL_ENV} must be one of {_FLAG_SPELLINGS}",
+                    )
                 )
             local = allow_local is not None and allow_local.lower() in _TRUE
             sandbox_set = "sandbox_backend" in values or (
@@ -499,4 +550,15 @@ class AutoMaintainerConfig(BaseModel):
             values["runner_type"] = "local" if local and not sandbox_set else "sandbox"
 
         values.update(overrides)
-        return cls(**values)
+        try:
+            config = cls(**values)
+        except ValidationError as exc:
+            if not pre_problems:
+                raise
+            # Already redacted by _validate_redacted; add ours alongside.
+            raise _redacted(exc, cls.__name__, tuple(pre_problems)) from None
+        if pre_problems:
+            raise ValidationError.from_exception_data(
+                cls.__name__, pre_problems, hide_input=True
+            )
+        return config
