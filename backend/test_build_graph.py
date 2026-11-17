@@ -26,6 +26,13 @@ EXPECTED_BRANCHES = {
     "pm": {"should_implement": (agents.should_implement, None)},
     "maintainer": {"should_iterate": (agents.should_iterate, None)},
 }
+
+
+def _node_fn(fn):
+    """The node function behind the engine's cancel guard (agents._stoppable)."""
+    return getattr(fn, "node", fn)
+
+
 APPROVE = json.dumps({"verdict": "approve"})
 
 
@@ -69,7 +76,8 @@ def test_build_graph_uses_the_default_node_functions():
     }
     for name, fn in defaults.items():
         runnable = builder.nodes[name].runnable
-        assert (runnable.afunc or runnable.func) is fn
+        # Each node is wrapped by the engine's cancel check (_stoppable).
+        assert _node_fn(runnable.afunc or runnable.func) is fn
 
 
 def test_build_graph_returns_a_new_graph_per_call():
@@ -133,9 +141,9 @@ async def test_partial_override_keeps_the_other_default_nodes():
 
     builder = agents.build_graph({"pm": pm}).builder
 
-    assert builder.nodes["pm"].runnable.afunc is pm
+    assert _node_fn(builder.nodes["pm"].runnable.afunc) is pm
     arch = builder.nodes["architect"].runnable
-    assert (arch.afunc or arch.func) is agents.architect_node
+    assert _node_fn(arch.afunc or arch.func) is agents.architect_node
 
 
 def test_unknown_node_override_is_rejected():
