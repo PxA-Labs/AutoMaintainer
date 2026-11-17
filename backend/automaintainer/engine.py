@@ -34,8 +34,8 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-import agents
-from rate_limiter import RateLimitManager
+from ._runtime import agents
+from ._runtime.rate_limiter import RateLimitManager
 
 from .config import AutoMaintainerConfig
 from .context import EngineContext, current_engine

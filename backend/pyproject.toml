@@ -3,42 +3,69 @@
 # demand with scripts/export-backend-requirements.sh if a tool needs it.
 # See CONTRIBUTING.md ("Managing backend dependencies").
 #
-#   uv sync                              # create/update .venv incl. dev group
-#   uv add <pkg>                         # add a runtime dependency
+#   uv sync --extra server               # create/update .venv incl. dev group
+#   uv add <pkg>                         # add an engine (SDK) dependency
+#   uv add --optional server <pkg>       # add a server-only dependency
 #   uv add --group dev <pkg>             # add a dev/test dependency
 #   uv lock --upgrade-package <pkg>      # upgrade one dependency
+#   uv build                             # build the automaintainer wheel
 [project]
 name = "automaintainer-backend"
-version = "0.0.0"
-description = "AutoMaintainer FastAPI backend, Celery workers and agents."
+# Single source: automaintainer.__version__, read by hatchling at build time.
+dynamic = ["version"]
+description = "AutoMaintainer engine (Python SDK), with the FastAPI backend and Celery workers behind the server extra."
 requires-python = ">=3.11"
+license = "MIT"
+# Base install: what `import automaintainer` and AutoMaintainerEngine.run()
+# need (the modules under automaintainer/). Everything only main.py, tasks.py,
+# celery_app.py, quotas.py or observability.py imports lives in the server
+# extra; the deployments install it (`uv sync --extra server`).
 dependencies = [
-    "fastapi",
-    "uvicorn",
-    "langchain",
-    # Floor prevents the resolver from backtracking to vulnerable litellm 1.83.0 (see #382-#386)
-    "litellm>=1.105.1",
     "langgraph",
+    "langchain-groq",
+    # Imported directly (agents, rate_limiter), so declared rather than left
+    # to arrive through langchain-groq.
+    "langchain-core",
     "pygithub",
     "python-dotenv",
-    "websockets",
     "pydantic",
     # Capped below 2.0 to match langchain-mcp-adapters (0.3.2 requires
     # mcp<2.0.0). Lift the cap once an adapters release supports mcp 2.x.
     "mcp>=1.24,<2",
     "langchain-mcp-adapters",
-    "langchain-groq",
     "tree-sitter",
     "tree-sitter-python",
     "tree-sitter-javascript",
     "tree-sitter-typescript",
-    "pywinpty; sys_platform == 'win32'",
     "supabase",
+    # redis_locks imports redis unguarded and github_app loads it at run time.
     "redis",
-    "celery",
-    "psycopg2-binary",
+    "httpx",
+    # GitHub App JWTs (RS256) need pyjwt's cryptography backend.
     "pyjwt",
     "cryptography",
+    "pyyaml>=6.0.3",
+    # workspace's path validators raise fastapi.HTTPException, which main.py
+    # turns into 400s. Decoupling them is a follow-up; fastapi is imported
+    # only when the engine runs, never by `import automaintainer`.
+    "fastapi",
+]
+
+[project.urls]
+Homepage = "https://github.com/PxA-Labs/AutoMaintainer"
+Source = "https://github.com/PxA-Labs/AutoMaintainer"
+Issues = "https://github.com/PxA-Labs/AutoMaintainer/issues"
+
+[project.optional-dependencies]
+server = [
+    "uvicorn",
+    "websockets",
+    "celery",
+    "langchain",
+    # Floor prevents the resolver from backtracking to vulnerable litellm 1.83.0 (see #382-#386)
+    "litellm>=1.105.1",
+    "pywinpty; sys_platform == 'win32'",
+    "psycopg2-binary",
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-instrumentation-fastapi",
@@ -48,7 +75,6 @@ dependencies = [
     "opentelemetry-instrumentation-redis",
     "opentelemetry-exporter-otlp",
     "opentelemetry-exporter-prometheus",
-    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -60,6 +86,25 @@ dev = [
 ]
 
 [tool.uv]
-# The backend is an application run from this directory, not an installable
-# package: uv only manages its dependencies.
+# `uv sync` keeps managing only the dependencies of the app run from this
+# directory (main.py, tasks.py and the shims import from the source tree);
+# it does not install the project itself. `uv build` still builds the
+# automaintainer wheel with the build system below.
 package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "automaintainer/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+# Only the automaintainer package: the engine runtime lives under it, so the
+# wheel installs no generic top-level modules. main, tasks, celery_app,
+# quotas, observability, the compatibility shims and the tests stay out.
+packages = ["automaintainer"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allow-list so a local .env, venv or test fixture never ships.
+only-include = ["automaintainer", "pyproject.toml"]

@@ -124,7 +124,7 @@ NEXT_PUBLIC_BACKEND_URL="http://localhost:8000"
 Backend dependencies are managed with [uv](https://docs.astral.sh/uv/) (`backend/pyproject.toml` + `backend/uv.lock`):
 ```bash
 cd backend
-uv sync                      # creates backend/.venv from uv.lock (incl. test deps)
+uv sync --extra server       # creates backend/.venv from uv.lock (incl. test deps)
 uv run uvicorn main:app --reload --port 8000
 ```
 
@@ -140,6 +140,25 @@ Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docke
 ```bash
 docker compose up --build   # http://localhost:8000
 ```
+
+### Python SDK
+The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`); `pip install "./backend[server]"` adds the server dependencies:
+```bash
+cd backend && uv build        # dist/automaintainer_backend-<version>-py3-none-any.whl
+```
+```python
+import asyncio
+from automaintainer import AutoMaintainerConfig, AutoMaintainerEngine
+
+async def main():
+    config = AutoMaintainerConfig(github_token="ghp_...", groq_api_keys=["gsk_..."])
+    async with AutoMaintainerEngine(config) as engine:
+        result = await engine.run("owner/repo", target_issue=42)
+        print(result.status, result.pr_url)
+
+asyncio.run(main())
+```
+See [ARCHITECTURE.md](./ARCHITECTURE.md#engine) for what an engine isolates.
 
 ### 4. Run Frontend (Next.js)
 ```bash

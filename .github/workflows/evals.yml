@@ -10,6 +10,8 @@ on:
   pull_request:
     branches: [ "main" ]
     paths:
+      - 'backend/automaintainer/_runtime/agents.py'
+      # Alias file at the pre-#187 path.
       - 'backend/agents.py'
       - 'backend/evals/**'
       - 'backend/pyproject.toml'
@@ -71,7 +73,7 @@ jobs:
 
     - name: Install dependencies from uv.lock
       run: |
-        uv sync --frozen --group dev
+        uv sync --frozen --extra server --group dev
         echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
     - name: Harness unit tests
@@ -132,7 +134,7 @@ jobs:
 
     - name: Install dependencies from uv.lock
       run: |
-        uv sync --frozen --group dev
+        uv sync --frozen --extra server --group dev
         echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
     - name: Oracle baseline (harness sanity check)

@@ -51,7 +51,7 @@ jobs:
         # Audit every package pinned in backend/uv.lock (runtime + dev group).
         working-directory: ./backend
         run: |
-          uv export --frozen --all-groups --no-emit-project --no-hashes \
+          uv export --frozen --all-groups --all-extras --no-emit-project --no-hashes \
             --format requirements-txt -o "$RUNNER_TEMP/requirements-locked.txt"
           pip-audit -r "$RUNNER_TEMP/requirements-locked.txt"
 

@@ -257,7 +257,7 @@ def test_github_app_install_settings_are_read_by_the_backend():
     """A setting dropped or renamed in the backend must leave this list too."""
     sources = "".join(
         (REPO_ROOT / "backend" / name).read_text(encoding="utf-8")
-        for name in ("github_app.py", "main.py")
+        for name in ("automaintainer/_runtime/github_app.py", "main.py")
     )
     for key in GITHUB_APP_INSTALL_SETTINGS:
         assert f'os.getenv("{key}"' in sources, key
