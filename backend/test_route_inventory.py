@@ -136,6 +136,11 @@ TENANT = {
         f"/repositories/{t.repository_id}/merge-policy",
         {},
     ),
+    ("GET", "/repositories/{repository_id}/merge-policy/history"): lambda t: (
+        "get",
+        f"/repositories/{t.repository_id}/merge-policy/history",
+        {},
+    ),
     ("PUT", "/repositories/{repository_id}/merge-policy"): lambda t: (
         "put",
         f"/repositories/{t.repository_id}/merge-policy",

@@ -31,11 +31,17 @@ class FakeQuery:
         self.filters = []
         self.updating = None
         self.single = False
+        self.ordering = None
 
     def select(self, *a, **k):
         return self
 
     def limit(self, n):
+        self.client.limits.append(n)
+        return self
+
+    def order(self, col, desc=False):
+        self.ordering = (col, desc)
         return self
 
     def maybe_single(self):
@@ -64,7 +70,54 @@ class FakeQuery:
                 r.update(self.updating)
         if self.single:  # postgrest-py's maybe_single() returns None for no row
             return SimpleNamespace(data=dict(rows[0])) if rows else None
+        if self.ordering:
+            col, desc = self.ordering
+            rows = sorted(rows, key=lambda r: r[col], reverse=desc)
         return SimpleNamespace(data=[dict(r) for r in rows])
+
+
+class FakeRpc:
+    """set_repository_merge_policy as the migration defines it: one
+    transaction that updates the policy and appends the audit row, or does
+    neither (a failure of either part, emulated with fail=, changes nothing)."""
+
+    def __init__(self, client, name, params):
+        self.client, self.name, self.params = client, name, params
+
+    def execute(self):
+        from postgrest.exceptions import APIError
+
+        self.client.rpcs.append((self.name, dict(self.params)))
+        assert self.name == "set_repository_merge_policy"
+        p = self.params
+        if "rpc" in self.client.fail or CHANGES in self.client.fail:
+            raise APIError({"message": "audit insert failed", "code": "42501"})
+        rows = [
+            r
+            for r in self.client.tables["repositories"]
+            if r["id"] == p["p_repository_id"] and r["org_id"] == p["p_org_id"]
+        ]
+        if not rows:
+            raise APIError({"message": "repository not found", "code": "P0002"})
+        (repo,) = rows
+        if repo["merge_policy"] == p["p_merge_policy"]:
+            return SimpleNamespace(data=None)
+        change = {
+            "id": f"change-{len(self.client.tables[CHANGES]) + 1}",
+            "org_id": p["p_org_id"],
+            "repository_id": p["p_repository_id"],
+            "old_policy": repo["merge_policy"],
+            "new_policy": p["p_merge_policy"],
+            "changed_by": p["p_changed_by"],
+            # Strictly increasing, like now() across transactions.
+            "changed_at": f"2026-11-17T10:00:{len(self.client.tables[CHANGES]):02d}Z",
+        }
+        repo["merge_policy"] = p["p_merge_policy"]
+        self.client.tables[CHANGES].append(change)
+        return SimpleNamespace(data=dict(change))
+
+
+CHANGES = "repository_merge_policy_changes"
 
 
 class FakeClient:
@@ -89,12 +142,18 @@ class FakeClient:
                     "merge_policy": "auto",
                 },
             ],
+            CHANGES: [],
         }
         self.fail = set(fail)
         self.queries = []
+        self.rpcs = []
+        self.limits = []
 
     def table(self, name):
         return FakeQuery(self, name)
+
+    def rpc(self, name, params):
+        return FakeRpc(self, name, params)
 
     def repository(self, repo_id=REPO_ID):
         (row,) = [r for r in self.tables["repositories"] if r["id"] == repo_id]
@@ -470,6 +529,7 @@ def test_members_read_the_policy(api, role):
         "effective": "human",
         "allowed": ["human", "ci"],
         "can_edit": role in ("owner", "admin"),
+        "last_change": None,
     }
 
 
@@ -482,8 +542,11 @@ def test_admins_set_or_clear_the_policy(api, role, value):
     assert response.json()["setting"] == value
     assert response.json()["effective"] == (value or "ci")
     assert api.db.repository()["merge_policy"] == value
-    (update,) = [q for q in api.db.queries if q[2] is not None]
-    assert ("org_id", "org-1") in update[1]
+    # Written only through the transactional function, scoped to the org.
+    assert not [q for q in api.db.queries if q[2] is not None]
+    if value is not None:  # None is the current value: nothing to write
+        ((_, params),) = api.db.rpcs
+        assert params["p_org_id"] == "org-1"
 
 
 @pytest.mark.parametrize("role", ["member", "viewer", None])

@@ -97,6 +97,7 @@ TENANT_TABLES = {
     "ide_sessions": "org_id",
     "verification_results": "org_id",
     "merge_decisions": "org_id",
+    "repository_merge_policy_changes": "org_id",
 }
 
 # Tables clients may never write: the backend writes them with the service
@@ -110,6 +111,7 @@ SERVICE_WRITTEN_TABLES = [
     "webhook_events",
     "verification_results",
     "merge_decisions",
+    "repository_merge_policy_changes",
 ]
 
 # webhook_events is internal: no client may read it, even in its own org.
@@ -203,6 +205,13 @@ def _insert_row(table: str, tenant: Tenant, user_id: uuid.UUID):
             "reasons": '["maintainer approved", "ci checks passed"]',
             "evidence": '{"pr_url": "https://github.com/o/r/pull/1"}',
         },
+        "repository_merge_policy_changes": {
+            "org_id": tenant.org_id,
+            "repository_id": tenant.repository_id,
+            "old_policy": None,
+            "new_policy": "human",
+            "changed_by": user_id,
+        },
     }
     row = rows[table]
     statement = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -276,6 +285,7 @@ def _seed(conn):
                 "ide_sessions",
                 "verification_results",
                 "merge_decisions",
+                "repository_merge_policy_changes",
             ):
                 cur.execute(*_insert_row(table, tenant, tenant.owner))
         # A pending invite: a membership row that has not been accepted yet.
@@ -986,3 +996,137 @@ def test_repository_sync_upsert_keeps_merge_policy(db):
             ),
         )
         assert _merge_policy_of(cur) == [("human",)]
+
+
+# --------------------------------------------------------------------------
+# repository_merge_policy_changes (epic #411)
+# --------------------------------------------------------------------------
+
+SET_POLICY = "SELECT set_repository_merge_policy(%s, %s, %s, %s)"
+
+
+def _set_policy_args(value, tenant=TENANT_A, actor=USER_A, org=None):
+    return (tenant.repository_id, str(org or tenant.org_id), value, str(actor))
+
+
+def _policy_changes(cur, tenant=TENANT_A):
+    cur.execute(
+        "SELECT old_policy, new_policy, changed_by::text FROM"
+        " repository_merge_policy_changes WHERE repository_id = %s"
+        " ORDER BY changed_at, id",
+        (tenant.repository_id,),
+    )
+    return cur.fetchall()
+
+
+def test_policy_changes_are_read_by_members_only(db):
+    with session(db, "authenticated", USER_A) as cur:
+        assert _policy_changes(cur) == [(None, "human", str(USER_A))]
+        assert _policy_changes(cur, TENANT_B) == []
+    for user in (USER_B, USER_C):  # another org; a pending invite to org A
+        with session(db, "authenticated", user) as cur:
+            assert _policy_changes(cur) == []
+
+
+def test_members_cannot_forge_or_rewrite_policy_changes(db):
+    with session(db, "authenticated", USER_A) as cur:
+        statement, params = _insert_row(
+            "repository_merge_policy_changes", TENANT_A, USER_A
+        )
+        assert attempt(cur, statement, params) == "denied"
+        rewritten = attempt(
+            cur,
+            "UPDATE repository_merge_policy_changes SET changed_by = %s",
+            (str(USER_B),),
+        )
+        assert rewritten == 0
+        assert attempt(cur, *_delete("repository_merge_policy_changes", TENANT_A)) == 0
+
+
+def test_policy_changes_are_append_only_even_for_the_service_role(db):
+    with session(db, "service_role") as cur:
+        rewritten = attempt(
+            cur,
+            "UPDATE repository_merge_policy_changes SET new_policy = 'auto'"
+            " WHERE org_id = %s",
+            (str(ORG_A),),
+        )
+        assert rewritten == "denied"
+
+
+def test_set_policy_updates_and_records_the_actor_atomically(db):
+    with session(db, "service_role") as cur:
+        cur.execute(SET_POLICY, _set_policy_args("ci"))
+        (change,) = cur.fetchone()
+        assert (change["old_policy"], change["new_policy"]) == (None, "ci")
+        assert change["changed_by"] == str(USER_A)
+        assert _merge_policy_of(cur) == [("ci",)]
+        cur.execute(SET_POLICY, _set_policy_args(None, actor=USER_C))
+        # One transaction: now() is the same for both rows, so compare as a
+        # set (the seed row plus the two changes).
+        assert sorted(_policy_changes(cur), key=repr) == sorted(
+            [
+                (None, "human", str(USER_A)),
+                (None, "ci", str(USER_A)),
+                ("ci", None, str(USER_C)),
+            ],
+            key=repr,
+        )
+        assert _merge_policy_of(cur) == [(None,)]
+
+
+@pytest.mark.parametrize("value", [None, "human"])
+def test_set_policy_to_the_current_value_writes_no_row(db, value):
+    with session(db, "service_role") as cur:
+        cur.execute(*_set_merge_policy(value))
+        before = _policy_changes(cur)
+        cur.execute(SET_POLICY, _set_policy_args(value))
+        assert cur.fetchone() == (None,)
+        assert _policy_changes(cur) == before
+
+
+def test_set_policy_in_another_org_is_not_found(db):
+    with session(db, "service_role") as cur:
+        cur.execute("SAVEPOINT change")
+        with pytest.raises(psycopg2.errors.NoDataFound):
+            cur.execute(SET_POLICY, _set_policy_args("human", TENANT_B, org=ORG_A))
+        cur.execute("ROLLBACK TO SAVEPOINT change")
+        assert _merge_policy_of(cur, TENANT_B) == [(None,)]
+        assert _policy_changes(cur, TENANT_B) == [(None, "human", str(USER_B))]  # seed
+
+
+def test_set_policy_requires_an_actor(db):
+    with session(db, "service_role") as cur:
+        with pytest.raises(psycopg2.errors.NullValueNotAllowed):
+            cur.execute(SET_POLICY, (TENANT_A.repository_id, str(ORG_A), "ci", None))
+
+
+def test_an_audit_failure_leaves_the_policy_unchanged(db):
+    with session(db, "service_role") as cur:
+        # Make the audit insert fail (created in this transaction, so the
+        # rollback at the end of the session removes it again).
+        cur.execute("RESET ROLE")
+        cur.execute(
+            "CREATE FUNCTION rls_test_fail_audit() RETURNS trigger LANGUAGE plpgsql"
+            " AS $$ BEGIN RAISE EXCEPTION 'audit unavailable'; END; $$"
+        )
+        cur.execute(
+            "CREATE TRIGGER rls_test_fail_audit"
+            " BEFORE INSERT ON repository_merge_policy_changes"
+            " FOR EACH ROW EXECUTE FUNCTION rls_test_fail_audit()"
+        )
+        cur.execute("SET LOCAL ROLE service_role")
+        cur.execute("SAVEPOINT change")
+        with pytest.raises(psycopg2.errors.RaiseException):
+            cur.execute(SET_POLICY, _set_policy_args("human"))
+        cur.execute("ROLLBACK TO SAVEPOINT change")
+        assert _merge_policy_of(cur) == [(None,)]
+        assert _policy_changes(cur) == [(None, "human", str(USER_A))]  # seed only
+
+
+@pytest.mark.parametrize("role", ["anon", "authenticated"])
+def test_clients_cannot_call_set_policy(db, role):
+    with session(db, role, USER_A) as cur:
+        assert attempt(cur, SET_POLICY, _set_policy_args("human")) == "denied"
+        cur.execute("RESET ROLE")
+        assert _merge_policy_of(cur) == [(None,)]
