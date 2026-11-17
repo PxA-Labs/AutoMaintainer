@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Optional, Sequence
 
+from automaintainer.context import active_config
+
 logger = logging.getLogger(__name__)
 
 CONFIG_FILE = ".automaintainer.yml"
@@ -168,7 +170,21 @@ def _env_positive_int(name: str, default: int) -> int:
 
 
 def default_limits() -> ChangeLimits:
-    """Built-in defaults overridden by the CHANGE_LIMIT_* server settings."""
+    """Built-in defaults overridden by the CHANGE_LIMIT_* server settings.
+
+    Inside an engine run, by the engine's ``change_max_files``,
+    ``change_max_lines`` and ``forbidden_paths`` instead (#186)."""
+    config = active_config()
+    if config is not None:
+        return ChangeLimits(
+            max_files=config.change_max_files,
+            max_lines=config.change_max_lines,
+            deny=(
+                DEFAULT_DENYLIST
+                if config.forbidden_paths is None
+                else config.forbidden_paths
+            ),
+        )
     deny = DEFAULT_DENYLIST
     raw_deny = os.getenv("CHANGE_LIMIT_DENYLIST")
     if raw_deny is not None and raw_deny.strip():

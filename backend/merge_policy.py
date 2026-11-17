@@ -31,6 +31,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+from automaintainer.context import active_config
+
 logger = logging.getLogger(__name__)
 
 # Strictest first; the order is what "stricter" means.
@@ -50,7 +52,13 @@ def _rank(policy: str) -> int:
 
 
 def deployment_ceiling() -> str:
-    """``MERGE_POLICY`` from the environment; unknown values mean ``human``."""
+    """``MERGE_POLICY`` from the environment; unknown values mean ``human``.
+
+    Inside an engine run, the engine's ``merge_policy`` (#186), which the
+    config already validated."""
+    config = active_config()
+    if config is not None:
+        return config.merge_policy
     policy = (os.getenv("MERGE_POLICY") or DEFAULT_POLICY).strip().lower()
     if policy not in POLICIES:
         logger.warning("Unknown MERGE_POLICY %r; falling back to 'human'.", policy)
