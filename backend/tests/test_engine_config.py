@@ -741,6 +741,7 @@ NOT_COVERED = {
     "ASSIST_DAILY_REQUESTS_PER_ORG": "API quota of /assist/inline",
     # GitHub App webhook and install flow (API), not run credentials.
     "GITHUB_WEBHOOK_SECRET": "verifies inbound webhooks in the API",
+    "AUTOMAINTAINER_TRIGGER_LABEL": "which issue label starts a run (webhook processor)",
     "GITHUB_APP_SLUG": "GitHub App install URL of the API",
     "GITHUB_APP_CLIENT_ID": "GitHub App OAuth install flow of the API",
     "GITHUB_APP_CLIENT_SECRET": "GitHub App OAuth install flow of the API",

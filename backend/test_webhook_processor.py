@@ -36,6 +36,10 @@ class Query:
         self.filters.append(lambda r: r.get(col) == val)
         return self
 
+    def in_(self, col, values):
+        self.filters.append(lambda r: r.get(col) in values)
+        return self
+
     def is_(self, col, val):
         assert val == "null"
         self.filters.append(lambda r: r.get(col) is None)
@@ -207,7 +211,14 @@ def test_repositories_change_for_suspended_installation_is_ignored(sync):
 
 @pytest.mark.parametrize(
     "event_type,action",
-    [("pull_request", "opened"), ("issues", "closed"), ("installation", "created")],
+    [
+        ("pull_request", "opened"),
+        ("issues", "closed"),
+        ("installation", "created"),
+        # #190 lists these; no product behaviour depends on them yet.
+        ("issues", "opened"),
+        ("pull_request", "closed"),
+    ],
 )
 def test_other_events_are_explicitly_ignored(sync, event_type, action):
     ev = event(event_type, action)
