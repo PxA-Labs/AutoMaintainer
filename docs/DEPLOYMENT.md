@@ -126,10 +126,36 @@ tables you added stay.
 Two cases need preparation:
 
 - **Pre-multi-tenant databases** (`runs`/`logs` without `org_id`, from the
-  earliest versions of the file) cannot be adopted: the baseline fails at
-  `runs_org_idx` and rolls back. Existing rows have no organization to assign
-  them to. Export what you need, then create a fresh database from the
-  migrations.
+  earliest version of the file, `0147b09`) cannot be adopted directly: the
+  baseline fails at `runs_org_idx` and rolls back, because the rows have no
+  organization. Keep the run history with
+  [`scripts/import-legacy-history.sql`](../scripts/import-legacy-history.sql),
+  run with `psql`. Each step is one transaction and can be run again:
+  1. Back up the database, then move the old tables aside:
+     `psql "$DATABASE_URL" -v step=prepare -f scripts/import-legacy-history.sql`.
+     This moves `runs` and `logs` to the `automaintainer_legacy` schema, which
+     PostgREST does not expose. It also drops their old anonymous-read
+     policies, their `supabase_realtime` membership, and any views that read
+     them. Each dropped view's definition is printed so you can re-create it.
+  2. Apply the migrations as above.
+  3. Sign in, create (or choose) the organization that will own the history,
+     and link the GitHub App installation that covers the old repositories.
+     Then run
+     `psql "$DATABASE_URL" -v step=import -v org_id=<organization id> -f scripts/import-legacy-history.sql`.
+     Runs are attributed to the organization's first owner, or to
+     `-v user_id=<member id>`. Each run is matched to the organization's
+     repository of the same name. If any name has no match, the import stops
+     and lists the names. Runs still marked `running` are imported as `failed`.
+     Log types the new schema does not allow become `message`, and the
+     original type is kept in `metadata.legacy_log_type`. Rows that were
+     already imported are skipped, so you can safely run this step again.
+  4. Check the history in the dashboard, then
+     `psql "$DATABASE_URL" -v step=drop -f scripts/import-legacy-history.sql`.
+     This drops `automaintainer_legacy`, and refuses while any legacy row has
+     not been imported.
+
+  The script's header lists the full column mapping. The `ci-db` workflow
+  runs the procedure against a database built from the `0147b09` schema.
 - **Views of your own that depend on `monthly_usage_summary` or `org_health`**
   make the baseline's `DROP VIEW` fail (PostgreSQL refuses to drop a view
   others depend on) and the migration rolls back. Save their definitions
