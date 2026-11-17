@@ -1,6 +1,6 @@
 # Local / prod-like topology: API + Celery worker + Celery beat + Redis.
 #
-#   create backend/.env (see docs/DEPLOYMENT.md for the variables)
+#   cp backend/.env.example backend/.env   # git-ignored; fill it in
 #   docker compose up --build
 #   open http://localhost:8000
 #
