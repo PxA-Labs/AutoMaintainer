@@ -12,7 +12,60 @@ those rows into state changes:
   ``unsuspend`` clears it and re-syncs the installation's repositories.
 - ``installation_repositories`` (``added`` / ``removed``): re-sync that
   installation's repositories through github_app.sync_installation_repositories.
+- ``issues.labeled`` with the trigger label (AUTOMAINTAINER_TRIGGER_LABEL):
+  starts an agent run on that issue; see "Label trigger" below.
 - Everything else is marked 'ignored' explicitly, so nothing stays pending.
+  That includes ``issues.opened`` and ``pull_request.closed``, which #190
+  lists: no product behaviour depends on them today. A run starts from the
+  label, not from a new issue, and a run follows its own PR (merge or human
+  review), not the PR's close event.
+
+Label trigger (#190). When a label equal to AUTOMAINTAINER_TRIGGER_LABEL
+(compared case-insensitively, as GitHub compares label names; unset or empty
+turns the feature off) is added to an open issue of a registered repository,
+a run is created and queued as POST /start does: the same ``runs`` row and
+the same ``run_agent_loop_task`` arguments, with ``target_issue_number`` set.
+The run's trigger is the label's adder (the delivery's ``sender``), by
+numeric GitHub user id, with ``trigger_source`` "label". The trusted-trigger
+gate (trust.py) therefore decides the merge exactly as for /start: under
+MERGE_POLICY ci or auto the PR is merged only when both the adder and the
+issue's author can write to the repository; otherwise it stays open for a
+human.
+
+Who gets a run. Only users with triage access or more can add a label to an
+existing issue, so the adder is a repository insider, though not
+necessarily a writer. Such a run starts and opens a PR, and the gate keeps
+an untrusted adder's PR from being merged (#411: no merge without a trusted
+human; a PR is the safe default). Two cases get no run at all, because no
+insider chose to spend one:
+
+- a bot adder (an Actions workflow or another App, possibly reacting to an
+  outsider's event): nothing identifies the human behind it, and the gate
+  would never trust it anyway;
+- an adder who is the issue's own author and not an OWNER, MEMBER or
+  COLLABORATOR (the issue's ``author_association``): GitHub applies an issue
+  template's labels on the author's behalf when the issue is opened, so a
+  template carrying the trigger label would otherwise let any outsider start
+  runs (#411: act only on a maintainer-applied label).
+
+The run's ``user_id``. ``runs.user_id`` is a non-null AutoMaintainer user,
+and a label adder need not have an AutoMaintainer account. The run is
+attributed to the org's first owner, the account that answers for the
+installation; the actual trigger is the GitHub id above, which is also
+written to the run's log. A nullable ``user_id`` (or trigger columns) would
+be more precise and needs a migration.
+
+Guards, each recorded as 'ignored' with a log line: the repository must be
+registered to the event's org under the event's installation, and that
+installation must not be suspended; no run may be queued, running or
+awaiting review for the same (repository, issue); and an agent worker must
+be available (the check POST /start makes, #512), so no run is created that
+nobody consumes. GitHub needs no error for any of these. A redelivery (same
+X-GitHub-Delivery) is never stored twice (github_app.handle_github_webhook),
+and a stored row is processed once (see Idempotency). Known limit: the
+active-run check and the insert are not one transaction, so two different
+deliveries for the same issue processed at the same moment could both start
+a run; the repository lock (tasks.py) still runs them one at a time.
 
 Deleted installations are deactivated, not deleted: repositories, runs and
 webhook_events all reference github_installations with ON DELETE CASCADE,
@@ -25,7 +78,8 @@ no-ops. Terminal states ('completed', 'ignored', final 'failed') set
 ``processed_at``. A failure records ``error_message`` and increments
 ``retry_count``; the row goes back to 'pending' until ``max_retries`` is
 reached, and the periodic sweep picks it up again. The handlers themselves
-are safe to repeat (setting a timestamp, upserting repositories).
+are safe to repeat (setting a timestamp, upserting repositories; a label
+retried after its run was queued finds that run active and is ignored).
 
 Not handled: a row left in 'processing' by a worker that died mid-event
 stays there; it needs manual requeueing.
@@ -35,6 +89,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -49,6 +105,13 @@ ERROR_MESSAGE_MAX_LENGTH = 1000
 
 DEACTIVATING_ACTIONS = {"deleted", "suspend"}
 REPOSITORY_ACTIONS = {"added", "removed"}
+
+TRIGGER_LABEL_ENV = "AUTOMAINTAINER_TRIGGER_LABEL"
+TRIGGER_SOURCE = "label"
+# The runs.status values outside tasks.TERMINAL_RUN_STATUSES.
+ACTIVE_RUN_STATUSES = ("queued", "running", "awaiting_review")
+# author_association values of people the repository's owner let in.
+INSIDER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
 def _now() -> str:
@@ -91,6 +154,245 @@ def _sync(sb, installation_id, org_id) -> None:
     )
 
 
+def trigger_label() -> Optional[str]:
+    """The configured trigger label, or None when the feature is off."""
+    value = (os.getenv(TRIGGER_LABEL_ENV) or "").strip()
+    return value or None
+
+
+def _agent_worker_available() -> bool:
+    """POST /start's worker check (#512), AGENT_WORKER_CHECK included.
+
+    main imports this module, so the import is deferred. Fails closed: if
+    the check itself cannot run, no run is created.
+    """
+    try:
+        from main import agent_worker_available
+
+        return bool(asyncio.run(agent_worker_available()))
+    except Exception:
+        logger.warning("Agent worker check failed", exc_info=True)
+        return False
+
+
+def _get_repository(sb, repository_id, installation_id, org_id) -> Optional[dict]:
+    result = (
+        sb.table("repositories")
+        .select("id, full_name")
+        .eq("id", repository_id)
+        .eq("org_id", org_id)
+        .eq("github_installation_id", installation_id)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    return getattr(result, "data", None) if result is not None else None
+
+
+def _active_run(sb, repository_id, issue_number) -> Optional[dict]:
+    rows = (
+        sb.table("runs")
+        .select("id, status")
+        .eq("repository_id", repository_id)
+        .eq("target_issue_number", issue_number)
+        .in_("status", list(ACTIVE_RUN_STATUSES))
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
+def _org_owner(sb, org_id) -> Optional[str]:
+    rows = (
+        sb.table("organization_members")
+        .select("user_id")
+        .eq("org_id", org_id)
+        .eq("role", "owner")
+        .order("created_at")
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0]["user_id"] if rows else None
+
+
+def _github_id(value) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _start_label_run(sb, event: dict) -> None:
+    """issues.labeled: start a run when the trigger label was added."""
+    label = trigger_label()
+    if label is None:
+        raise Ignored(f"{TRIGGER_LABEL_ENV} is not set")
+    payload = event.get("payload") or {}
+    added = (payload.get("label") or {}).get("name")
+    if not isinstance(added, str) or added.casefold() != label.casefold():
+        raise Ignored(f"label {added!r} is not the trigger label")
+
+    issue = payload.get("issue") or {}
+    number = issue.get("number")
+    if not _github_id(number) or "pull_request" in issue:
+        raise Ignored("the labeled item is not an issue")
+    if issue.get("state") != "open":
+        raise Ignored(f"issue #{number} is not open")
+
+    sender = payload.get("sender") or {}
+    sender_id = _github_id(sender.get("id"))
+    sender_login = sender.get("login")
+    sender_login = sender_login if isinstance(sender_login, str) else None
+    if sender_id is None or sender.get("type") != "User":
+        raise Ignored(f"the label was added by {sender_login!r}, not a GitHub user")
+    author_id = _github_id((issue.get("user") or {}).get("id"))
+    if (
+        author_id == sender_id
+        and issue.get("author_association") not in INSIDER_ASSOCIATIONS
+    ):
+        raise Ignored(
+            f"the label on #{number} was applied for its author {sender_login!r}, "
+            "who is not a repository insider (issue template?)"
+        )
+
+    installation_id = event["github_installation_id"]
+    org_id = event["org_id"]
+    repo_payload = payload.get("repository") or {}
+    repository_id = repo_payload.get("id")
+    repository = _get_repository(sb, repository_id, installation_id, org_id)
+    if not repository:
+        logger.info(
+            "Trigger label on %s#%s ignored: repository %s is not registered "
+            "to org %s with installation %s",
+            repo_payload.get("full_name"),
+            number,
+            repository_id,
+            org_id,
+            installation_id,
+        )
+        raise Ignored(f"repository {repository_id} is not registered")
+    repo_name = repository["full_name"]
+    installation = _get_installation(sb, installation_id, org_id)
+    if not installation or installation.get("suspended_at"):
+        raise Ignored(f"installation {installation_id} is suspended or unknown")
+
+    active = _active_run(sb, repository_id, number)
+    if active:
+        logger.info(
+            "Trigger label on %s#%s ignored: run %s is %s",
+            repo_name,
+            number,
+            active["id"],
+            active["status"],
+        )
+        raise Ignored(f"run {active['id']} is already {active['status']}")
+
+    if not _agent_worker_available():
+        logger.warning(
+            "Trigger label on %s#%s ignored: no agent worker is available",
+            repo_name,
+            number,
+        )
+        raise Ignored("no agent worker is available")
+
+    user_id = _org_owner(sb, org_id)
+    if not user_id:
+        raise Ignored(f"org {org_id} has no owner to attribute the run to")
+
+    run_id = _queue_run(
+        sb,
+        org_id=org_id,
+        user_id=user_id,
+        repository_id=repository_id,
+        installation_id=installation_id,
+        repo_name=repo_name,
+        issue_number=number,
+        sender_id=sender_id,
+        sender_login=sender_login,
+    )
+    logger.info(
+        "Run %s queued for %s#%s: label %r added by GitHub user %s (%s)",
+        run_id,
+        repo_name,
+        number,
+        added,
+        sender_id,
+        sender_login,
+    )
+
+
+def _queue_run(
+    sb,
+    *,
+    org_id,
+    user_id,
+    repository_id,
+    installation_id,
+    repo_name,
+    issue_number,
+    sender_id,
+    sender_login,
+) -> str:
+    """Create and enqueue the run as POST /start does; return its id."""
+    from tasks import log_run_event, run_agent_loop_task
+
+    run_id = str(uuid.uuid4())
+    now = _now()
+    sb.table("runs").insert(
+        {
+            "id": run_id,
+            "org_id": org_id,
+            "user_id": user_id,
+            "repository_id": repository_id,
+            "github_installation_id": installation_id,
+            "repo_name": repo_name,
+            "target_issue_number": issue_number,
+            "mode": "autonomous",
+            "status": "queued",
+            "queued_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+    ).execute()
+    try:
+        task = run_agent_loop_task.apply_async(
+            args=[run_id, repo_name, org_id, user_id, repository_id, installation_id],
+            kwargs={
+                "target_issue_number": issue_number,
+                "mode": "autonomous",
+                "trigger_login": sender_login,
+                "trigger_github_id": sender_id,
+                "trigger_source": TRIGGER_SOURCE,
+            },
+            queue="agent_runs",
+        )
+    except Exception as exc:
+        # As /start does: the row must not stay 'queued'. The event is then
+        # retried (process_event), and a failed run blocks no new one.
+        sb.table("runs").update(
+            {
+                "status": "failed",
+                "error_message": f"Failed to queue task: {exc}",
+                "completed_at": _now(),
+            }
+        ).eq("id", run_id).execute()
+        raise
+    sb.table("runs").update({"celery_task_id": task.id}).eq("id", run_id).execute()
+    asyncio.run(
+        log_run_event(
+            run_id=run_id,
+            org_id=org_id,
+            agent_name="System",
+            message=(
+                f"Started by the trigger label on issue #{issue_number}, added by "
+                f"GitHub user {sender_login or sender_id} (id {sender_id})"
+            ),
+        )
+    )
+    return run_id
+
+
 def _handle(sb, event: dict) -> None:
     """Apply one event. Raises Ignored when there is nothing to do."""
     event_type = event.get("event_type")
@@ -123,6 +425,10 @@ def _handle(sb, event: dict) -> None:
         if installation.get("suspended_at"):
             raise Ignored(f"installation {installation_id} is suspended")
         _sync(sb, installation_id, org_id)
+        return
+
+    if event_type == "issues" and action == "labeled":
+        _start_label_run(sb, event)
         return
 
     raise Ignored(f"{event_type} events are not processed")
