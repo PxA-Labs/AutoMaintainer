@@ -1,7 +1,7 @@
 name: Sandbox Integration
 
-# Runs the Docker sandbox backend (backend/runners/docker_sandbox.py) against
-# a real Docker daemon: passing, failing and hanging repositories, and a
+# Runs the Docker sandbox backend
+# (backend/automaintainer/runners/docker_sandbox.py) against a real Docker daemon: passing, failing and hanging repositories, and a
 # repository whose tests try the network and a host environment variable,
 # once against the runner's daemon and once against a separate daemon that
 # shares no filesystem with the worker.
@@ -11,6 +11,9 @@ on:
   push:
     branches: [ "main" ]
     paths:
+      - 'backend/automaintainer/runners/**'
+      - 'backend/automaintainer/_runtime/verification.py'
+      # Alias files at the pre-#187 paths.
       - 'backend/runners/**'
       - 'backend/verification.py'
       - 'backend/test_docker_sandbox*.py'
@@ -18,6 +21,9 @@ on:
   pull_request:
     branches: [ "main" ]
     paths:
+      - 'backend/automaintainer/runners/**'
+      - 'backend/automaintainer/_runtime/verification.py'
+      # Alias files at the pre-#187 paths.
       - 'backend/runners/**'
       - 'backend/verification.py'
       - 'backend/test_docker_sandbox*.py'

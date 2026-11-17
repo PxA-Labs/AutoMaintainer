@@ -10,6 +10,8 @@ on:
   pull_request:
     branches: [ "main" ]
     paths:
+      - 'backend/automaintainer/_runtime/agents.py'
+      # Alias file at the pre-#187 path.
       - 'backend/agents.py'
       - 'backend/evals/**'
       - 'backend/pyproject.toml'

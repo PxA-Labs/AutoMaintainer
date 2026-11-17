@@ -11,6 +11,7 @@
 """
 
 import ast
+import fnmatch
 import importlib
 import json
 import logging
@@ -323,4 +324,54 @@ def test_every_server_install_includes_the_server_extra():
         for where, line in commands
         if "--extra server" not in line and "--all-extras" not in line
     ]
+    assert missing == []
+
+
+def _moved_path(path: str):
+    """The post-#187 path of a workflow path filter naming a moved file."""
+    for name in RUNTIME_MODULES:
+        if path == f"backend/{name}.py":
+            return f"backend/automaintainer/_runtime/{name}.py"
+    if path.startswith("backend/runners/"):
+        return "backend/automaintainer/" + path[len("backend/") :]
+    return None
+
+
+def _path_filters():
+    import yaml
+
+    for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml*")):
+        doc = yaml.safe_load(wf.read_text("utf-8")) or {}
+        # PyYAML reads the bare key ``on`` as True.
+        triggers = doc.get("on", doc.get(True)) or {}
+        if not isinstance(triggers, dict):
+            continue
+        for event, spec in triggers.items():
+            if isinstance(spec, dict) and spec.get("paths"):
+                yield f"{wf.name}:{event}", spec["paths"]
+
+
+def test_moved_path_maps_old_names_to_the_package():
+    assert _moved_path("backend/agents.py") == (
+        "backend/automaintainer/_runtime/agents.py"
+    )
+    assert _moved_path("backend/runners/**") == "backend/automaintainer/runners/**"
+    assert _moved_path("backend/evals/**") is None
+    assert _moved_path("backend/**") is None
+
+
+def test_every_workflow_path_filter_on_a_moved_file_names_its_new_path():
+    """The old paths are alias files now: a filter naming only them would
+    stop the workflow (e.g. the real-Docker sandbox job) running on changes
+    to the code it guards."""
+    filters = list(_path_filters())
+    assert filters
+    missing = []
+    for where, paths in filters:
+        for path in paths:
+            new = _moved_path(path)
+            if new is None:
+                continue
+            if not any(new == p or fnmatch.fnmatchcase(new, p) for p in paths):
+                missing.append(f"{where}: {path} -> {new}")
     assert missing == []
