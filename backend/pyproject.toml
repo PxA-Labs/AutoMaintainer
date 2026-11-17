@@ -75,6 +75,10 @@ server = [
     "opentelemetry-instrumentation-redis",
     "opentelemetry-exporter-otlp",
     "opentelemetry-exporter-prometheus",
+    # Cloud Trace span exporter, used only when OTEL_CLOUD_TRACE_ENABLED is
+    # set (observability.py imports it lazily). Pulls in google-auth and the
+    # google-cloud-trace gRPC client.
+    "opentelemetry-exporter-gcp-trace>=1.15.0",
 ]
 
 [dependency-groups]
