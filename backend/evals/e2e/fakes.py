@@ -29,6 +29,7 @@ import posixpath
 import subprocess  # nosec B404 - runs git with a fixed argv, never a shell
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,7 +155,10 @@ class GitRepository:
                     self.git("read-tree", "--empty", env=env)
                 for path, text in changes.items():
                     if text is None:
-                        self.git("update-index", "--force-remove", "--", path, env=env)
+                        # Mode 0 removes the entry; --force-remove needs a
+                        # work tree, which a bare repository has not.
+                        line = f"0 {'0' * 40}\t{path}\n".encode("utf-8")
+                        self.git("update-index", "--index-info", data=line, env=env)
                         continue
                     blob = self.git(
                         "hash-object", "-w", "--stdin", data=text.encode("utf-8")
@@ -603,6 +607,9 @@ class _Query:
             table = self._db._tables.setdefault(self._name, [])
             payload = self._payload
             rows = payload if isinstance(payload, list) else [payload]
+            if self._op == "insert":
+                # PostgREST returns the generated primary key of new rows.
+                rows = [{"id": str(uuid.uuid4()), **r} for r in rows]
             if self._op == "select":
                 data = [dict(r) for r in table if self._match(r)]
                 if self._limit is not None:

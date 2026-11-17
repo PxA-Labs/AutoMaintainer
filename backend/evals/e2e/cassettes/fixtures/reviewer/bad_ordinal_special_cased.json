@@ -1,0 +1,21 @@
+{
+ "id": "bad_ordinal_special_cased",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "478c14450b948fa1622435dcfbd497aac4c0b57ed0f1e9b32ebcbecf2c4553e7",
+    "response": "{\"verdict\": \"reject\", \"reasons\": [\"The change does not resolve the issue.\"], \"blocking_issues\": [\"The behaviour described in the issue is still wrong.\"]}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

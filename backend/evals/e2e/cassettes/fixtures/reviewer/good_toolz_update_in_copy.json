@@ -1,0 +1,21 @@
+{
+ "id": "good_toolz_update_in_copy",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "fb90f17ec0c5b7c75e1b68da0ff5814a08087771aa8852f6d0956f9e44e10bad",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

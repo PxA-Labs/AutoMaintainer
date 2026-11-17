@@ -1,0 +1,21 @@
+{
+ "id": "bad_pq_forgets_mark",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "b0f46739a1949380ceb61ca56b54b8016e84d06467e3e4e1ec3555a26723d929",
+    "response": "{\"verdict\": \"reject\", \"reasons\": [\"The change does not resolve the issue.\"], \"blocking_issues\": [\"The behaviour described in the issue is still wrong.\"]}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

@@ -1,0 +1,39 @@
+{
+ "id": "shortuuid_padding",
+ "kind": "pipeline",
+ "model": "noop-policy",
+ "note": "synthetic: scripted noop agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 0,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "48932c57cb593079c2f289a682a6754f321a654f8547d2f1c266a4b8d4c87756",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "pm",
+    "usage": null
+   },
+   {
+    "finish_reason": "stop",
+    "latency_ms": 0,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "8ce36d0b791a37e074afba43837d14e92c4ebfa4d65a9a603482c905b02dc449",
+    "response": "\"\"\"Concise UUID generation.\"\"\"\n\nimport math\nimport secrets\nimport uuid as _uu\nfrom typing import List\nfrom typing import Optional\n\n\ndef int_to_string(\n    number: int, alphabet: List[str], padding: Optional[int] = None\n) -> str:\n    \"\"\"\n    Convert a number to a string, using the given alphabet.\n\n    The output has the most significant digit first.\n    \"\"\"\n    output = \"\"\n    alpha_len = len(alphabet)\n    while number:\n        number, digit = divmod(number, alpha_len)\n        output += alphabet[digit]\n    if padding:\n        remainder = max(padding - len(output), 0)\n        output = alphabet[0] * remainder + output\n    return output[::-1]\n\n\ndef string_to_int(string: str, alphabet: List[str]) -> int:\n    \"\"\"\n    Convert a string to a number, using the given alphabet.\n\n    The input is assumed to have the most significant digit first.\n    \"\"\"\n    number = 0\n    alpha_len = len(alphabet)\n    for char in string:\n        number = number * alpha_len + alphabet.index(char)\n    return number\n\n\nclass ShortUUID(object):\n    def __init__(self, alphabet: Optional[str] = None) -> None:\n        if alphabet is None:\n            alphabet = \"23456789ABCDEFGHJKLMNPQRSTUVWXYZ\" \"abcdefghijkmnopqrstuvwxyz\"\n\n        self.set_alphabet(alphabet)\n\n    @property\n    def _length(self) -> int:\n        \"\"\"Return the necessary length to fit the entire UUID given the current alphabet.\"\"\"\n        return int(math.ceil(math.log(2**128, self._alpha_len)))\n\n    def encode(self, uuid: _uu.UUID, pad_length: Optional[int] = None) -> str:\n        \"\"\"\n        Encode a UUID into a string (LSB first) according to the alphabet.\n\n        If leftmost (MSB) bits are 0, the string might be shorter.\n        \"\"\"\n        if not isinstance(uuid, _uu.UUID):\n            raise ValueError(\"Input `uuid` must be a UUID object.\")\n        if pad_length is None:\n            pad_length = self._length\n        return int_to_string(uuid.int, self._alphabet, padding=pad_length)\n\n    def decode(self, string: str, legacy: bool = False) -> _uu.UUID:\n        \"\"\"\n        Decode a string according to the current alphabet into a UUID.\n\n        Raises ValueError when encountering illegal characters or a too-long string.\n\n        If string too short, fills leftmost (MSB) bits with 0.\n\n        Pass `legacy=True` if your UUID was encoded with a ShortUUID version prior to\n        1.0.0.\n        \"\"\"\n        if not isinstance(string, str):\n            raise ValueError(\"Input `string` must be a str.\")\n        if legacy:\n            string = string[::-1]\n        return _uu.UUID(int=string_to_int(string, self._alphabet))\n\n    def uuid(self, name: Optional[str] = None, pad_length: Optional[int] = None) -> str:\n        \"\"\"\n        Generate and return a UUID.\n\n        If the name parameter is provided, set the namespace to the provided\n        name and generate a UUID.\n        \"\"\"\n        if pad_length is None:\n            pad_length = self._length\n\n        # If no name is given, generate a random UUID.\n        if name is None:\n            u = _uu.uuid4()\n        elif name.lower().startswith((\"http://\", \"https://\")):\n            u = _uu.uuid5(_uu.NAMESPACE_URL, name)\n        else:\n            u = _uu.uuid5(_uu.NAMESPACE_DNS, name)\n        return self.encode(u, pad_length)\n\n    def random(self, length: Optional[int] = None) -> str:\n        \"\"\"Generate and return a cryptographically secure short random string of `length`.\"\"\"\n        if length is None:\n            length = self._length\n\n        return \"\".join(secrets.choice(self._alphabet) for _ in range(length))\n\n    def get_alphabet(self) -> str:\n        \"\"\"Return the current alphabet used for new UUIDs.\"\"\"\n        return \"\".join(self._alphabet)\n\n    def set_alphabet(self, alphabet: str) -> None:\n        \"\"\"Set the alphabet to be used for new UUIDs.\"\"\"\n        # Turn the alphabet into a set and sort it to prevent duplicates\n        # and ensure reproducibility.\n        new_alphabet = list(sorted(set(alphabet)))\n        if len(new_alphabet) > 1:\n            self._alphabet = new_alphabet\n            self._alpha_len = len(self._alphabet)\n        else:\n            raise ValueError(\"Alphabet with more than \" \"one unique symbols required.\")\n\n    def encoded_length(self, num_bytes: int = 16) -> int:\n        \"\"\"Return the string length of the shortened UUID.\"\"\"\n        factor = math.log(256) / math.log(self._alpha_len)\n        return int(math.ceil(factor * num_bytes))\n\n\n# For backwards compatibility\n_global_instance = ShortUUID()\nencode = _global_instance.encode\ndecode = _global_instance.decode\nuuid = _global_instance.uuid\nrandom = _global_instance.random\nget_alphabet = _global_instance.get_alphabet\nset_alphabet = _global_instance.set_alphabet\n",
+    "role": "implementer",
+    "usage": null
+   },
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "bd525a19acaca6eae467a23b3578b8d486cbec4fa2997f56dca22ac831dd7f4d",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "noop",
+ "synthetic": true
+}

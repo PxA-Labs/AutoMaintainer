@@ -79,6 +79,12 @@ def test_pull_request_without_changes_is_refused(gh):
     assert err.value.status == 422
 
 
+def test_commit_can_delete_a_file(gh):
+    _, repo = gh
+    repo.commit("main", {"tests/test_mod.py": None}, "drop the tests")
+    assert repo.tree("main") == {"pkg/mod.py": "x = 1\n"}
+
+
 def test_commits_are_deterministic(tmp_path):
     a = GitRepository.create(tmp_path / "a.git", "eval/demo", FILES)
     b = GitRepository.create(tmp_path / "b.git", "eval/demo", FILES)
@@ -115,4 +121,6 @@ def test_in_memory_supabase_round_trip():
     assert rows == [{"id": "r1", "status": "running", "checkpoint": {"a": 1}}]
     db.table("logs").insert([{"x": 1}, {"x": 2}]).execute()
     assert len(db.rows("logs")) == 2
+    # Inserted rows get a generated primary key, as PostgREST returns it.
+    assert all(row["id"] for row in db.rows("logs"))
     assert db.table("runs").select("*").eq("id", "nope").execute().data == []

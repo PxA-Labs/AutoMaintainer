@@ -1,0 +1,21 @@
+{
+ "id": "bad_update_in_weakened_test",
+ "kind": "reviewer",
+ "model": "noop-policy",
+ "note": "synthetic: scripted noop agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "eec588dd0a1ecf9f5d32f86dbda4e17d392584c2aba73032ea5e3d84d14a543f",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "noop",
+ "synthetic": true
+}
