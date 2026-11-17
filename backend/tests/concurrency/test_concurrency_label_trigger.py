@@ -19,12 +19,17 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 import webhook_processor
-from test_webhook_label_trigger import labeled, trigger, world  # noqa: F401
+import test_webhook_label_trigger as label_tests
+from test_webhook_label_trigger import labeled, world
 from webhook_processor import process_event
+
+# The "trigger" fixture (feature on, worker available, Celery mocked).
+trigger = label_tests.trigger
 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="#518: _active_run and the run insert are not atomic; two concurrent "
     "label deliveries for one issue both start a run",
 )
@@ -42,7 +47,7 @@ def test_concurrent_label_events_for_one_issue_start_one_run(trigger, monkeypatc
             # Both deliveries have looked before either inserts. A fix that
             # serialises the check (a lock) makes the barrier time out here,
             # which is fine: the second delivery then sees the first's run.
-            both_checked.wait(2)
+            both_checked.wait(15)
         except threading.BrokenBarrierError:
             pass
         return found

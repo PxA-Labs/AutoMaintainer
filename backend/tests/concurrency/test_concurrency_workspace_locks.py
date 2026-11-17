@@ -77,7 +77,7 @@ class _RefreshRecorder:
             self.max_inside[path] = max(self.max_inside.get(path, 0), self.inside[path])
         try:
             if self.barrier is not None:
-                self.barrier.wait(5)
+                self.barrier.wait(30)
             time.sleep(self.hold)
         finally:
             with self.guard:
@@ -98,7 +98,7 @@ def _refresh_all(clones):
     start = threading.Barrier(len(clones))
 
     def refresh(clone):
-        start.wait(5)
+        start.wait(30)
         return workspace.refresh_ide_view(clone, KEY, "main", None, REPO)
 
     with ThreadPoolExecutor(max_workers=len(clones)) as pool:

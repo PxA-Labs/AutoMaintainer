@@ -9,7 +9,6 @@ none and its row ends ``completed``.
 
 import asyncio
 import threading
-import time
 
 import pytest
 
@@ -69,7 +68,11 @@ async def test_cancel_as_soon_as_the_run_is_registered(tmp_path, grace_seconds):
         tmp_path, {"architect": _never(calls, "architect")}, db=db, events=events
     )
     run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
-    await wait_until(lambda: "run-1" in engine._runs)
+    # Two loop steps: run() registered the run and its task took its first
+    # step (it is now in the "running" upsert, before any node).
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert engine._runs["run-1"].started
     assert engine.cancel("run-1", grace_seconds=grace_seconds)
     result = await run
 
@@ -206,30 +209,42 @@ async def test_cancel_just_after_the_last_node(tmp_path, grace_seconds, status):
     _assert_consistent(result, db, events)
 
 
-class _SlowCompletedWrite(FakeSupabase):
-    """The final ``completed`` update is slow (a slow database round trip)
-    and announces that it started."""
+class _CompletedWriteLandsLast(FakeSupabase):
+    """The final ``completed`` update is slow: it announces that it started
+    and lands only after the ``cancelled`` update (a slow database round
+    trip racing a fast one)."""
 
     def __init__(self):
         super().__init__()
         self.completed_write_started = threading.Event()
+        self.cancelled_written = threading.Event()
+        self.completed_written = threading.Event()
 
     def table(self, name):
         query = super().table(name)
         execute = query.execute
 
-        def slow():
-            if query.op == "update" and query.payload == {"status": "completed"}:
+        def ordered():
+            status = (query.payload or {}).get("status")
+            if query.op == "update" and status == "completed":
                 self.completed_write_started.set()
-                time.sleep(0.3)
-            return execute()
+                self.cancelled_written.wait(5)
+                try:
+                    return execute()
+                finally:
+                    self.completed_written.set()
+            result = execute()
+            if query.op == "update" and status == "cancelled":
+                self.cancelled_written.set()
+            return result
 
-        query.execute = slow
+        query.execute = ordered
         return query
 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "agents._run_pipeline does not wait for an in-flight 'completed' "
         "write before marking the run cancelled (unlike the 'running' upsert), "
@@ -240,13 +255,13 @@ class _SlowCompletedWrite(FakeSupabase):
 async def test_cancel_during_the_completed_write_keeps_row_and_result_in_step(
     tmp_path,
 ):
-    db, events = _SlowCompletedWrite(), Collector()
+    db, events = _CompletedWriteLandsLast(), Collector()
     engine = _engine(tmp_path, {}, db=db, events=events)
     run = asyncio.create_task(engine.run(REPO, run_id="run-1"))
-    await wait_until(db.completed_write_started.is_set)
+    await wait_until(db.completed_write_started.is_set, 30)
     assert engine.cancel("run-1", grace_seconds=0)
     result = await run
-    await asyncio.sleep(0.4)  # let the slow write's thread finish
+    await wait_until(db.completed_written.is_set, 30)
 
     _assert_consistent(result, db, events)
 
@@ -254,32 +269,46 @@ async def test_cancel_during_the_completed_write_keeps_row_and_result_in_step(
 # --- aclose with runs in flight ---------------------------------------------------
 
 
-class _SlowUpsertFor(FakeSupabase):
-    """The "running" upsert of ``run_id`` is slow."""
+class _Gate:
+    """Blocks a worker thread until released, and says when it got there."""
 
-    def __init__(self, run_id):
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self):
+        self.entered.set()
+        assert self.release.wait(30), "gate never released"
+
+
+class _GatedUpsertFor(FakeSupabase):
+    """The "running" upsert of ``run_id`` waits at ``gate``."""
+
+    def __init__(self, run_id, gate):
         super().__init__()
-        self.slow_run = run_id
+        self.gated_run, self.gate = run_id, gate
 
     def table(self, name):
         query = super().table(name)
         execute = query.execute
 
-        def slow():
+        def gated():
             if (
                 query.op == "upsert"
-                and (query.payload or {}).get("id") == self.slow_run
+                and (query.payload or {}).get("id") == self.gated_run
             ):
-                time.sleep(0.3)
+                self.gate()
             return execute()
 
-        query.execute = slow
+        query.execute = gated
         return query
 
 
-class _SlowToken(FakeCreds):
+class _GatedToken(FakeCreds):
+    gate = None
+
     def token(self):
-        time.sleep(0.3)
+        self.gate()
         return self._token
 
 
@@ -289,6 +318,7 @@ async def test_aclose_stops_every_run_in_flight_and_no_other_engine(tmp_path):
     ends A's runs cancelled, each with one RUN_CANCELLED and a cancelled row,
     and leaves B's run to complete."""
     in_node = asyncio.Event()
+    upsert_gate, token_gate = _Gate(), _Gate()
 
     async def slow_architect(state):
         if agents.current_run_id.get() == "a-node":
@@ -297,10 +327,13 @@ async def test_aclose_stops_every_run_in_flight_and_no_other_engine(tmp_path):
         return {}
 
     def github(installation_id, *, purpose, repository):
-        creds = _SlowToken if installation_id == 2 else FakeCreds
-        return creds(f"tok-{installation_id}")
+        if installation_id == 2:
+            creds = _GatedToken(f"tok-{installation_id}")
+            creds.gate = token_gate
+            return creds
+        return FakeCreds(f"tok-{installation_id}")
 
-    db_a, events_a = _SlowUpsertFor("a-upsert"), Collector()
+    db_a, events_a = _GatedUpsertFor("a-upsert", upsert_gate), Collector()
     engine_a = _engine(
         tmp_path,
         {"architect": slow_architect},
@@ -325,10 +358,17 @@ async def test_aclose_stops_every_run_in_flight_and_no_other_engine(tmp_path):
         for run_id, installation in (("a-upsert", 1), ("a-creds", 2), ("a-node", 1))
     }
     run_b = asyncio.create_task(engine_b.run(REPO, run_id="b-1"))
-    await asyncio.wait_for(asyncio.gather(in_node.wait(), b_entered.wait()), 5)
-    await asyncio.sleep(0.05)  # a-upsert in its upsert, a-creds in token()
+    await asyncio.wait_for(asyncio.gather(in_node.wait(), b_entered.wait()), 30)
+    await wait_until(
+        lambda: upsert_gate.entered.is_set() and token_gate.entered.is_set(), 30
+    )
 
-    await engine_a.aclose()
+    closing = asyncio.create_task(engine_a.aclose())
+    await asyncio.sleep(0)  # aclose cancels every task of A at once
+    # The worker threads outlive the cancel; let them finish now.
+    upsert_gate.release.set()
+    token_gate.release.set()
+    await closing
     results_a = {run_id: await task for run_id, task in runs_a.items()}
     b_release.set()
     result_b = await run_b

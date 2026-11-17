@@ -42,7 +42,7 @@ def _hammer(work, threads=THREADS):
     start = threading.Barrier(threads)
 
     def worker(i):
-        start.wait(10)
+        start.wait(30)
         return work(i)
 
     with ThreadPoolExecutor(max_workers=threads) as pool:
