@@ -161,7 +161,14 @@ Maintainer approves a PR. It is the deployment's **ceiling**: a repository
 can make it stricter (`human` < `ci` < `auto`) through
 `repositories.merge_policy` (NULL inherits), set by org owners and admins in
 the dashboard or with `PUT /repositories/{id}/merge-policy`, which refuses a
-value looser than the ceiling (422). The run uses the stricter of the two,
+value looser than the ceiling (422). Each change is recorded in the
+append-only `repository_merge_policy_changes` table (old and new value, the
+caller's user id, time), written in the same transaction as the change by
+the `set_repository_merge_policy` database function (service role only);
+re-setting the current value records nothing. Members read the changes with
+`GET /repositories/{id}/merge-policy/history` (newest first, `limit` at
+most 100), and the `GET` response carries the latest one as `last_change`.
+The run uses the stricter of the ceiling and the setting,
 read at the merge decision (`backend/merge_policy.py`). It fails closed: if
 the setting cannot be read the run uses `human` and records
 `repository merge policy unreadable (fail closed)`, and if the run's `runs`
@@ -425,7 +432,7 @@ WebSockets refuse with 4401 (no or invalid token) or 4403 (not allowed).
 | `POST /stop` without `run_id` | token | caller's org only | admin |
 | `GET /status/{id}`, `/runs/{id}/verifications`, `/runs/{id}/decisions` | token | run `org_id` | member |
 | `GET /runs` | token | filtered by `org_id` | member |
-| `GET`/`PUT /repositories/{id}/merge-policy` | token | repository `org_id` | read: member; write: admin |
+| `GET`/`PUT /repositories/{id}/merge-policy`, `GET .../merge-policy/history` | token | repository `org_id` | read: member; write: admin |
 | `POST /assist/inline` | token | none (request body only) | member, rate-limited |
 | `POST /github/installations/claim`, `/github/app/install-url` | token + GitHub user token | verified with GitHub; never moved between orgs (409) | admin |
 | `GET /admin/metrics`, `/admin/runs` | token | filtered by `org_id` | admin |

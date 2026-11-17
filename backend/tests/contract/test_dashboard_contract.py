@@ -130,12 +130,12 @@ DASHBOARD_CALLS = {
     ("POST", "/github/app/install-url"): Call(reads=frozenset({"install_url"})),
     # lib/merge-policy.ts fetchMergePolicy(), typed as RepositoryMergePolicy
     ("GET", "/repositories/{}/merge-policy"): Call(
-        reads=frozenset({"setting", "ceiling", "effective", "can_edit"})
+        reads=frozenset({"setting", "ceiling", "effective", "can_edit", "last_change"})
     ),
     # lib/merge-policy.ts updateMergePolicy()
     ("PUT", "/repositories/{}/merge-policy"): Call(
         body={"merge_policy": None},
-        reads=frozenset({"setting", "ceiling", "effective", "can_edit"}),
+        reads=frozenset({"setting", "ceiling", "effective", "can_edit", "last_change"}),
     ),
     # lib/terminal.ts buildTerminalWsUrl() (WebSockets are not in OpenAPI)
     ("WEBSOCKET", "/api/terminal/ws"): Call(query=frozenset({"repo_url"})),

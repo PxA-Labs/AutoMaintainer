@@ -1225,7 +1225,7 @@
     },
     "/repositories/{repository_id}/merge-policy": {
       "get": {
-        "description": "A repository's merge policy: its stored setting (null = inherit), the\ndeployment ceiling (MERGE_POLICY), the effective policy and the settings\nan admin may choose. Any member of the repository's org may read it.",
+        "description": "A repository's merge policy: its stored setting (null = inherit), the\ndeployment ceiling (MERGE_POLICY), the effective policy, the settings\nan admin may choose and who last changed it and when (``last_change``;\nnull when it was never changed through the API or cannot be read). Any\nmember of the repository's org may read it.",
         "operationId": "get_repository_merge_policy_repositories__repository_id__merge_policy_get",
         "parameters": [
           {
@@ -1277,7 +1277,7 @@
         "summary": "Get Repository Merge Policy"
       },
       "put": {
-        "description": "Set a repository's merge policy (org owners and admins only). A\nrepository may only be stricter than or equal to MERGE_POLICY: a looser\nvalue is refused with 422 instead of being stored as an intent that never\ntakes effect. Written with the service role; clients cannot write the\ncolumn themselves (RLS, migration *_repository_merge_policy.sql).",
+        "description": "Set a repository's merge policy (org owners and admins only). A\nrepository may only be stricter than or equal to MERGE_POLICY: a looser\nvalue is refused with 422 instead of being stored as an intent that never\ntakes effect.\n\nThe change and its audit row (repository_merge_policy_changes, with the\ncaller's user id) are written in one transaction by the\nset_repository_merge_policy database function, called with the service\nrole; clients can write neither themselves (RLS, migrations\n*_repository_merge_policy.sql and *_repository_merge_policy_audit.sql).\nSetting the value the repository already has writes nothing.",
         "operationId": "put_repository_merge_policy_repositories__repository_id__merge_policy_put",
         "parameters": [
           {
@@ -1337,6 +1337,72 @@
           }
         },
         "summary": "Put Repository Merge Policy"
+      }
+    },
+    "/repositories/{repository_id}/merge-policy/history": {
+      "get": {
+        "description": "Changes of a repository's merge policy, newest first: the old and new\nsetting (null = inherit), the user who made the change and when. Any\nmember of the repository's org may read them; another org's repository\nis not found, as for GET /repositories/{id}/merge-policy.",
+        "operationId": "get_repository_merge_policy_history_repositories__repository_id__merge_policy_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repository_id",
+            "required": true,
+            "schema": {
+              "title": "Repository Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Repository Merge Policy History"
       }
     },
     "/runs": {

@@ -129,6 +129,27 @@ describe("MergePolicyControl", () => {
     expect((await select()).value).toBe("");
   });
 
+  it("shows who last changed the setting and when", async () => {
+    const changedBy = "aaaaaaaa-0000-4000-8000-000000000001";
+    fetchMock.mockResolvedValueOnce(
+      json(policy({ last_change: { changed_by: changedBy, changed_at: "2026-11-17T10:00:00+00:00" } }))
+    );
+    render(<MergePolicyControl repository={REPO} />);
+
+    const line = (await screen.findByText(/Last changed by/)).closest("p")!;
+    expect(line.textContent).toContain("user aaaaaaaa");
+    expect(line.querySelector(`[title="${changedBy}"]`)).toBeTruthy();
+    expect(line.querySelector("time")?.getAttribute("dateTime")).toBe("2026-11-17T10:00:00+00:00");
+  });
+
+  it("shows no change line when the setting was never changed", async () => {
+    fetchMock.mockResolvedValueOnce(json(policy({ last_change: null })));
+    render(<MergePolicyControl repository={REPO} />);
+
+    await select();
+    expect(screen.queryByText(/Last changed by/)).toBeNull();
+  });
+
   it("reports a repository the API does not find", async () => {
     fetchMock.mockResolvedValueOnce(json({ detail: "Repository not found" }, 404));
     render(<MergePolicyControl repository={REPO} />);

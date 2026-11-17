@@ -1080,7 +1080,9 @@ async def _org_repository(sb, repository_id: int, org_id: str) -> dict:
     return repository
 
 
-def _merge_policy_view(repository: dict, role: Optional[str]) -> dict:
+def _merge_policy_view(
+    repository: dict, role: Optional[str], last_change: Optional[dict] = None
+) -> dict:
     import merge_policy
 
     ceiling = merge_policy.deployment_ceiling()
@@ -1093,6 +1095,45 @@ def _merge_policy_view(repository: dict, role: Optional[str]) -> dict:
         "effective": merge_policy.effective(ceiling, setting),
         "allowed": merge_policy.allowed_settings(ceiling),
         "can_edit": role in ADMIN_ROLES,
+        # {changed_by, changed_at} of the latest recorded change, or null.
+        "last_change": last_change,
+    }
+
+
+# Columns of repository_merge_policy_changes the history route returns.
+_MERGE_POLICY_CHANGE_COLUMNS = "id, old_policy, new_policy, changed_by, changed_at"
+
+
+async def _latest_merge_policy_change(
+    sb, repository_id: int, org_id: str
+) -> Optional[dict]:
+    """{changed_by, changed_at} of the repository's latest recorded policy
+    change, or None when there is none or it cannot be read. Best effort: it
+    is display data here, so a failed read (e.g. the audit migration not
+    applied yet) must not break reading the policy itself."""
+    try:
+        result = await asyncio.to_thread(
+            lambda: sb.table("repository_merge_policy_changes")
+            .select("changed_by, changed_at")
+            .eq("repository_id", repository_id)
+            .eq("org_id", org_id)
+            .order("changed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.warning(
+            "Could not read the merge policy history of repository %s",
+            repository_id,
+            exc_info=True,
+        )
+        return None
+    rows = getattr(result, "data", None)
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    return {
+        "changed_by": rows[0].get("changed_by"),
+        "changed_at": rows[0].get("changed_at"),
     }
 
 
@@ -1101,15 +1142,51 @@ async def get_repository_merge_policy(
     repository_id: int, user: dict = Depends(get_current_user)
 ):
     """A repository's merge policy: its stored setting (null = inherit), the
-    deployment ceiling (MERGE_POLICY), the effective policy and the settings
-    an admin may choose. Any member of the repository's org may read it."""
+    deployment ceiling (MERGE_POLICY), the effective policy, the settings
+    an admin may choose and who last changed it and when (``last_change``;
+    null when it was never changed through the API or cannot be read). Any
+    member of the repository's org may read it."""
     from agents import supabase as agents_supabase
 
     sb = agents_supabase
     if not sb:
         raise HTTPException(status_code=503, detail="Database not configured")
-    repository = await _org_repository(sb, repository_id, user["org_id"])
-    return _merge_policy_view(repository, user.get("role"))
+    org_id = user["org_id"]
+    repository = await _org_repository(sb, repository_id, org_id)
+    last_change = await _latest_merge_policy_change(sb, repository_id, org_id)
+    return _merge_policy_view(repository, user.get("role"), last_change)
+
+
+@app.get("/repositories/{repository_id}/merge-policy/history")
+async def get_repository_merge_policy_history(
+    repository_id: int,
+    user: dict = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """Changes of a repository's merge policy, newest first: the old and new
+    setting (null = inherit), the user who made the change and when. Any
+    member of the repository's org may read them; another org's repository
+    is not found, as for GET /repositories/{id}/merge-policy."""
+    from agents import supabase as agents_supabase
+
+    sb = agents_supabase
+    if not sb:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    org_id = user["org_id"]
+    await _org_repository(sb, repository_id, org_id)
+
+    # org_id again, as for /runs/{id}/decisions: a row can never leak even
+    # if it disagreed with its repository.
+    result = await asyncio.to_thread(
+        lambda: sb.table("repository_merge_policy_changes")
+        .select(_MERGE_POLICY_CHANGE_COLUMNS)
+        .eq("repository_id", repository_id)
+        .eq("org_id", org_id)
+        .order("changed_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return {"repository_id": repository_id, "changes": result.data or []}
 
 
 @app.put("/repositories/{repository_id}/merge-policy")
@@ -1121,8 +1198,14 @@ async def put_repository_merge_policy(
     """Set a repository's merge policy (org owners and admins only). A
     repository may only be stricter than or equal to MERGE_POLICY: a looser
     value is refused with 422 instead of being stored as an intent that never
-    takes effect. Written with the service role; clients cannot write the
-    column themselves (RLS, migration *_repository_merge_policy.sql)."""
+    takes effect.
+
+    The change and its audit row (repository_merge_policy_changes, with the
+    caller's user id) are written in one transaction by the
+    set_repository_merge_policy database function, called with the service
+    role; clients can write neither themselves (RLS, migrations
+    *_repository_merge_policy.sql and *_repository_merge_policy_audit.sql).
+    Setting the value the repository already has writes nothing."""
     import merge_policy
 
     from agents import supabase as agents_supabase
@@ -1137,7 +1220,7 @@ async def put_repository_merge_policy(
             detail="Only organization owners and admins can change the merge policy",
         )
     org_id = user["org_id"]
-    await _org_repository(sb, repository_id, org_id)
+    repository = await _org_repository(sb, repository_id, org_id)
 
     ceiling = merge_policy.deployment_ceiling()
     if not merge_policy.is_allowed(payload.merge_policy, ceiling):
@@ -1151,25 +1234,52 @@ async def put_repository_merge_policy(
             ),
         )
 
-    updated = await asyncio.to_thread(
-        lambda: sb.table("repositories")
-        .update({"merge_policy": payload.merge_policy})
-        .eq("id", repository_id)
-        .eq("org_id", org_id)
-        .execute()
-    )
-    rows = getattr(updated, "data", None)
-    if not isinstance(rows, list) or not rows:
-        # Deleted between the lookup and the update.
-        raise HTTPException(status_code=404, detail="Repository not found")
-    logger.info(
-        "Merge policy of repository %s in org %s set to %s by user %s",
-        repository_id,
-        org_id,
-        payload.merge_policy or "inherit",
-        user.get("user_id"),
-    )
-    return _merge_policy_view(rows[0], user.get("role"))
+    change = None
+    if repository.get("merge_policy") != payload.merge_policy:
+        # The function compares again under a row lock: a concurrent change
+        # cannot leave a row with a stale old value, and a concurrent
+        # identical change writes no second row.
+        try:
+            result = await asyncio.to_thread(
+                lambda: sb.rpc(
+                    "set_repository_merge_policy",
+                    {
+                        "p_repository_id": repository_id,
+                        "p_org_id": org_id,
+                        "p_merge_policy": payload.merge_policy,
+                        # The token's user, never a value from the request.
+                        "p_changed_by": user["user_id"],
+                    },
+                ).execute()
+            )
+        except Exception as exc:
+            if getattr(exc, "code", None) == "P0002":
+                # Deleted between the lookup and the update.
+                raise HTTPException(status_code=404, detail="Repository not found")
+            logger.exception(
+                "Could not change the merge policy of repository %s", repository_id
+            )
+            raise HTTPException(
+                status_code=500, detail="Could not change the merge policy"
+            ) from None
+        change = getattr(result, "data", None)
+        logger.info(
+            "Merge policy of repository %s in org %s set to %s by user %s",
+            repository_id,
+            org_id,
+            payload.merge_policy or "inherit",
+            user.get("user_id"),
+        )
+
+    repository = {**repository, "merge_policy": payload.merge_policy}
+    if isinstance(change, dict):
+        last_change = {
+            "changed_by": change.get("changed_by"),
+            "changed_at": change.get("changed_at"),
+        }
+    else:  # Unchanged here (or by a concurrent identical request).
+        last_change = await _latest_merge_policy_change(sb, repository_id, org_id)
+    return _merge_policy_view(repository, user.get("role"), last_change)
 
 
 @app.post("/stop")
