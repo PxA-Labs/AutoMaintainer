@@ -14,6 +14,13 @@ Worker auto-restart has two layers:
    can express.
 """
 
+# Worker startup (#524): load .env and log the GitHub auth mode before
+# REDIS_URL below or any task module reads its settings. Runs once per
+# process (main imports this module after doing the same).
+from github_app import configure_process_environment
+
+configure_process_environment()
+
 import os
 from urllib.parse import urlparse
 
