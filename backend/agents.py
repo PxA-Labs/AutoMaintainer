@@ -2,12 +2,10 @@ import ast
 import os
 import logging
 import threading
-from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
-from litellm import completion
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
 import httpx
@@ -63,7 +61,6 @@ from github_app import (
     get_auth_mode,
 )
 
-load_dotenv()
 current_run_id = ContextVar("current_run_id")
 current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
     "current_emitter", default=None
