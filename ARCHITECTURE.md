@@ -432,6 +432,20 @@ event loop without sharing clients, settings or caches.
   and how a misconfigured run fails. A second call with the `run_id` of a run
   still in progress in the process returns a `failed` result
   (`RUN_ALREADY_ACTIVE`) and leaves that run's row and events alone.
+- **Concurrency guarantees** (pinned by `backend/tests/concurrency/`, #187).
+  Engines in one event loop never see each other's database client, rate
+  limiter, App identity, token, workspace root or settings, also from tasks
+  and `asyncio.to_thread` workers their runs start; a run's ContextVars are
+  gone from the caller after success, failure, an exception or a cancel. A
+  cancelled run (also one stopped by `aclose()` or a caller cancel before its
+  task took a step) emits one `RUN_CANCELLED`. Installation tokens never
+  cross Apps under thread contention, but two threads missing the same cache
+  entry at once may both mint (both tokens are valid). Clone locks serialise
+  one clone and never block clones under another root. Not guaranteed yet:
+  a cancel with `grace_seconds` that interrupts the final `completed` write
+  can leave the row `completed` while `run()` returns `cancelled`, and two
+  concurrent trigger-label deliveries for one issue can both start a run
+  (#518); both are pinned by `xfail(strict=True)` tests.
 - **Workspace root.** An engine's `workspace_dir=None` is `<tmp>/automaintainer`;
   the engine never reads `AUTOMAINTAINER_WORKSPACE_DIR`. Two engines that
   both leave it unset share that root (and its clone locks), as two
