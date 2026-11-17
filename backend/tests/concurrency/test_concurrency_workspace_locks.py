@@ -21,7 +21,7 @@ from automaintainer.engine import AutoMaintainerEngine
 
 from concurrency_world import REPO, make_config
 
-KEY = "0123456789ab"
+KEY = "a" * 12  # IDE view key (12 hex chars); not a secret
 
 
 def _in_engine(config, fn):
