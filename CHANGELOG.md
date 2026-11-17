@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **engine**: Add AutoMaintainerConfig engine configuration schema ([#516](https://github.com/PxA-Labs/AutoMaintainer/pull/516)) - @purvanshjoshi
 - **db**: Import run history from pre-multi-tenant databases ([#514](https://github.com/PxA-Labs/AutoMaintainer/pull/514)) (closes [#482](https://github.com/PxA-Labs/AutoMaintainer/issues/482)) - @purvanshjoshi
 - Audit repository merge-policy changes ([#513](https://github.com/PxA-Labs/AutoMaintainer/pull/513)) - @purvanshjoshi
 - Per-repository merge policy under the MERGE_POLICY ceiling ([#495](https://github.com/PxA-Labs/AutoMaintainer/pull/495)) - @purvanshjoshi
