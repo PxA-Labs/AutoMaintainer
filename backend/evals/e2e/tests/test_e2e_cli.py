@@ -115,6 +115,64 @@ def test_live_needs_a_key(tmp_path):
 def test_repeats_default_to_three_only_in_live():
     assert run.parse_args(["--mode", "live"]).repeats == 3
     assert run.parse_args(["--mode", "oracle"]).repeats == 1
+    # Replay takes the number of runs the cassettes recorded.
+    assert run.parse_args(["--mode", "replay"]).repeats is None
+
+
+def _record(tmp_path, repeats, task="inflection_ordinal_teens"):
+    cassettes = tmp_path / "cassettes"
+    code, _, _ = _run(
+        tmp_path, f"rec-{task}", "--mode", "oracle", "--suite", "pipeline",
+        "--tasks", task, "--repeats", str(repeats), "--record", str(cassettes),
+    )  # fmt: skip
+    assert code == 0
+    return cassettes
+
+
+def _replay(tmp_path, cassettes, tasks, *extra):
+    return _run(
+        tmp_path, "replay", "--mode", "replay", "--suite", "pipeline",
+        "--cassettes", str(cassettes), "--tasks", tasks, *extra,
+    )  # fmt: skip
+
+
+def test_replay_refuses_more_repeats_than_were_recorded(tmp_path, capsys):
+    # One recording replayed three times is not three samples.
+    cassettes = _record(tmp_path, 1)
+    code, data, _ = _replay(
+        tmp_path, cassettes, "inflection_ordinal_teens", "--repeats", "3",
+        "--fail-on-stale",
+    )  # fmt: skip
+    assert code == 2 and data is None
+    assert "recorded 1 run" in capsys.readouterr().err
+
+
+def test_replay_refuses_fewer_repeats_than_were_recorded(tmp_path, capsys):
+    # Scoring only repeat 0 would drop the other recordings and their spread.
+    cassettes = _record(tmp_path, 2)
+    code, data, _ = _replay(
+        tmp_path, cassettes, "inflection_ordinal_teens", "--repeats", "1"
+    )
+    assert code == 2 and data is None
+    assert "recorded 2 runs" in capsys.readouterr().err
+
+
+def test_replay_scores_every_recorded_repeat_by_default(tmp_path):
+    cassettes = _record(tmp_path, 2)
+    code, data, _ = _replay(
+        tmp_path, cassettes, "inflection_ordinal_teens", "--fail-on-stale"
+    )
+    assert code == 0
+    assert data["metadata"]["repeats"] == 2
+    assert sorted(r["repeat"] for r in data["pipeline"]["runs"]) == [0, 1]
+
+
+def test_replay_refuses_cassettes_with_different_repeat_counts(tmp_path, capsys):
+    _record(tmp_path, 1, "inflection_ordinal_teens")
+    cassettes = _record(tmp_path, 2, "boltons_ceil_unsorted_options")
+    code, data, _ = _replay(tmp_path, cassettes, TASKS)
+    assert code == 2 and data is None
+    assert "different numbers of runs" in capsys.readouterr().err
 
 
 def test_live_mode_uses_the_key_pool_and_records_usage(tmp_path, monkeypatch):

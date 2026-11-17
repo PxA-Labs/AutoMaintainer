@@ -15,6 +15,7 @@ from evals.e2e import cassettes
 from evals.e2e.policies import (
     APPROVE,
     REJECT,
+    CassetteError,
     ReplayTransport,
     ScriptedTransport,
     noop_pipeline,
@@ -141,6 +142,17 @@ def test_replay_that_runs_out_of_answers_is_a_harness_error(tmp_path):
     record = run(ReplayTransport(cassette, repeat=0), tmp_path)
     assert record["error"] and "cassette" in record["error"]
     assert record["resolved"] is False
+
+
+def test_replay_refuses_a_repeat_the_cassette_did_not_record():
+    # Answering repeat 1 from the only recorded run would score the same
+    # recording twice, as if it were two independent samples.
+    cassette = cassettes.pipeline_cassette(
+        TASK.id, [[{"role": "pm", "response": APPROVE, "prompt_sha256": ""}]], "oracle"
+    )
+    ReplayTransport(cassette, repeat=0)
+    with pytest.raises(CassetteError, match="recorded 1 run"):
+        ReplayTransport(cassette, repeat=1)
 
 
 def test_cassette_files_are_stable_json(tmp_path):

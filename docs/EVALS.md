@@ -401,7 +401,11 @@ GROQ_API_KEY=... python -m evals.e2e.run --mode live --record my-cassettes --out
 ```
 
 Options: `--suite pipeline|reviewer|all`, `--tasks a,b`, `--cases a,b`,
-`--repeats N` (default 3 in live, 1 otherwise), `--jobs N` (runs in flight),
+`--repeats N` (default 3 in live, 1 in oracle and noop; replay always runs
+exactly the number of runs the cassettes recorded, refuses a different
+`--repeats` and refuses cassettes that recorded different numbers of runs,
+so a recording is never counted twice and no recorded repeat is dropped),
+`--jobs N` (runs in flight),
 `--cassettes DIR`, `--record DIR`, `--model`, `--temperature`, `--seed`,
 `--requests-per-minute`/`--tokens-per-minute` (the engine's client-side
 budget; live defaults to the engine defaults, 30 and 6000), `--prices FILE`,

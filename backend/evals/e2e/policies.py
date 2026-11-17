@@ -49,6 +49,10 @@ class CassetteError(RuntimeError):
     """A replayed run asked for a call its cassette does not have."""
 
 
+def _runs(n: int) -> str:
+    return f"{n} run" if n == 1 else f"{n} runs"
+
+
 class _Transport:
     def __init__(self):
         self.calls: list[dict] = []
@@ -97,6 +101,9 @@ class ScriptedTransport(_Transport):
 class ReplayTransport(_Transport):
     """Answers the calls of one recorded run in order.
 
+    Repeat ``r`` replays ``runs[r]``; a repeat the cassette did not record is
+    a ``CassetteError``, never another repeat's recording.
+
     A call whose prompt hash differs from the recorded one is answered anyway
     and counted in ``stale``; a role mismatch or a missing answer is a
     harness error, because the run took a different path than the recording.
@@ -108,7 +115,14 @@ class ReplayTransport(_Transport):
         if not runs:
             raise CassetteError(f"cassette {cassette.get('id')!r} has no runs")
         self.cassette_id = cassette.get("id")
-        self.recorded = runs[repeat % len(runs)]
+        if not 0 <= repeat < len(runs):
+            # Never reuse a recording for another repeat: the report would
+            # count one sample several times and show no spread.
+            raise CassetteError(
+                f"cassette {self.cassette_id!r} recorded {_runs(len(runs))}, "
+                f"replay asked for repeat {repeat + 1}"
+            )
+        self.recorded = runs[repeat]
         self.model = cassette.get("model")
         self.position = 0
         self.stale = 0

@@ -69,7 +69,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--tasks", default="all", help="comma-separated task ids or 'all'")
     p.add_argument("--cases", default="all", help="Reviewer case ids or 'all'")
     p.add_argument(
-        "--repeats", type=int, default=None, help="default: 3 live, 1 otherwise"
+        "--repeats",
+        type=int,
+        default=None,
+        help="default: 3 live, the recorded runs in replay, 1 otherwise",
     )
     p.add_argument("--jobs", type=int, default=2, help="runs in flight at once")
     p.add_argument("--cassettes", type=Path, default=cassettes.FIXTURES_DIR)
@@ -95,9 +98,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-false-rejection-rate", type=float, default=None)
     p.add_argument("--fail-on-stale", action="store_true")
     args = p.parse_args(argv)
-    if args.repeats is None:
+    if args.repeats is None and args.mode != "replay":
+        # Replay resolves it from the cassettes (_replay_repeats).
         args.repeats = 3 if args.mode == "live" else 1
-    if args.repeats < 1 or args.jobs < 1:
+    if (args.repeats is not None and args.repeats < 1) or args.jobs < 1:
         p.error("--repeats and --jobs must be at least 1")
     if args.mode == "live" and args.model is None:
         args.model = LIVE_MODEL
@@ -155,6 +159,48 @@ class _Agents:
             cassette = cassettes.load_for(self.args.cassettes, "reviewer", case.id)
             return ReplayTransport(cassette, repeat)
         return self.live_factory(self.args)
+
+
+def _replay_repeats(args, tasks, cases) -> int:
+    """The number of repeats a replay runs: the runs the cassettes recorded.
+
+    Every selected cassette must hold the same number of runs, and an
+    explicit ``--repeats`` must equal it. Replaying fewer would silently drop
+    recorded samples and their spread; replaying more would count one
+    recording several times. A missing cassette is skipped here and becomes
+    a harness error in its own run. Raises ``CassetteError``.
+    """
+    counts: dict = {}
+    selected = [("pipeline", t.id) for t in tasks] + [("reviewer", c.id) for c in cases]
+    for kind, case_id in selected:
+        try:
+            cassette = cassettes.load_for(args.cassettes, kind, case_id)
+        except FileNotFoundError:
+            continue
+        counts.setdefault(len(cassette.get("runs") or []), []).append(
+            f"{kind}/{case_id}"
+        )
+    if len(counts) > 1:
+        detail = "; ".join(
+            f"{n}: {', '.join(ids[:3])}{' ...' if len(ids) > 3 else ''}"
+            for n, ids in sorted(counts.items())
+        )
+        raise CassetteError(
+            f"the selected cassettes recorded different numbers of runs ({detail}); "
+            "replay them in separate invocations"
+        )
+    recorded = next(iter(counts), None)
+    if recorded is None:
+        return args.repeats or 1
+    if recorded == 0:
+        raise CassetteError("the selected cassettes have no runs")
+    if args.repeats is not None and args.repeats != recorded:
+        noun = "run" if recorded == 1 else "runs"
+        raise CassetteError(
+            f"--repeats {args.repeats}, but the cassettes recorded {recorded} {noun}; "
+            "omit --repeats to replay every recorded run"
+        )
+    return recorded
 
 
 def _error_record(kind, case_id, repeat, error, **extra):
@@ -318,6 +364,12 @@ def main(argv=None, live_transport_factory=None) -> int:
     except TaskError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    if args.mode == "replay":
+        try:
+            args.repeats = _replay_repeats(args, pipeline_tasks, cases)
+        except CassetteError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     used = {t.id for t in pipeline_tasks} | {c.task_id for c in cases}
     tasks = [task_by_id[i] for i in sorted(used)]
     run_kwargs = {"model": args.model, "timeout": args.timeout}

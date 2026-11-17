@@ -8,7 +8,8 @@ One cassette per task (``pipeline``) or Reviewer case (``reviewer``)::
     call = {"role", "prompt_sha256", "response", "finish_reason",
             "usage", "latency_ms"}
 
-Replay answers the calls of ``runs[repeat % len(runs)]`` in order. Each call
+Replay answers the calls of ``runs[repeat]`` in order and replays exactly
+the recorded number of repeats (``recorded_repeats``). Each call
 stores the hash of the prompt it answered, after ``normalize_prompt``: the
 Maintainer's prompt quotes the verification output, which holds timings,
 temporary paths and the interpreter path, and those differ between machines
