@@ -3,7 +3,7 @@
 This document describes the system as it is implemented on `main`. Each
 section names the source file it is based on. When the code changes, update
 the section that names it. No test checks this document; the agent-graph
-diagram is checked by hand against `backend/agents.py` ("Build the Graph").
+diagram is checked by hand against `backend/agents.py` (`build_graph()`).
 
 For deployment topology, environment variables and the security checklist,
 see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md). For the eval harness, see
@@ -103,11 +103,11 @@ frees the lock.
 
 ## The agent pipeline (LangGraph)
 
-Source: `backend/agents.py`, section "Build the Graph". The node ids below are
+Source: `backend/agents.py`, `build_graph()`. The node ids below are
 the ids registered with `StateGraph`. The names in parentheses are the
 display names used in logs and the dashboard.
 
-<!-- agent-graph: checked by hand against backend/agents.py, "Build the Graph" -->
+<!-- agent-graph: checked by hand against backend/agents.py, build_graph() -->
 ```mermaid
 flowchart TD
     __start__([START])
@@ -132,6 +132,15 @@ flowchart TD
 The routers are `should_implement` (after `pm`) and `should_iterate` (after
 `maintainer`). The Implementer runs at most three times per run: the first
 attempt plus two revisions.
+
+`build_graph(nodes=None)` builds and compiles a new graph on each call;
+`nodes` may replace node functions by id, the edges and routers are fixed
+(`backend/test_build_graph.py` pins the structure). The worker uses the
+shared graph from `get_default_graph()` (also `agents.app`). Importing
+`agents` builds nothing: the graph and the Supabase client
+(`get_supabase()`, also `agents.supabase`) are created on first use under a
+lock, and `backend/test_agents_import_side_effects.py` checks that the import
+makes no network calls and writes no files.
 
 | Node | What it does |
 | --- | --- |
