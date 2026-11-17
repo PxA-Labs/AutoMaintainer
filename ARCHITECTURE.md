@@ -341,9 +341,9 @@ silent fallback on the tool path. Source: `backend/agents.py`,
 
 `backend/automaintainer/config.py` defines `AutoMaintainerConfig` (#183,
 epic #157): one immutable Pydantic v2 model (`frozen`, `extra="forbid"`) for
-the engine's credentials, model routing, execution and safety settings. **The
-runtime does not use it yet**; the modules above still read the environment
-themselves until the engine refactor (#186) passes a config object through.
+the engine's credentials, model routing, execution and safety settings.
+`AutoMaintainerEngine` (below) runs on it; `run_agent_loop` (the API and
+Celery path) still reads the environment, as before.
 
 - Values resolve as: explicit argument, then the environment variable the
   runtime reads today (`from_env(environ)` reads only the mapping it is
@@ -375,6 +375,58 @@ themselves until the engine refactor (#186) passes a config object through.
   Settings of the API, persistence and broker are out of scope; the test
   `backend/tests/test_engine_config.py` lists each one with its reason and
   fails when the runtime starts reading a variable that is in neither list.
+
+### Engine
+
+`backend/automaintainer/engine.py` defines `AutoMaintainerEngine(config, *,
+supabase=None, llm=None, github=None, emitter=None, nodes=None)` (#186).
+Several engines with different configurations can run in one process and one
+event loop without sharing clients, settings or caches.
+
+- **Engine context.** For each run the engine publishes one `EngineContext`
+  through the `current_engine` ContextVar (`automaintainer/context.py`). The
+  helpers the nodes call look there first and fall back to their previous
+  behaviour when no engine is active: `agents.get_supabase` (the engine's
+  client, or none; never the process client), `rate_limiter.get_rate_limit_manager`
+  (the engine's own key pool and budgets), the GitHub App identity, auth mode
+  and PAT in `github_app`, the App slug cache, the workspace root and git
+  timeout, `verification` (`verify_changes`, `runner_type`, timeouts,
+  `sandbox_backend`), `merge_policy.deployment_ceiling`,
+  `change_limits.default_limits`, the Implementer limits and
+  `max_iterations`. Node tasks and `asyncio.to_thread` workers inherit it.
+- **Clients.** Built lazily per instance: the compiled graph
+  (`agents.build_graph(nodes)`) on the first run, the `RateLimitManager` on
+  the first LLM call. The constructor does no I/O. `llm` replaces the Groq
+  call (rate limiting and key rotation still apply); `github` replaces the
+  credentials factory. Use the engine as an async context manager or call
+  `aclose()`.
+- **Models.** `_llm_or_abort` maps the calling node's phase to its
+  `ModelRouting` role; an engine calls the routed model and its `fallback`
+  on the tool path. Without an engine the models are unchanged.
+- **Caches.** Installation tokens are cached by (installation, repository,
+  permissions, App id), and a credential keeps the App it was created for.
+  The workspace scrub runs once per workspace root; clone locks are keyed by
+  absolute path, which includes the root.
+- **`run()`** returns a `RunResult` (`status`, `run_id`, `pr_url`,
+  `error_code`, `error`, `raw`). The run executes in an asyncio task owned by
+  the engine; its ContextVars are set with tokens and reset when it ends.
+- **Cancellation.** `cancel(run_id, grace_seconds=None)` stops the run
+  before its next node starts (every graph node checks first, because
+  LangGraph's `astream` runs ahead of its consumer); a node in flight
+  finishes. With `grace_seconds` the task is also cancelled after that delay.
+  The run emits `RUN_CANCELLED` and is marked `cancelled` (also when its task
+  is cancelled; this used to write `failed`). `tasks.cancel_run_task` calls
+  `cancel_active_run`, which reaches a run in the same process, and still
+  revokes the Celery task for runs in other processes.
+- **`run_agent_loop`** is a thin wrapper over the process-default engine,
+  which has no config and publishes no engine context, so the API and Celery
+  path keep their behaviour. It is not built from
+  `AutoMaintainerConfig.from_env()` on purpose: that validation is stricter
+  than the runtime and snapshots the environment, which would change when
+  and how a misconfigured run fails.
+- Not per engine yet: the runners' `dry_run`, `GITHUB_APP_SLUG` (the slug
+  fallback when GET /app fails), the host environment copied into test
+  processes, and logging setup, which is process-global by nature.
 
 ### Errors
 

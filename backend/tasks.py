@@ -461,6 +461,14 @@ def _execute_agent_run(
                     color="text-emerald-500",
                 )
             )
+        elif result.get("status") == "cancelled":
+            # Stopped by its engine (cancel_run_task, #186): keep the
+            # ``cancelled`` status rather than overwrite it with ``failed``.
+            loop.run_until_complete(
+                update_run_status(
+                    run_id, "cancelled", error_message="Cancelled by user"
+                )
+            )
         else:
             error_msg = result.get("error", "Unknown error")
             loop.run_until_complete(
@@ -742,6 +750,14 @@ def cancel_run_task(self, run_id: str):
         # Actually stop the Celery worker task, not just flag the DB.
         # SIGTERM lets the task's `finally` block run (lock release,
         # heartbeat thread stop) before the process is recycled.
+        # A run executing in this very process (eager mode, or a worker that
+        # also serves cancel requests) is stopped by its engine at the next
+        # node boundary, ending it ``cancelled`` with RUN_CANCELLED (#186).
+        # Other processes are reached by the revoke below.
+        from automaintainer.engine import cancel_active_run
+
+        cancel_active_run(run_id)
+
         celery_task_id = run.get("celery_task_id")
         if celery_task_id:
             from celery_app import celery_app  # local import avoids circular import

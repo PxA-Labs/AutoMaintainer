@@ -29,6 +29,7 @@ from langgraph.prebuilt import create_react_agent
 import httpx
 from typing import TypedDict, Annotated, Literal, Optional, Union
 import asyncio
+import functools
 from github import Github, GithubException
 from github.IssuePullRequest import IssuePullRequest
 import uuid
@@ -78,6 +79,11 @@ from github_app import (
     credentials_for_installation,
     get_auth_mode,
 )
+
+# The engine running in this context (#186), if any. Every lookup below that
+# reads a process global or the environment falls back to that behaviour
+# when no engine is active (run_agent_loop, the API and Celery path).
+from automaintainer.context import active_config, active_engine
 
 current_run_id = ContextVar("current_run_id")
 current_emitter: ContextVar[Optional[EventEmitter]] = ContextVar(
@@ -140,6 +146,23 @@ IMPLEMENTER_SHRINK_GUARD_MIN_BYTES = int(
 )
 
 
+def _implementer_limits() -> tuple[int, float, int]:
+    """(max file chars, min size ratio, shrink guard min bytes): the running
+    engine's settings (#186), else the module values above."""
+    config = active_config()
+    if config is not None:
+        return (
+            config.implementer_max_file_chars,
+            config.implementer_min_size_ratio,
+            config.implementer_shrink_guard_min_bytes,
+        )
+    return (
+        IMPLEMENTER_MAX_FILE_CHARS,
+        IMPLEMENTER_MIN_SIZE_RATIO,
+        IMPLEMENTER_SHRINK_GUARD_MIN_BYTES,
+    )
+
+
 def _clean_env(val: str | None) -> str | None:
     if not val:
         return None
@@ -187,8 +210,13 @@ def _create_supabase_client() -> Client | None:
 def get_supabase() -> Client | None:
     """The service-role Supabase client, or None when it is not configured.
 
-    Created on first call; ``agents.supabase`` is the same object.
+    Created on first call; ``agents.supabase`` is the same object. Inside an
+    engine run, the engine's client (None for an engine without a database);
+    an engine never falls back to the process-wide client (#186).
     """
+    engine = active_engine()
+    if engine is not None:
+        return engine.supabase
     return _lazy_global("supabase", _create_supabase_client)
 
 
@@ -899,14 +927,15 @@ def validate_generated_code(
         return
     old_size = len(original.encode("utf-8"))
     new_size = len(code.encode("utf-8"))
+    _, min_ratio, guard_min_bytes = _implementer_limits()
     if (
-        old_size > IMPLEMENTER_SHRINK_GUARD_MIN_BYTES
-        and new_size < old_size * IMPLEMENTER_MIN_SIZE_RATIO
+        old_size > guard_min_bytes
+        and new_size < old_size * min_ratio
         and not asks_for_removal(directive)
     ):
         raise GeneratedCodeError(
             f"Implementer output shrinks the file from {old_size} to {new_size} "
-            f"bytes (below {IMPLEMENTER_MIN_SIZE_RATIO:.0%} of the original) "
+            f"bytes (below {min_ratio:.0%} of the original) "
             "although the task does not ask for removal; refusing a likely "
             "truncated rewrite."
         )
@@ -1204,6 +1233,9 @@ def untrusted_block(label: str, content, max_chars: int | None = None) -> str:
 
 
 def get_all_groq_keys():
+    config = active_config()
+    if config is not None:
+        return [k.get_secret_value() for k in config.groq_api_keys]
     keys = []
     primary = os.getenv("GROQ_API_KEY")
     if primary:
@@ -1314,18 +1346,65 @@ def extract_final_agent_content(final_res) -> str:
     return content
 
 
+# The agent role (config.ModelRouting) of the LLM call in progress, set by
+# _llm_or_abort from the calling node's phase. A ContextVar rather than a
+# parameter so run_llm_with_tools / run_llm keep their signatures.
+_llm_role: ContextVar[Optional[str]] = ContextVar("llm_role", default=None)
+_ROLE_OF_PHASE = {
+    AgentPhase.ARCHITECT: "architect",
+    AgentPhase.BRAINSTORMER: "brainstormer",
+    AgentPhase.PM: "pm",
+    AgentPhase.IMPLEMENTER: "implementer",
+    AgentPhase.MAINTAINER: "maintainer",
+}
+
+
+def _routed_model(role: Optional[str], model="llama-3.3-70b-versatile") -> str:
+    """The model the running engine routes ``role`` to, else ``model`` (the
+    default every role used before ModelRouting, #186)."""
+    config = active_config()
+    if config is None or role is None:
+        return model
+    return config.model_routing.model_for(role)
+
+
+async def _engine_llm_call(
+    llm, model: str, system_prompt: str, user_prompt: str, estimated_tokens: int
+) -> str:
+    """One completion through an engine's injected LLM transport, with a key
+    from the engine's own pool and budget (rate_limiter)."""
+    manager = await get_rate_limit_manager()
+
+    async def _call(api_key: str):
+        return await llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            api_key=api_key,
+        )
+
+    return await manager.execute_with_retry(_call, estimated_tokens=estimated_tokens)
+
+
 async def run_llm(
     system_prompt: str, user_prompt: str, estimated_tokens: int = 2000
 ) -> str:
     """
     Run LLM completion with automatic rate limit management.
-    Uses the global RateLimitManager for multi-key rotation and token bucket limiting.
+    Uses the RateLimitManager (the running engine's, else the process one)
+    for multi-key rotation and token bucket limiting.
     """
     try:
+        model = _routed_model(_llm_role.get())
+        engine = active_engine()
+        if engine is not None and engine.llm is not None:
+            return await _engine_llm_call(
+                engine.llm, model, system_prompt, user_prompt, estimated_tokens
+            )
         return await run_llm_with_rate_limit(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            model="llama-3.3-70b-versatile",
+            model=model,
             estimated_tokens=estimated_tokens,
         )
     except Exception as e:
@@ -1364,7 +1443,7 @@ async def stream_inline_assist(
 
         manager = await get_rate_limit_manager()
         async with manager.key_context(estimated_tokens=2000) as key_state:
-            llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=key_state.key)
+            llm = ChatGroq(model=_routed_model("inline_assist"), api_key=key_state.key)
 
             system_prompt = (
                 "You are an expert AI code editor assisting a developer inline inside a code editor.\n"
@@ -1399,7 +1478,19 @@ async def run_llm_with_tools(
 ):
     """
     Run LLM with tools (MCP) with automatic rate limit management.
+
+    An engine with an injected LLM transport (#186) has no LangChain chat
+    model for the tool agent, so its calls take the plain completion path.
     """
+    engine = active_engine()
+    if engine is not None and engine.llm is not None:
+        try:
+            return await run_llm(
+                system_prompt, user_prompt, estimated_tokens=estimated_tokens
+            )
+        except Exception as e:
+            raise LLMExecutionError(f"LLM execution failed: {e}") from e
+    role = _llm_role.get()
     try:
         from mcp.client.stdio import stdio_client, StdioServerParameters
         from mcp.client.session import ClientSession
@@ -1419,9 +1510,18 @@ async def run_llm_with_tools(
                 manager = await get_rate_limit_manager()
 
                 async def _call_with_tools(api_key: str):
-                    llms = [
-                        ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key)
-                    ] + [ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)]
+                    config = active_config()
+                    if config is None:
+                        llms = [
+                            ChatGroq(model="llama-3.3-70b-versatile", api_key=api_key)
+                        ] + [ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)]
+                    else:
+                        # The engine's routing; fallback None disables it.
+                        routing = config.model_routing
+                        models = [_routed_model(role)] + (
+                            [routing.fallback] if routing.fallback else []
+                        )
+                        llms = [ChatGroq(model=m, api_key=api_key) for m in models]
                     if len(llms) > 1:
                         llm = llms[0].with_fallbacks(llms[1:])
                     else:
@@ -1472,7 +1572,7 @@ async def run_llm_with_tools(
                                                 phase=AgentPhase.SYSTEM,
                                                 latency_ms=latency_ms,
                                                 tokens_used=tokens,
-                                                model_name="llama-3.3-70b-versatile",
+                                                model_name=_routed_model(role),
                                             )
                                         )
 
@@ -1525,7 +1625,10 @@ async def run_llm_with_tools(
 
 async def _llm_or_abort(phase: AgentPhase, system_prompt: str, user_prompt: str):
     """Call the LLM for a graph node; an LLM outage ends the run instead of
-    leaking error strings into GitHub issues, PM decisions or commits."""
+    leaking error strings into GitHub issues, PM decisions or commits.
+
+    The phase selects the model an engine routes the call to (#186)."""
+    role_token = _llm_role.set(_ROLE_OF_PHASE.get(phase))
     try:
         return await run_llm_with_tools(system_prompt, user_prompt)
     except LLMExecutionError as e:
@@ -1534,6 +1637,8 @@ async def _llm_or_abort(phase: AgentPhase, system_prompt: str, user_prompt: str)
             f"{phase.value.capitalize()} could not get an LLM response: {e}",
             phase,
         ) from e
+    finally:
+        _llm_role.reset(role_token)
 
 
 _URL_USERINFO = re.compile(r"(?i)\b(https?://)[^/\s@]+@")
@@ -2021,6 +2126,8 @@ async def _save_checkpoint(run_id: str | None, **updates) -> None:
 
 
 # Slug of the GitHub App (app mode), read once per process from GET /app.
+# An engine run uses its engine's own cache instead (#186): engines bound to
+# different Apps must not share one slug.
 _github_app_slug_cache: dict = {}
 
 
@@ -2032,14 +2139,16 @@ def _github_app_slug() -> Optional[str]:
     GITHUB_APP_SLUG (set for the install flow) is the fallback when that call
     fails. None when neither is available.
     """
-    if "slug" in _github_app_slug_cache:
-        return _github_app_slug_cache["slug"]
+    engine = active_engine()
+    cache = engine.slug_cache if engine is not None else _github_app_slug_cache
+    if "slug" in cache:
+        return cache["slug"]
     try:
         from github_app import get_github_integration
 
         slug = get_github_integration().get_app().slug
         if isinstance(slug, str) and slug:
-            _github_app_slug_cache["slug"] = slug
+            cache["slug"] = slug
             return slug
     except Exception as e:
         logger.warning("Could not read the GitHub App slug (GET /app): %s", e)
@@ -2808,11 +2917,12 @@ async def implementer_node(state: AgentState):
 
     # The implementer rewrites the whole file; above this size the model's
     # output limit truncates it, so refuse rather than commit half a file.
-    if len(original_content) > IMPLEMENTER_MAX_FILE_CHARS:
+    max_file_chars = _implementer_limits()[0]
+    if len(original_content) > max_file_chars:
         raise PipelineAbortError(
             "TARGET_FILE_TOO_LARGE",
             f"{target_file} has {len(original_content)} characters, above the "
-            f"{IMPLEMENTER_MAX_FILE_CHARS}-character limit for full-file rewrites.",
+            f"{max_file_chars}-character limit for full-file rewrites.",
             AgentPhase.IMPLEMENTER,
         )
 
@@ -3587,9 +3697,50 @@ async def maintainer_node(state: AgentState):
 def should_iterate(state: AgentState):
     if is_approved_verdict(state.get("review")):
         return END
-    if state.get("iteration", 0) >= 3:
+    config = active_config()
+    if config is not None:
+        # The running engine's max_iterations (#186).
+        if state.get("iteration", 0) >= config.max_iterations:
+            return END
+    elif state.get("iteration", 0) >= 3:
         return END
     return "implementer"
+
+
+# The cancel check of the run executing in this context (an engine's,
+# #186), or None. Every graph node consults it before it starts, so a cancel
+# stops the run at the next node boundary: LangGraph's astream runs ahead of
+# its consumer, so checking only between yielded states would let the next
+# node start first.
+_run_should_stop: ContextVar[Optional[object]] = ContextVar(
+    "run_should_stop", default=None
+)
+
+
+def _stoppable(node):
+    """``node``, raising RunCancelled instead of starting when the run's
+    engine was asked to stop."""
+
+    def check():
+        should_stop = _run_should_stop.get()
+        if should_stop is not None and should_stop():
+            raise RunCancelled()
+
+    if asyncio.iscoroutinefunction(node):
+
+        @functools.wraps(node)
+        async def guarded(state):
+            check()
+            return await node(state)
+
+    else:
+
+        @functools.wraps(node)
+        def guarded(state):
+            check()
+            return node(state)
+
+    return guarded
 
 
 # Nodes of the agent graph, in the order they are added.
@@ -3605,10 +3756,10 @@ def build_graph(nodes: Optional[dict] = None):
     compiled graph; get_default_graph() is the shared one with the default
     nodes.
 
-    Only node functions can be injected: the nodes still read the module
-    level clients (``supabase``, ``gh``, the LLM). Per-engine clients
-    (#186, AutoMaintainerEngine) need those passed in as well, e.g. as
-    further optional arguments or a context the nodes read.
+    Only node functions can be injected. The nodes reach their clients
+    (Supabase, GitHub, the LLM) through module helpers that resolve them from
+    the engine running in the current context (automaintainer.context), so
+    an AutoMaintainerEngine builds its own graph with this function (#186).
     """
     implementations = {
         "architect": architect_node,
@@ -3624,7 +3775,7 @@ def build_graph(nodes: Optional[dict] = None):
 
     workflow = StateGraph(AgentState)
     for name in GRAPH_NODE_NAMES:
-        workflow.add_node(name, implementations[name])
+        workflow.add_node(name, _stoppable(implementations[name]))
 
     workflow.set_entry_point("architect")
     workflow.add_edge("architect", "brainstormer")
@@ -3714,13 +3865,19 @@ async def _bind_run_github_credentials(
     _run_github_credentials.set(None)
     purpose = f"run {run_id} on {repo_name}"
     mode = None
+    engine = active_engine()
+    # An engine's injected GitHub credentials factory (#186), else the
+    # installation (or PAT) credentials of github_app.
+    factory = (
+        engine.github
+        if engine is not None and engine.github is not None
+        else credentials_for_installation
+    )
     try:
         mode = get_auth_mode()
         # Scope the token to this run's repository only (RUN_TOKEN_PERMISSIONS
         # on one repository), not every repository of the installation.
-        creds = credentials_for_installation(
-            github_installation_id, purpose=purpose, repository=repo_name
-        )
+        creds = factory(github_installation_id, purpose=purpose, repository=repo_name)
         if creds.mode == AUTH_MODE_APP:
             await asyncio.to_thread(creds.token)
     except GitHubAuthError as e:
@@ -3771,14 +3928,109 @@ async def run_agent_loop(
     the routes always have it too, because they refuse requests without a
     database. Only a run started directly without the id (a local script)
     writes a name-keyed clone the IDE routes do not read.
+
+    A thin wrapper over the process-default AutoMaintainerEngine (#186),
+    which keeps reading the environment and the module-level clients as
+    before; ``automaintainer.engine.cancel_active_run`` cancels it.
+    """
+    # Imported here: automaintainer.engine imports this module.
+    from automaintainer.engine import default_engine
+
+    return await default_engine()._run_loop(
+        repo_name,
+        target_issue=target_issue,
+        run_id=run_id,
+        emitter=emitter,
+        installation_id=github_installation_id,
+        repository_id=repository_id,
+        trigger={
+            "source": trigger_source,
+            "login": trigger_login,
+            "github_id": trigger_github_id,
+        },
+    )
+
+
+class RunCancelled(Exception):
+    """Raised between graph steps when the run's engine was asked to stop."""
+
+
+def normalize_repo_name(repo_name: str) -> str:
+    """``owner/name`` from a github.com URL; anything else unchanged."""
+    if repo_name.startswith("http://") or repo_name.startswith("https://"):
+        from urllib.parse import urlparse
+
+        parsed = urlparse(repo_name)
+        if parsed.netloc in ["github.com", "www.github.com"]:
+            return parsed.path.strip("/")
+    return repo_name
+
+
+async def _mark_run_cancelled(run_id: str) -> None:
+    """Emit the fatal RUN_CANCELLED event and mark the run ``cancelled``.
+
+    ``cancelled`` (one of tasks.TERMINAL_RUN_STATUSES), the status
+    tasks.cancel_run_task writes too; this used to write ``failed``, which
+    could overwrite the ``cancelled`` set by the cancel request.
     """
     supabase = get_supabase()
-    if not run_id:
-        import uuid
+    await emit_event(
+        ErrorEvent(
+            run_id=run_id,
+            phase=AgentPhase.SYSTEM,
+            error_code="RUN_CANCELLED",
+            message="Agent loop cancelled by user.",
+            fatal=True,
+        )
+    )
+    if supabase:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("runs")
+                .update({"status": "cancelled"})
+                .eq("id", run_id)
+                .execute()
+            )
+        except Exception as e:
+            print(f"Failed to update run status in Supabase: {e}")
 
-        run_id = str(uuid.uuid4())
-    current_run_id.set(run_id)
-    _run_trigger_trust.set({})
+
+def cancelled_result(final_state: Optional[dict]) -> dict:
+    """The result of a run stopped by its engine (RUN_CANCELLED)."""
+    state = final_state or {}
+    return {
+        "status": "cancelled",
+        "error": "Agent loop cancelled by user.",
+        "error_code": "RUN_CANCELLED",
+        "issue_number": state.get("issue_number") or 0,
+        "pr_number": state.get("pr_number") or 0,
+        "branch_name": state.get("branch_name") or "",
+    }
+
+
+async def _run_pipeline(
+    graph,
+    repo_name: str,
+    *,
+    run_id: str,
+    target_issue: Optional[int],
+    emitter: Optional[EventEmitter],
+    github_installation_id: Optional[int],
+    repository_id: Optional[int],
+    trigger: dict,
+    should_stop=None,
+    progress: Optional[dict] = None,
+) -> dict:
+    """The body of a run: what run_agent_loop did before the engine (#186).
+
+    The caller (AutoMaintainerEngine) binds ``current_run_id``, the trust
+    cache and, for its own runs, the engine context, and resets them
+    afterwards. ``should_stop`` is checked after every graph step: when it
+    returns True the run ends there as ``cancelled`` (RunCancelled), without
+    interrupting a node in flight. ``progress["final_state"]`` tracks the
+    latest state for a caller that cancels the task itself.
+    """
+    supabase = get_supabase()
 
     if emitter is not None:
         current_emitter.set(emitter)
@@ -3805,12 +4057,7 @@ async def run_agent_loop(
         except Exception as e:
             print(f"Failed to create run in Supabase: {e}")
 
-    if repo_name.startswith("http://") or repo_name.startswith("https://"):
-        from urllib.parse import urlparse
-
-        parsed = urlparse(repo_name)
-        if parsed.netloc in ["github.com", "www.github.com"]:
-            repo_name = parsed.path.strip("/")
+    repo_name = normalize_repo_name(repo_name)
 
     if not repo_name or repo_name == "owner/repo":
         error_msg = (
@@ -3839,11 +4086,7 @@ async def run_agent_loop(
         "repo_name": repo_name,
         "repository_id": repository_id,
         "target_issue": target_issue,
-        "trigger": {
-            "source": trigger_source,
-            "login": trigger_login,
-            "github_id": trigger_github_id,
-        },
+        "trigger": trigger,
         "architect_directive": "",
         "idea": "",
         "pm_decision": "",
@@ -3867,17 +4110,28 @@ async def run_agent_loop(
 
     last_idx = 0
     final_state: dict | None = None
+    stop_token = _run_should_stop.set(should_stop)
     try:
-        async for state in get_default_graph().astream(
-            initial_state, stream_mode="values"
-        ):
+        stream = graph.astream(initial_state, stream_mode="values")
+        try:
+            async for state in stream:
 
-            new_msgs = state["log_messages"][last_idx:]
-            for msg in new_msgs:
-                await broadcast_log(msg)
+                new_msgs = state["log_messages"][last_idx:]
+                for msg in new_msgs:
+                    await broadcast_log(msg)
 
-            last_idx = len(state["log_messages"])
-            final_state = dict(state)
+                last_idx = len(state["log_messages"])
+                final_state = dict(state)
+                if progress is not None:
+                    progress["final_state"] = final_state
+                # Cooperative cancellation at a node boundary: the next node
+                # has not started, and nothing in flight is interrupted.
+                if should_stop is not None and should_stop():
+                    raise RunCancelled()
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
         await broadcast_log({"agent": "System", "msg": "Agent loop complete."})
         if supabase:
@@ -3899,6 +4153,9 @@ async def run_agent_loop(
             "branch_name": (final_state or {}).get("branch_name") or "",
             "merge_status": (final_state or {}).get("merge_status") or "",
         }
+    except RunCancelled:
+        await _mark_run_cancelled(run_id)
+        return cancelled_result(final_state)
     except PipelineAbortError as e:
         return await _fail_run(run_id, e.error_code, str(e), e.phase, final_state)
     except Exception as e:
@@ -3913,23 +4170,7 @@ async def run_agent_loop(
             final_state,
         )
     except asyncio.CancelledError:
-        await emit_event(
-            ErrorEvent(
-                run_id=run_id,
-                phase=AgentPhase.SYSTEM,
-                error_code="RUN_CANCELLED",
-                message="Agent loop cancelled by user.",
-                fatal=True,
-            )
-        )
-        if supabase:
-            try:
-                await asyncio.to_thread(
-                    lambda: supabase.table("runs")
-                    .update({"status": "failed"})
-                    .eq("id", run_id)
-                    .execute()
-                )
-            except Exception as e:
-                print(f"Failed to update run status in Supabase: {e}")
+        await _mark_run_cancelled(run_id)
         raise
+    finally:
+        _run_should_stop.reset(stop_token)

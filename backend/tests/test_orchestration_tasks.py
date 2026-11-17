@@ -203,6 +203,23 @@ def test_redelivery_after_completion_is_a_noop(fake_run):
     assert len(fake_run.agent_calls) == 1
 
 
+def test_run_stopped_by_its_engine_stays_cancelled(fake_run):
+    # The engine's cancel (#186) ends run_agent_loop with status "cancelled";
+    # the task must not record that as a failure.
+    fake_run.agent_result = {
+        "status": "cancelled",
+        "error": "Agent loop cancelled by user.",
+        "error_code": "RUN_CANCELLED",
+    }
+
+    result = tasks._execute_agent_run(FakeTask(), **RUN_KWARGS)
+
+    assert result["status"] == "cancelled"
+    assert fake_run.statuses["run-1"] == "cancelled"
+    assert "failed" not in [status for _, status, _ in fake_run.updates]
+    assert fake_run.redis.store == {}  # repo lock released
+
+
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
 def test_terminal_run_is_skipped_without_taking_lock(fake_run, status):
     fake_run.statuses["run-1"] = status
