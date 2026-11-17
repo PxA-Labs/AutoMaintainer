@@ -135,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **readme**: Add a roadmap section ([#528](https://github.com/PxA-Labs/AutoMaintainer/pull/528)) - @purvanshjoshi
 - **readme**: Remove the project status banner ([#520](https://github.com/PxA-Labs/AutoMaintainer/pull/520)) - @purvanshjoshi
 - Correct stale statements about verification and fix a changelog heading ([#463](https://github.com/PxA-Labs/AutoMaintainer/pull/463)) - @purvanshjoshi
 - Describe the system as implemented, retire ISSUES.md, refresh README and SECURITY ([#462](https://github.com/PxA-Labs/AutoMaintainer/pull/462)) (closes [#408](https://github.com/PxA-Labs/AutoMaintainer/issues/408)) - @purvanshjoshi
