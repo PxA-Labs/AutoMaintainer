@@ -1,10 +1,9 @@
 # Metrics, alerts and a dashboard in Cloud Monitoring.
 #
 # The backend writes its OpenTelemetry metrics to Cloud Monitoring when
-# OTEL_CLOUD_MONITORING_ENABLED is true (backend/observability.py). Set it
-# for the API and the worker through var.app_env, e.g.
-#   app_env = { OTEL_CLOUD_MONITORING_ENABLED = "true", ... }
-# Each metric becomes the metric type workload.googleapis.com/<name> on the
+# OTEL_CLOUD_MONITORING_ENABLED is true (backend/observability.py).
+# var.cloud_monitoring_enabled sets it for the API and the worker (main.tf,
+# local.app_env). Each metric becomes the metric type workload.googleapis.com/<name> on the
 # generic_task resource (job = service name, task_id = one process).
 #
 # monitoring.googleapis.com is enabled in main.tf (local.services), and the
@@ -14,8 +13,8 @@
 #
 # Cloud Monitoring refuses an alert policy on a workload metric type that
 # has never been written, so the four application alerts are created only
-# when monitoring_app_alerts_enabled is true: apply once with the switch on
-# in app_env, wait for the first runs (README.md, "Monitoring"), then turn
+# when monitoring_app_alerts_enabled is true: apply once with
+# cloud_monitoring_enabled = true, wait for the first runs (README.md, "Monitoring"), then turn
 # them on. backend/tests/test_gcp_monitoring_config.py checks every filter
 # against the metric catalogue in observability.py.
 
@@ -28,7 +27,7 @@ variable "monitoring_alert_email" {
 }
 
 variable "monitoring_app_alerts_enabled" {
-  description = "Create the alerts on the backend's own metrics (run failure rate, p95 run duration, estimated LLM cost, worker heartbeat). Turn on only after OTEL_CLOUD_MONITORING_ENABLED has written each metric once; Cloud Monitoring refuses a policy on a metric type it has not seen. The Cloud Run 5xx alert does not depend on it."
+  description = "Create the alerts on the backend's own metrics (run failure rate, p95 run duration, estimated LLM cost, worker heartbeat). Turn on only after cloud_monitoring_enabled (OTEL_CLOUD_MONITORING_ENABLED) has written each metric once; Cloud Monitoring refuses a policy on a metric type it has not seen. The Cloud Run 5xx alert does not depend on it."
   type        = bool
   default     = false
 }
@@ -107,9 +106,10 @@ resource "google_monitoring_alert_policy" "run_failure_rate" {
   combiner     = "OR"
 
   conditions {
-    display_name = "failed / all finished runs, last hour"
+    display_name = "failed or timed out / all finished runs, last hour"
     condition_threshold {
-      filter             = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\" AND metric.label.outcome=\"failed\""
+      # A run stopped by the 30-minute limit has outcome "timeout" (tasks.py).
+      filter             = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\" AND metric.label.outcome=monitoring.regex.full_match(\"failed|timeout\")"
       denominator_filter = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\""
       comparison         = "COMPARISON_GT"
       threshold_value    = var.alert_run_failure_rate
@@ -129,7 +129,7 @@ resource "google_monitoring_alert_policy" "run_failure_rate" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "More than ${var.alert_run_failure_rate * 100} % of the agent runs that finished in the last hour failed. With few runs one failure can cross the threshold. Check the failed runs in the dashboard and the worker logs (Logs Explorer, VM instance ${var.name_prefix}-worker)."
+    content   = "More than ${var.alert_run_failure_rate * 100} % of the agent runs that finished in the last hour failed or timed out. With few runs one failure can cross the threshold. Check the failed runs in the dashboard and the worker logs (Logs Explorer, VM instance ${var.name_prefix}-worker)."
   }
 
   notification_channels = google_monitoring_notification_channel.alert_email[*].id

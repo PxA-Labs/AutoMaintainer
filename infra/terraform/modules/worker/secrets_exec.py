@@ -12,6 +12,11 @@ Values never reach the VM's disk or the ``docker run`` command line, and
 multi-line values (a PEM key) are kept intact, which ``--env-file`` cannot
 do. Any failure exits 1 before the command starts (systemd retries), naming
 the variable but never printing a value.
+
+REDIS_URL, when it comes from a secret (Redis AUTH, #532), must be a
+``redis://`` or ``rediss://`` URL that carries a password
+(``redis://:<password>@<host>:<port>/<db>``); anything else stops the start,
+with the reason but not the value.
 """
 
 import base64
@@ -19,7 +24,9 @@ import json
 import os
 import re
 import sys
+from typing import Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 SPEC_ENV = "AUTOMAINTAINER_SECRETS"
@@ -51,6 +58,30 @@ def parse_spec(spec: str) -> list[tuple[str, str]]:
     return pairs
 
 
+REDIS_URL_ENV = "REDIS_URL"
+
+
+def redis_url_problem(value: str) -> Optional[str]:
+    """Why ``value`` is not a Redis URL with a password, or None.
+
+    The reason never quotes the value.
+    """
+    if any(c.isspace() for c in value):
+        return "contains whitespace (add the version with printf '%s', not echo)"
+    try:
+        parts = urlsplit(value)
+        parts.port  # raises ValueError for a port that is not a number
+    except ValueError:
+        return "is not a URL"
+    if parts.scheme not in ("redis", "rediss"):
+        return "is not a redis:// or rediss:// URL"
+    if not parts.hostname:
+        return "has no host"
+    if not parts.password:
+        return "has no password (redis://:<password>@<host>:<port>/<db>)"
+    return None
+
+
 def _get_json(url: str, headers: dict) -> dict:
     with urlopen(Request(url, headers=headers), timeout=TIMEOUT_SECONDS) as resp:
         return json.load(resp)
@@ -79,6 +110,10 @@ def main(argv: list[str]) -> None:
                 _fail(f"{env_name}: Secret Manager answered HTTP {e.code}")
             except (URLError, OSError, KeyError, ValueError) as e:
                 _fail(f"{env_name}: cannot read the secret ({type(e).__name__})")
+            if env_name == REDIS_URL_ENV:
+                problem = redis_url_problem(value)
+                if problem:
+                    _fail(f"{env_name}: the secret {problem}")
             os.environ[env_name] = value
     os.execvp(argv[1], argv[1:])
 

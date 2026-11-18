@@ -379,7 +379,7 @@ choices. Supabase stays the database.
 |---|---|
 | API | Cloud Run service `automaintainer-api`: always 1 instance or more (GitHub allows a webhook 10 seconds), at most `api_max_instances`, public ingress with unauthenticated invocation (GitHub webhooks and the dashboard call it; the app checks Supabase JWTs and webhook signatures itself), startup and liveness probes on `/healthz` |
 | Agent, maintenance and sync workers, beat | One Compute Engine VM (Container-Optimized OS, no public IP, egress through Cloud NAT) running the same image as `celery worker -B` on every queue. One VM, so exactly one beat |
-| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress |
+| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress. Password required (`redis_auth_enabled`, below) |
 | Secrets | Secret Manager, one secret per variable. Cloud Run mounts them as environment variables; on the VM, the container reads them at start with the VM's service account (`modules/worker/secrets_exec.py`) |
 | Images | Artifact Registry, pushed by `.github/workflows/deploy-gcp.yml` through Workload Identity Federation (no key) |
 | Traces | Cloud Trace, when `cloud_trace_enabled = true` (sets `OTEL_CLOUD_TRACE_ENABLED`, below). Only the API emits traces |
@@ -404,13 +404,39 @@ It shares the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and
 is down while the VM restarts, when the worker is down too. Queued tasks
 survive restarts (append-only file on the VM disk). Memorystore is managed
 and keeps the queue up while the worker restarts, but its basic tier has no
-replica either and it costs more than the VM (see the cost table). Neither
-uses AUTH or TLS: only the subnet can reach them (VPC firewall rules, and the
-VM's own firewall for the container), and Celery accepts only JSON messages,
-so a write to the broker cannot become a pickle payload. The subnet includes
-every Cloud Run instance, so a server-side request forgery in the API could
-still reach Redis; a password from Secret Manager (`requirepass`) would be
-cheap defence in depth and is not set up yet.
+replica either and it costs more than the VM (see the cost table). Only the
+subnet can reach them (VPC firewall rules, and the VM's own firewall for the
+container), and Celery accepts only JSON messages, so a write to the broker
+cannot become a pickle payload. The subnet includes every Cloud Run instance,
+so a server-side request forgery in the API could still reach Redis; hence
+Redis AUTH below. Neither uses TLS, so the password crosses the VPC in clear.
+
+**Redis AUTH** (`redis_auth_enabled`, default `true`, #532). Redis requires a
+password, which exists only in Secret Manager. Terraform creates the empty
+secret `redis-url` (no version, so the password is never in the Terraform
+state; a `random_password` would be). The owner adds the full broker URL,
+`redis://:<password>@<redis_address>/0`, as its version (step 3). Then:
+
+- Cloud Run mounts it as `REDIS_URL` once `mount_secrets = true` (before
+  that the API gets the URL without the password, and Redis answers
+  `NOAUTH`, but the API has no other secret yet either);
+- the worker container reads it at start through `secrets_exec.py`, which
+  refuses a value that is not a `redis://` or `rediss://` URL with a password
+  and never prints it;
+- `vm` mode: `run-redis.sh` reads the same secret with the VM's account and
+  starts Redis with `requirepass`, passed on stdin (`redis-server -`), so the
+  password is on no command line and in no `docker inspect` output. Use only
+  `A-Z a-z 0-9 . _ ~ -`, at least 32 characters (`openssl rand -hex 32`), so
+  the URL needs no escaping;
+- `memorystore` mode: the instance has AUTH enabled and Google generates the
+  password (the AUTH string; `gcloud redis instances get-auth-string`).
+  Caveat: the Google provider stores that generated string in the Terraform
+  state (sensitive attribute `auth_string`) and no setting avoids it, so keep
+  the state bucket owner-only.
+
+Until the version exists, the worker and the self-hosted Redis do not start
+(systemd retries every 10-30 seconds). Celery and kombu mask the password
+when they log the broker URL.
 
 **Limitation: the IDE has no clones.** The API on Cloud Run and the agent
 worker on the VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this
@@ -495,6 +521,23 @@ account (Billing Account Administrator, or Costs Manager on it).
    printf '%s' '<client secret>'    | gcloud secrets versions add github-app-client-secret --data-file=- --project $P
    ```
 
+   With `redis_auth_enabled` (the default), add the Redis URL with its
+   password to `redis-url`, from `infra/terraform`. In `vm` mode, generate the
+   password:
+
+   ```bash
+   PW="$(openssl rand -hex 32)"
+   printf 'redis://:%s@%s/0' "$PW" "$(terraform output -raw redis_address)" \
+     | gcloud secrets versions add redis-url --data-file=- --project $P
+   unset PW
+   ```
+
+   In `memorystore` mode, use the AUTH string Google generated instead:
+   `PW="$(gcloud redis instances get-auth-string automaintainer-redis --region us-central1 --project $P --format='value(authString)')"`,
+   then the same `printf` line. Then reset the worker VM
+   (`gcloud compute instances reset automaintainer-worker --zone us-central1-a`)
+   so Redis and the worker start with it.
+
    Do not put the values in shell history on a shared machine (`read -rs`
    into a variable first). Then set `mount_secrets = true`, set
    `ALLOWED_ORIGINS` and `DASHBOARD_URL` in `app_env` to the API URL (it also
@@ -538,7 +581,12 @@ change that touches the worker, run
 `gcloud compute instances reset automaintainer-worker --zone us-central1-a`;
 running tasks are requeued (`acks_late`). A new secret version is read when
 a Cloud Run instance or the worker container starts: redeploy (or reset the
-VM) after rotating a key.
+VM) after rotating a key. To rotate the Redis password in `vm` mode, add a
+new `redis-url` version, reset the VM (Redis and the worker restart with it)
+and deploy a new API revision; the API cannot reach Redis in between. In
+`memorystore` mode Google owns the AUTH string; how to rotate it was not
+checked for this guide (see the Memorystore AUTH documentation). Afterwards,
+update `redis-url` the same way.
 
 ### Sandboxed verification
 
@@ -744,7 +792,7 @@ management fee plus at least one always-on node). It needs a new
 | `GOOGLE_CLOUD_PROJECT` | unset | Project the traces go to. Unset: the project of the credentials. Terraform sets it. |
 
 A failure to set up the exporter (no credentials, package missing) is logged
-and does not stop the API. Metrics are not sent to Google.
+and does not stop the API. Metrics have their own switch, below.
 
 ### Metrics and alerts
 
@@ -753,24 +801,42 @@ and does not stop the API. Metrics are not sent to Google.
 | `OTEL_CLOUD_MONITORING_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a reader that exports the backend's OpenTelemetry metrics to Cloud Monitoring every 60 seconds, next to Prometheus and OTLP (`backend/observability.py`). Credentials and project as for Cloud Trace; the account needs `roles/monitoring.metricWriter` (Terraform grants it to the API and the worker). A missing package or missing credentials is logged once and the process keeps running. |
 | `LLM_PRICES_JSON` | unset | Overrides or extends the built-in LLM price table, e.g. `{"llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79}}` (USD per million tokens). An invalid value is logged once and ignored. |
 
-Set the switch for both services through `app_env` in `terraform.tfvars`
-(`app_env = { OTEL_CLOUD_MONITORING_ENABLED = "true", ... }`): Terraform
-passes `app_env` to Cloud Run and the worker VM. Each metric becomes the
+Turn it on for both services with `cloud_monitoring_enabled = true` in
+`terraform.tfvars`: Terraform sets `OTEL_CLOUD_MONITORING_ENABLED` on Cloud
+Run and on the worker VM (reset the VM after changing it). `app_env` may not
+set the variable itself. Each metric becomes the
 metric type `workload.googleapis.com/<name>` on the `generic_task` resource
 (`job` is `automaintainer-backend` or `automaintainer-worker`, one `task_id`
 per process).
 
 What is exported, all with the bounded labels of the catalogue in
-`observability.py`: runs finished by mode and final status
-(`agent_runs_total`), run duration by final status
-(`agent_run_duration_seconds`, buckets up to an hour), LLM tokens by model,
-phase and kind (`llm_phase_tokens_total`), the **estimated** LLM cost by
-model and phase (`llm_estimated_cost_usd_total`), and one
-`celery_worker_heartbeat` series per live worker process. The cost is an
-estimate: Groq's earlier public list prices, which could not be confirmed
-(the model page shows "Contact sales"); models missing from the table add
-tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices before
-quoting it.
+`observability.py`:
+
+- runs finished, by mode and outcome (`agent_runs_total`), and their
+  duration (`agent_run_duration_seconds`, buckets up to an hour). The worker
+  records both when a run ends (`backend/tasks.py`). The outcome is
+  `completed`, `cancelled`, `failed` or `timeout`: a run stopped by the
+  30-minute limit is stored as `failed` but measured as `timeout`, and the
+  failure-rate alert counts both. A redelivered run that is already finished
+  and a run that gave up waiting for the repository lock are not counted.
+  The duration starts once the run holds the lock;
+- LLM tokens by model, phase and kind (`llm_phase_tokens_total`) and the
+  **estimated** LLM cost by model and phase
+  (`llm_estimated_cost_usd_total`). The worker reads them from the engine's
+  `TelemetryEvent`s (`backend/telemetry_metrics.py`; the SDK package never
+  imports `observability`). The engine reports one token count per LLM call,
+  not split into prompt and completion, so the kind is `total` and the cost
+  is priced at the model's higher (output) rate: an upper bound, at most
+  about a third above the real figure for `llama-3.3-70b-versatile`, so the
+  cost alert fires early rather than late;
+- one `celery_worker_heartbeat` series per live worker process
+  (`celery_app.py` calls `observability.install_celery_worker_hooks()`, so
+  each prefork process sets up its exporter after the fork).
+
+The cost is an estimate: Groq's earlier public list prices, which could not
+be confirmed (the model page shows "Contact sales"); models missing from the
+table add tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices
+before quoting it.
 
 `terraform apply` creates (`infra/terraform/monitoring.tf`):
 
@@ -783,18 +849,14 @@ quoting it.
   estimated LLM cost over the last 24 hours, and the absence of any worker
   heartbeat (thresholds: the `alert_*` variables). Cloud Monitoring refuses a
   policy on a metric type that has never been written, so turn this on only
-  after the switch has been on for a run or two (Metrics Explorer lists the
-  `workload.googleapis.com` types);
+  after `cloud_monitoring_enabled` has been on for a run or two, one of which
+  used the LLM (Metrics Explorer lists the `workload.googleapis.com` types);
 - a dashboard with the same charts (`terraform output monitoring_dashboard_url`).
 
-Not yet wired in this change: the worker exports metrics only once
-`celery_app.py` calls `observability.install_celery_worker_hooks()` at
-import, and the run and token metrics stay empty until the engine calls
-`record_agent_run_complete` and `record_llm_tokens(model, tokens,
-phase=..., kind="input" | "output")`. Until then only the API's HTTP
-metrics and the 5xx alert carry data. With few runs a single failure can
-cross the failure-rate threshold, and at low traffic a few 5xx answers can
-cross the 5xx ratio.
+With few runs a single failure can cross the failure-rate threshold, and at
+low traffic a few 5xx answers can cross the 5xx ratio. The worker exports
+only from the prefork pool (the default); a worker started with `--pool solo`
+or `threads` exports no metrics.
 
 ### Estimated monthly cost
 
@@ -813,7 +875,7 @@ before relying on them.
 | Redis, `vm` mode | on the worker VM | 0 |
 | Redis, `memorystore` mode (instead) | basic tier, 1 GB | ~35 (*uncertain*) |
 | Artifact Registry | 20 kept images of about 1-2 GB each (Node build, Node tools, Python venv), 30-day cleanup | ~2-4 (*uncertain*: image size, layers shared between versions) |
-| Secret Manager | 6 secrets, accesses at instance start | <1 |
+| Secret Manager | 7 secrets (with `redis-url`), accesses at instance start | <1 |
 | Logging, Monitoring, Trace | low volume, within the free allotments | 0 (*uncertain*: log volume) |
 | Internet egress | API responses, GitHub, Groq and Supabase traffic | *uncertain* |
 | **Total** | `vm` mode / `memorystore` mode | **~40-60 / ~75-95** |
