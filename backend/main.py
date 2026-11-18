@@ -1,3 +1,9 @@
+# API startup (#524): load .env and log the GitHub auth mode before any
+# module below reads its settings from the environment at import.
+from github_app import configure_process_environment
+
+configure_process_environment()
+
 from fastapi import (
     FastAPI,
     WebSocket,

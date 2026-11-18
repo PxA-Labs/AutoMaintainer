@@ -18,7 +18,7 @@ Credential modes (env ``GITHUB_AUTH_MODE``):
 
 When ``GITHUB_AUTH_MODE`` is unset the mode is ``app`` if App credentials
 (``GITHUB_APP_ID`` plus a private key) are configured, otherwise ``pat`` with
-a warning logged at import.
+a warning logged at API and worker startup (configure_process_environment).
 """
 
 import os
@@ -46,11 +46,9 @@ from automaintainer.context import active_config, secret_value
 
 logger = logging.getLogger("github_app")  # legacy name, kept for log filters
 
-# agents.py imports this module before its own load_dotenv() runs, so load
-# .env here too or the App credentials below would be read too early.
-load_dotenv()
-
-# GitHub App configuration
+# GitHub App configuration, read from the environment at import and again by
+# configure_process_environment() once .env is loaded. Importing this module
+# (the SDK does) loads no .env file and logs nothing (#524).
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")  # PEM format
 GITHUB_APP_PRIVATE_KEY_PATH = os.getenv(
@@ -151,6 +149,35 @@ def _log_auth_mode_at_startup() -> None:
             "single-tenant deployment; configure the GitHub App "
             "(GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY) for multi-tenant use."
         )
+
+
+_process_environment_configured = False
+
+
+def configure_process_environment() -> None:
+    """Startup of the API (main) and the Celery worker (celery_app) (#524).
+
+    Loads ``.env`` into ``os.environ`` (variables already set win), re-reads
+    this module's App settings from it, and logs the auth mode warning.
+    Both entry points call it before importing the modules that read their
+    settings at import (agents, redis_locks, celery_app's REDIS_URL); it runs
+    once per process, so ``main`` importing ``celery_app`` does not repeat
+    it. This used to run when this module was imported, which made
+    ``import automaintainer`` (via the engine) load a ``.env`` file into the
+    embedding application and print the PAT warning.
+    """
+    global _process_environment_configured
+    global GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PRIVATE_KEY_PATH
+    global GITHUB_WEBHOOK_SECRET
+    if _process_environment_configured:
+        return
+    _process_environment_configured = True
+    load_dotenv()
+    GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
+    GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")
+    GITHUB_APP_PRIVATE_KEY_PATH = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH")
+    GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
+    _log_auth_mode_at_startup()
 
 
 def load_private_key(app: Optional[GitHubAppIdentity] = None) -> str:
@@ -1265,5 +1292,3 @@ __all__ = [
     "generate_app_jwt",
     "verify_webhook_signature",
 ]
-
-_log_auth_mode_at_startup()
