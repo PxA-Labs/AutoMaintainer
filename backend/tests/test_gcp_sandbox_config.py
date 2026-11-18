@@ -299,11 +299,30 @@ def test_job_and_bucket_names_come_from_the_worker_module():
     worker = _read(WORKER_TF)
     assert re.search(r'sandbox_job_name\s*=\s*"\$\{var\.name\}-sandbox"', worker)
     assert re.search(
-        r'sandbox_bucket_name\s*=\s*"\$\{data\.google_client_config\.current\.project\}-\$\{var\.name\}-sandbox"',
+        r'sandbox_bucket_name\s*=\s*"\$\{local\.bucket_safe_project\}-\$\{var\.name\}-sandbox"',
         worker,
     )
     for name in ("sandbox_job_name", "sandbox_bucket_name"):
         assert re.search(rf'output\s+"{name}"', worker), name
+
+
+def test_bucket_name_is_valid_for_a_domain_scoped_project():
+    # A domain-scoped project id ("example.com:proj") contains ":" (never
+    # allowed in a bucket name) and "." (a dotted name needs domain
+    # verification), so both become "-" in the bucket name only.
+    worker = _read(WORKER_TF)
+    m = re.search(r"bucket_safe_project\s*=\s*(.+)", worker)
+    assert m, "bucket_safe_project local"
+    # Terraform's replace() treats a "/.../" pattern as a regular expression.
+    assert re.fullmatch(
+        r'replace\(data\.google_client_config\.current\.project,\s*"/\[:\.\]/",\s*"-"\)\s*',
+        m.group(1),
+    ), m.group(1)
+    # The job still runs in the real project.
+    assert re.search(
+        r"CLOUD_RUN_SANDBOX_PROJECT\s*=\s*data\.google_client_config\.current\.project",
+        worker,
+    )
 
 
 def test_sandbox_outputs_and_variables_live_in_sandbox_tf(sandbox_tf):

@@ -117,8 +117,11 @@ locals {
   # Sandboxed verification (sandbox.tf, #158): the worker runs each test
   # command as one execution of this Cloud Run job. The names are decided
   # here and exported, so sandbox.tf creates exactly what the worker uses.
-  sandbox_job_name    = "${var.name}-sandbox"
-  sandbox_bucket_name = "${data.google_client_config.current.project}-${var.name}-sandbox"
+  sandbox_job_name = "${var.name}-sandbox"
+  # A domain-scoped project id ("example.com:proj") has ":" (never valid in
+  # a bucket name) and "." (a dotted name needs domain verification).
+  bucket_safe_project = replace(data.google_client_config.current.project, "/[:.]/", "-")
+  sandbox_bucket_name = "${local.bucket_safe_project}-${var.name}-sandbox"
 
   worker_env = join("\n", [
     "REGISTRY_HOST=${var.registry_host}",
