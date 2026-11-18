@@ -49,7 +49,13 @@ RUNTIME_MODULES = (
     "verification",
     "workspace",
 )
-RUNNER_SUBMODULES = ("base", "docker_sandbox", "local", "sandbox")
+RUNNER_SUBMODULES = (
+    "base",
+    "cloud_run_job_sandbox",
+    "docker_sandbox",
+    "local",
+    "sandbox",
+)
 # Never loaded by the SDK: the server process and its dependencies.
 SERVER_MODULES = ("main", "tasks", "celery_app", "quotas", "observability")
 SERVER_PACKAGES = ("fastapi", "uvicorn", "celery")
