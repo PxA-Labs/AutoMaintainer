@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **specialists**: Read-only ADK Reviewer behind reviewer_backend (default langgraph) ([#534](https://github.com/PxA-Labs/AutoMaintainer/pull/534)) - @purvanshjoshi
 - **evals**: End-to-end evaluation of the whole engine with oracle, noop, replay and live modes ([#531](https://github.com/PxA-Labs/AutoMaintainer/pull/531)) - @purvanshjoshi
 - **infra**: Deploy to Google Cloud with Terraform, keyless CI and Cloud Trace ([#530](https://github.com/PxA-Labs/AutoMaintainer/pull/530)) - @purvanshjoshi
 - **runs**: Record the run trigger and allow one active run per issue ([#523](https://github.com/PxA-Labs/AutoMaintainer/pull/523)) (closes [#518](https://github.com/PxA-Labs/AutoMaintainer/issues/518)) - @purvanshjoshi
