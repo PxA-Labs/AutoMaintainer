@@ -126,7 +126,18 @@ with deployer credentials, as any deploy pipeline does.
 **Dangerous settings are refused.** `app_env` may not set
 `AUTH_DEV_BYPASS`, `ENABLE_TERMINAL` or `VERIFY_ALLOW_LOCAL`, nor the values
 Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`,
-`OTEL_CLOUD_MONITORING_ENABLED`).
+`OTEL_CLOUD_MONITORING_ENABLED`, and `RAG_INDEXING_ENABLED`,
+`RAG_RETRIEVAL_ENABLED` and `GOOGLE_CLOUD_LOCATION` from `rag_enabled`).
+
+## Code retrieval
+
+`rag_enabled` (default `false`, #526) enables `aiplatform.googleapis.com`,
+grants the worker account `roles/aiplatform.user` (`iam.tf`; the API never
+calls Vertex AI) and adds the three RAG variables to `local.app_env`
+(`GOOGLE_CLOUD_LOCATION` from `rag_location`). The image needs the `rag`
+extra too: the output `github_repository_variables` then lists
+`IMAGE_EXTRAS = "server,rag"` for the deploy workflow. Owner steps:
+docs/DEPLOYMENT.md, "Code retrieval (RAG)"; data egress: docs/RAG.md.
 
 ## Monitoring
 

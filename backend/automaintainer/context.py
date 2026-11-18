@@ -22,11 +22,14 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from pydantic import SecretStr
 
 from .config import AutoMaintainerConfig
+
+if TYPE_CHECKING:  # annotations only: importing this module stays side-effect free
+    from ._runtime.retrieval import RetrievalScope, Retriever
 
 __all__ = [
     "EngineContext",
@@ -47,7 +50,10 @@ class EngineContext:
     ``AutoMaintainerEngine``). ``rate_limiter`` returns the engine's own
     ``RateLimitManager``, built on first use. ``slug_cache`` holds the
     engine's GitHub App slug, so two engines bound to different Apps never
-    share one.
+    share one. ``retriever`` is the optional injected retriever factory
+    (#526): called once per prompt with the run's ``RetrievalScope``, it
+    returns a ``Retriever`` bound to that repository or None (nothing
+    indexed); without it the runtime builds one over ``supabase``.
     """
 
     config: AutoMaintainerConfig
@@ -57,6 +63,7 @@ class EngineContext:
     llm: Optional[Callable[..., Any]] = None
     github: Optional[Callable[..., Any]] = None
     slug_cache: dict = field(default_factory=dict)
+    retriever: Optional[Callable[[RetrievalScope], Optional[Retriever]]] = None
 
 
 current_engine: ContextVar[Optional[EngineContext]] = ContextVar(

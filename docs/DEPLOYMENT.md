@@ -858,6 +858,47 @@ low traffic a few 5xx answers can cross the 5xx ratio. The worker exports
 only from the prefork pool (the default); a worker started with `--pool solo`
 or `threads` exports no metrics.
 
+### Code retrieval (RAG)
+
+Off by default (`rag_enabled = false`). [docs/RAG.md](RAG.md) explains what
+it does; read its [Data egress](RAG.md#data-egress) section first: with it
+on, the code of every repository the App works on is sent to Vertex AI in
+`rag_location`.
+
+`rag_enabled = true` makes `terraform apply`:
+
+- enable `aiplatform.googleapis.com`;
+- grant the worker's service account `roles/aiplatform.user`. Only the
+  worker embeds (indexing on the `maintenance` queue, queries in the agent
+  runs); the API only enqueues runs, so it gets no Vertex AI role;
+- set `RAG_INDEXING_ENABLED=true`, `RAG_RETRIEVAL_ENABLED=true` and
+  `GOOGLE_CLOUD_LOCATION=<rag_location>` (default `us-central1`) in the
+  shared environment (`GOOGLE_CLOUD_PROJECT` is already set). `app_env`
+  refuses these three names; set the variables instead.
+
+The image must also contain the Vertex AI client (the `rag` extra), which the
+default image leaves out. The Dockerfile's `EXTRAS` build arg (default
+`server`) chooses the extras, and the deploy workflow passes the optional
+repository variable `IMAGE_EXTRAS` (`server` when unset).
+
+Owner steps:
+
+1. Apply the `code_chunks` migrations ([Database](#database)).
+2. Set `rag_enabled = true` (and `rag_location` if not `us-central1`) in
+   `terraform.tfvars`, then `terraform apply`.
+3. Set the repository variable `IMAGE_EXTRAS` to `server,rag`, the value in
+   `terraform output github_repository_variables`.
+4. Run the deploy workflow, then reset the worker VM so it reads its new
+   environment (see *Changing configuration later* above).
+5. Check the worker's logs: a repository is indexed when its next run
+   starts (`rag index: ...`, or `rag index of repository ... skipped: ...`),
+   and a failed query is logged as `Code retrieval for the ... prompt
+   failed`; a failure leaves the prompts as with retrieval off.
+
+To turn it off, set `rag_enabled = false`, apply, reset the VM, and set
+`IMAGE_EXTRAS` back to `server` (or delete it) for the next deploy. The
+indexed chunks stay in Supabase until deleted.
+
 ### Estimated monthly cost
 
 Approximate us-central1 list prices for the default settings, in USD. They
@@ -912,6 +953,11 @@ Groq and Supabase are billed by their providers. The budget
 - `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` and
   `NEXT_PUBLIC_BACKEND_URL` are build args, inlined into the static dashboard.
   They are public values. Never pass secrets as build args.
+- `EXTRAS` (build arg, default `server`) lists the backend extras to install,
+  comma-separated: `server` is always installed, `rag` adds the Vertex AI
+  client for code retrieval ([RAG](RAG.md)), `adk` the ADK Reviewer; any
+  other name fails the build. Example:
+  `docker build --build-arg EXTRAS=server,rag .`
 
 ## Environment variables
 

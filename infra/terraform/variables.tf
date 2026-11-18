@@ -187,6 +187,29 @@ variable "cloud_monitoring_enabled" {
   default     = false
 }
 
+# --- Code retrieval (#526, docs/RAG.md) ---------------------------------------
+
+variable "rag_enabled" {
+  description = <<-EOT
+    Code retrieval over the target repositories (docs/RAG.md): enables the
+    Vertex AI API, grants the worker's service account roles/aiplatform.user
+    and sets RAG_INDEXING_ENABLED, RAG_RETRIEVAL_ENABLED and
+    GOOGLE_CLOUD_LOCATION. The image must also be built with the rag extra:
+    set the repository variable IMAGE_EXTRAS to "server,rag" (output
+    github_repository_variables) and redeploy. Apply the code_chunks
+    migration first. With it on, repository code is sent to Vertex AI in
+    rag_location (docs/RAG.md, "Data egress").
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "rag_location" {
+  description = "Vertex AI region the embeddings are computed in (GOOGLE_CLOUD_LOCATION), i.e. where repository code is sent. Used only with rag_enabled."
+  type        = string
+  default     = "us-central1"
+}
+
 # --- Worker (Compute Engine) --------------------------------------------------
 
 variable "worker_machine_type" {
@@ -271,8 +294,10 @@ variable "app_env" {
     GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, ALLOWED_ORIGINS,
     DASHBOARD_URL, MERGE_POLICY (docs/DEPLOYMENT.md lists them). Both get the
     same values, so MERGE_POLICY matches as DEPLOYMENT.md requires. ENVIRONMENT,
-    REDIS_URL and OTEL_CLOUD_MONITORING_ENABLED (cloud_monitoring_enabled) are
-    set by this configuration. Secrets go in var.secrets.
+    REDIS_URL, OTEL_CLOUD_MONITORING_ENABLED (cloud_monitoring_enabled) and
+    RAG_INDEXING_ENABLED, RAG_RETRIEVAL_ENABLED and GOOGLE_CLOUD_LOCATION
+    (rag_enabled, rag_location) are set by this configuration. Secrets go in
+    var.secrets.
     Refused: AUTH_DEV_BYPASS (never in a deployment), ENABLE_TERMINAL (the
     API is public) and VERIFY_ALLOW_LOCAL (runs untrusted repository code on
     the worker; stays off until sandboxed verification lands, #527).
@@ -292,6 +317,16 @@ variable "app_env" {
     # Set from cloud_monitoring_enabled, which would silently replace it.
     condition     = !contains(keys(var.app_env), "OTEL_CLOUD_MONITORING_ENABLED")
     error_message = "Set cloud_monitoring_enabled instead of OTEL_CLOUD_MONITORING_ENABLED in app_env."
+  }
+
+  validation {
+    # Set from rag_enabled and rag_location, together with the Vertex AI
+    # role and API they need.
+    condition = alltrue([
+      for k in ["RAG_INDEXING_ENABLED", "RAG_RETRIEVAL_ENABLED", "GOOGLE_CLOUD_LOCATION"] :
+      !contains(keys(var.app_env), k)
+    ])
+    error_message = "Set rag_enabled and rag_location instead of RAG_INDEXING_ENABLED, RAG_RETRIEVAL_ENABLED or GOOGLE_CLOUD_LOCATION in app_env."
   }
 
   validation {

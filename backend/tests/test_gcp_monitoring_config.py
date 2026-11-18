@@ -246,7 +246,7 @@ def test_the_switch_reaches_the_api_and_the_worker():
     # environment main.tf hands to the worker module, and run.tf builds the
     # API's environment on top of it.
     main = _tf("main.tf")
-    app_env = _block(main, r"app_env\s*=\s*merge\(var\.app_env,\s*")
+    app_env = _block(main, r"app_env\s*=\s*merge\(\s*var\.app_env,\s*")
     assert re.search(
         r'OTEL_CLOUD_MONITORING_ENABLED\s*=\s*var\.cloud_monitoring_enabled\s*\?\s*"true"\s*:\s*"false"',
         app_env,
