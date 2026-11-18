@@ -218,6 +218,44 @@ def metric_views() -> list:
     ]
 
 
+# --- Cloud Trace (#527) ---
+# OTEL_CLOUD_TRACE_ENABLED=true adds a span exporter that sends the traces
+# above to Google Cloud Trace, next to (not instead of) the console and OTLP
+# exporters. Off by default. The exporter authenticates with application
+# default credentials (on Cloud Run: the service's own service account, which
+# needs roles/cloudtrace.agent) and uses GOOGLE_CLOUD_PROJECT when set, else
+# the project those credentials belong to. Metrics are not sent to Google.
+CLOUD_TRACE_ENV = "OTEL_CLOUD_TRACE_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def cloud_trace_enabled() -> bool:
+    """True only when OTEL_CLOUD_TRACE_ENABLED is 1, true, yes or on."""
+    return os.getenv(CLOUD_TRACE_ENV, "").strip().lower() in _TRUTHY
+
+
+def _configure_cloud_trace(tracer_provider) -> bool:
+    """Add a batched Cloud Trace span exporter; never raises.
+
+    The exporter package is imported here, not at module import, so a missing
+    or broken package disables only this exporter and not the whole
+    OpenTelemetry setup (see test_observability_imports.py).
+    """
+    try:
+        from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        kwargs = {"project_id": project_id} if project_id else {}
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(CloudTraceSpanExporter(**kwargs))
+        )
+    except Exception as e:  # ImportError, or no application default credentials
+        logger.error(f"Failed to configure the Cloud Trace exporter: {e}")
+        return False
+    logger.info("Cloud Trace span exporter configured")
+    return True
+
+
 # Global state
 _tracer_provider = None
 _meter_provider = None
@@ -231,9 +269,12 @@ def init_observability(
     otlp_endpoint: Optional[str] = None,
     enable_console_export: bool = True,
     enable_prometheus: bool = True,
+    enable_cloud_trace: Optional[bool] = None,
 ) -> None:
     """
     Initialize OpenTelemetry observability stack.
+
+    ``enable_cloud_trace`` defaults to the OTEL_CLOUD_TRACE_ENABLED switch.
     """
     global _tracer_provider, _meter_provider, _initialized
 
@@ -273,6 +314,11 @@ def init_observability(
                 logger.info(f"OTLP trace exporter configured: {otlp_endpoint}")
             except Exception as e:
                 logger.error(f"Failed to configure OTLP trace exporter: {e}")
+
+        if enable_cloud_trace is None:
+            enable_cloud_trace = cloud_trace_enabled()
+        if enable_cloud_trace:
+            _configure_cloud_trace(_tracer_provider)
 
         trace.set_tracer_provider(_tracer_provider)
 

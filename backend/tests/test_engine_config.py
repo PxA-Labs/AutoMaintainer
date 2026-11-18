@@ -727,6 +727,8 @@ NOT_COVERED = {
     "WORKER_PING_CACHE_SECONDS": "API /start probe of the workers",
     "AGENT_WORKER_CHECK": "API /start probe of the workers",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "observability exporter of the API process",
+    "OTEL_CLOUD_TRACE_ENABLED": "Cloud Trace exporter switch of the API process",
+    "GOOGLE_CLOUD_PROJECT": "project the Cloud Trace exporter writes to",
     # API server, authentication and dashboard.
     "ENVIRONMENT": "deployment-wide production gates of the API",
     "AUTH_DEV_BYPASS": "API authentication (local development only)",
