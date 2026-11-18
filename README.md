@@ -98,7 +98,7 @@ measured on live models.
 ## Development & Local Setup
 
 ### 1. Prerequisites
-- [Node.js](https://nodejs.org/en/) (v22.18+; the gitnexus CLI requires `^22.18 || >=24.11`)
+- [Node.js](https://nodejs.org/en/) (22.18 or later in the 22 line, or 24.11 or later; the gitnexus CLI requires `^22.18 || >=24.11`)
 - [Python](https://www.python.org/) (3.11+)
 - [uv](https://docs.astral.sh/uv/) (backend dependencies; CI uses 0.13.8)
 - A [Groq API Key](https://console.groq.com/keys)

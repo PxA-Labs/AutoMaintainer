@@ -210,9 +210,11 @@ These gaps are tracked in the security and safe-pipeline epics
 Google Cloud deployment issue
 ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)):
 
-- No sandbox backend is configured by default. Until an operator sets
-  `SANDBOX_BACKEND`, verification reports an error and `MERGE_POLICY=ci`
-  does not merge.
+- Outside Google Cloud, no sandbox backend is configured by default. Until
+  an operator sets `SANDBOX_BACKEND`, verification reports an error and
+  `MERGE_POLICY=ci` does not merge. The Google Cloud worker always uses the
+  Cloud Run Jobs sandbox, and verification reports an error there until
+  `sandbox_image` points at an image with `python3`.
 - The Cloud Run Jobs sandbox can still reach Google APIs through Private
   Google Access, so a test could upload the repository it was given. Only
   VPC Service Controls would close this (see

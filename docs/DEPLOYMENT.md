@@ -1005,7 +1005,7 @@ default image leaves out.
 Owner steps:
 
 1. Run the Vertex recall check described in
-   [RAG.md, Evaluation](RAG.md#evaluation) before turning retrieval on.
+   [RAG.md, Offline evaluation](RAG.md#offline-evaluation) before turning retrieval on.
 2. Apply the `code_chunks` migrations ([Database](#database)).
 3. Set `rag_enabled = true` (and `rag_location` if not `us-central1`) in
    `terraform.tfvars`, then `terraform apply`.

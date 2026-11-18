@@ -1078,7 +1078,7 @@ in the linked document.
 | GitHub credentials | Installation tokens per repository; never written to `.git/config` or argv; bound per run in a `ContextVar` ([GitHub authentication](#github-authentication)). |
 | Verification | Untrusted test commands run only in a sandbox backend; host execution needs an explicit opt-in ([Verification and sandbox backends](#verification-and-sandbox-backends), [docs/VERIFICATION.md, Security model](./docs/VERIFICATION.md#security-model)). |
 | ADK Reviewer | Read-only tools confined to a checkout at the PR head; fixed budgets; every failure is a rejection ([Specialists](#specialists)). |
-| Code retrieval | Org-scoped RLS and an org-filtered search function; credential-named files never indexed; retrieved chunks are untrusted data; code is sent to Vertex AI only when enabled ([docs/RAG.md, Tenancy](./docs/RAG.md#tenancy)). |
+| Code retrieval | Org-scoped RLS and an org-filtered search function; credential-named files never indexed; retrieved chunks are untrusted data; code is sent to Vertex AI only when enabled ([docs/RAG.md, Schema and row-level security](./docs/RAG.md#schema-and-row-level-security)). |
 | Database | RLS on every table; the backend's service-role key bypasses it, so routes filter by `org_id` ([Data model (Supabase)](#data-model-supabase)). |
 | Redis | JSON-only Celery messages; on Google Cloud, a password from Secret Manager (`redis_auth_enabled`, default `true`) but no TLS ([docs/DEPLOYMENT.md, Option D](./docs/DEPLOYMENT.md#option-d-google-cloud-terraform)). |
 | Web IDE and terminal | IDE writes never reach the default or a protected branch; per-user views; the terminal is off by default and is not a sandbox ([Web IDE, inline assist and terminal](#web-ide-inline-assist-and-terminal)). |
@@ -1108,8 +1108,8 @@ ship switched off. A deployment that changes nothing behaves as before.
 
 Some steps cannot be done in code: they need credentials, a live project, or
 they cost money. The order and the commands are in
-[docs/DEPLOYMENT.md, Owner steps](./docs/DEPLOYMENT.md#owner-steps),
-[docs/RAG.md, Owner actions](./docs/RAG.md#owner-actions-before-this-is-used)
+[docs/DEPLOYMENT.md, Option D](./docs/DEPLOYMENT.md#option-d-google-cloud-terraform),
+[docs/RAG.md, Owner steps](./docs/RAG.md#owner-steps)
 and issue #532. As of this writing, none of the following has been run:
 
 - the first `terraform apply`, the secret values (including `redis-url`) and
