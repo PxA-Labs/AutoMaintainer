@@ -58,6 +58,7 @@ flowchart LR
 | Redis | `backend/celery_app.py`, `backend/automaintainer/_runtime/redis_locks.py`, `backend/quotas.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
 | Supabase | `supabase_schema.sql` | Postgres with Row Level Security, Auth (GitHub OAuth), and Realtime for live logs. |
 | Dashboard | `dashboard/` | Next.js 16 static export: run control, live logs, run history, admin page, Monaco-based Web IDE, terminal client. |
+| Retrieval index (not wired into prompts yet) | `backend/automaintainer/_runtime/retrieval.py`, `backend/rag_tasks.py` | Function-level code chunks embedded with Vertex AI into the pgvector `code_chunks` table (org-scoped RLS), searched through `match_code_chunks`; indexing runs on the `maintenance` queue only when `RAG_INDEXING_ENABLED` is set. See [`docs/RAG.md`](./docs/RAG.md). |
 | GitNexus | `backend/automaintainer/_runtime/agents.py`, `backend/main.py` | The worker indexes each clone with `gitnexus analyze` / `gitnexus index` and gives the LLM GitNexus tools over MCP (stdio). The API also starts `gitnexus serve` at startup. Every GitNexus step is best-effort; on failure the agents use a plain completion. |
 
 The API and the `agent_runs` worker must share the workspace directory: the
@@ -336,6 +337,32 @@ silent fallback on the tool path. Source: `backend/automaintainer/_runtime/agent
   on the 429 retry path.
 - If no LLM path answers, the node raises `PipelineAbortError`, so error text
   never ends up in issues, commits or reviews.
+
+### Specialists
+
+Source: `backend/automaintainer/_specialists/`. Design:
+[docs/design/adk-specialist-agents.md](docs/design/adk-specialist-agents.md)
+(#525). A specialist is a read-only, tool-using agent that one graph node
+calls with a typed request; LangGraph keeps run state, cancellation, the
+retry loop, the trust gate, merge policy and every GitHub write.
+
+The only one so far is the **ADK Reviewer** (`reviewer_adk.py`), built with
+Google's Agent Development Kit and selected with
+`reviewer_backend="adk"` (`REVIEWER_BACKEND`; default `langgraph`, the
+single-shot review above; `adk` needs the `adk` extra and never falls back).
+It replaces only the review call in `maintainer_node` and returns the same
+`MaintainerDecision`. Per review it builds a fresh agent and session with the
+Maintainer's routed model and a key from the engine's rate limiter, and
+gives the model four read-only tools (`tools.py`: diff, file, ripgrep search,
+verification log) over a temporary checkout of the PR at its head SHA. Tool
+results reach the model as `<untrusted-data>`. Budgets (8 tool calls, a
+token cap, a timeout), errors, a run stop and an answer that is invalid
+after one retry all end in a rejection; a cancelled task propagates. Each
+review is a `specialist.reviewer` span with `specialist.tool` children (from
+the OpenTelemetry API, never the server's `observability` module) and
+one `TelemetryEvent` for its tokens. It calls the provider through ADK, not
+through an engine's injected `llm` transport, and with no PR it always
+rejects (the LangGraph review still reviews the generated code).
 
 ### Engine configuration
 

@@ -49,7 +49,10 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16
+        # PostgreSQL 16 with the pgvector extension, which the code_chunks
+        # migration (#526) creates; the official postgres:16 image lacks it.
+        # Pinned by digest (multi-arch index of the 0.8.6-pg16 tag).
+        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           # Throwaway service container reachable only from this job; trust
           # auth avoids committing even a dummy password.

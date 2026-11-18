@@ -98,6 +98,7 @@ TENANT_TABLES = {
     "verification_results": "org_id",
     "merge_decisions": "org_id",
     "repository_merge_policy_changes": "org_id",
+    "code_chunks": "org_id",
 }
 
 # Tables clients may never write: the backend writes them with the service
@@ -112,6 +113,7 @@ SERVICE_WRITTEN_TABLES = [
     "verification_results",
     "merge_decisions",
     "repository_merge_policy_changes",
+    "code_chunks",
 ]
 
 # webhook_events is internal: no client may read it, even in its own org.
@@ -212,6 +214,18 @@ def _insert_row(table: str, tenant: Tenant, user_id: uuid.UUID):
             "new_policy": "human",
             "changed_by": user_id,
         },
+        "code_chunks": {
+            "org_id": tenant.org_id,
+            "repository_id": tenant.repository_id,
+            "commit_sha": "c" * 40,
+            "path": f"forged-{uuid.uuid4().hex[:8]}.py",
+            "start_line": 1,
+            "end_line": 1,
+            "content": "def f(): pass",
+            "content_sha": "0" * 64,
+            # pgvector text form; the untyped literal is cast to vector(768).
+            "embedding": "[" + ",".join(["0.5"] * 768) + "]",
+        },
     }
     row = rows[table]
     statement = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -286,6 +300,7 @@ def _seed(conn):
                 "verification_results",
                 "merge_decisions",
                 "repository_merge_policy_changes",
+                "code_chunks",
             ):
                 cur.execute(*_insert_row(table, tenant, tenant.owner))
         # A pending invite: a membership row that has not been accepted yet.

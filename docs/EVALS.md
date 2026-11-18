@@ -567,6 +567,56 @@ replay it with `--mode replay --cassettes evals/e2e/cassettes/<name>
 - 24 tasks plus 27 Reviewer cases at 3 repeats is about 150 runs and up to
   ~700 model calls; use `--tasks`/`--cases` subsets to bound cost.
 
+### Comparing Reviewer backends (#525)
+
+`--reviewer-backend langgraph|adk` selects who reviews in the maintainer
+node: the single-shot prompt (`langgraph`, the default) or the ADK Reviewer
+(`adk`, see [the design note](design/adk-specialist-agents.md)). The default
+leaves every run, replay and gate exactly as before, and the report records
+the backend under `metadata.engine.reviewer_backend`. `adk` is accepted in
+`--mode live` only: the ADK Reviewer calls its model itself, not through the
+harness transport, so there is nothing to replay and offline it would reach
+a provider with the offline key.
+
+Before comparing, run the spike (`python -m evals.spike_adk_groq`, see the
+design note) and record GO. Then, from `backend/`, with a dedicated
+evaluation key and the same model for both backends:
+
+```bash
+uv sync --frozen --group dev --extra server --extra adk
+export GROQ_API_KEY=...   # read the live-mode cautions above first
+for backend in langgraph adk; do
+  uv run --frozen python -m evals.e2e.run --mode live --suite reviewer \
+    --repeats 3 --reviewer-backend "$backend" \
+    --out "e2e-reviewer-$backend.json"
+done
+```
+
+At least 3 repeats (the live default); more narrow the spread. Read
+`reviewer.summary.overall` in each JSON report:
+
+- `false_approval_rate`: mean ± standard deviation over the repeats, each
+  repeat over the 14 defective cases. This is the number that decides.
+  Compare it with the fixture baseline, the committed replay's **3/14
+  (0.214)** false approvals with the `langgraph` backend (synthetic, from the
+  rubber-stamp mix, so it is the harness's reference, not a model's), and
+  above all with the `langgraph` live run of the same model, day and key.
+- `false_rejection_rate` over the 13 correct cases, the same way.
+- `latency_s` per run. Fix iterations per run come from the pipeline suite:
+  run `--suite pipeline` with each backend and compare `fix_iterations`.
+- Cost: the report's token and cost columns count the calls made through
+  the harness transport, so with `adk` they leave out the Reviewer's own
+  calls (its runs show `llm_calls` 0). The ADK review's tokens are in the
+  run's `TelemetryEvent` (`tokens_used`), which this report does not read
+  yet; until it does, take them from the provider's usage page for the
+  evaluation key. For the Gemini fallback pass `--prices` with its prices.
+
+With 14 defective cases one approval moves the rate by 0.071, so treat a
+difference smaller than the two spreads as no difference. The design
+note's rule: enable `adk` only if its false-approval mean is not worse
+than the `langgraph` live mean and at least one other figure improves;
+otherwise keep the default and record the numbers in #525.
+
 ### CI
 
 Pull requests that touch `backend/evals/**` (and the other paths of the

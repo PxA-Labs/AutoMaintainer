@@ -44,6 +44,7 @@ RUNTIME_MODULES = (
     "merge_policy",
     "rate_limiter",
     "redis_locks",
+    "retrieval",
     "trust",
     "verification",
     "workspace",
