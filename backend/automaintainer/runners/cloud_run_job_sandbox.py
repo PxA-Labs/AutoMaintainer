@@ -27,15 +27,25 @@ one execution of a Cloud Run job that ``infra/terraform/sandbox.tf`` creates:
 5. the worker polls the execution, reads the capped result, and checks that
    it agrees with the task's own outcome as Cloud Run saw it (exit code 0
    if and only if the task succeeded);
-6. on timeout, error or cancellation the execution is cancelled, and in
-   every case both objects are deleted. The bucket's 1-day lifecycle rule
-   removes whatever a crashed worker leaves behind.
+6. on timeout, error or cancellation the execution is cancelled (also when
+   the cancellation arrived while the run request was in flight: cleanup
+   waits for that request to learn the execution's name), and in every case
+   both objects are deleted. Cleanup runs in its own task with one
+   ``CLEANUP_TIMEOUT`` budget for all its calls, so a second cancellation
+   (verification's own ``wait_for``) does not cut it short. The task timeout
+   and the bucket's 1-day lifecycle rule remove whatever a crashed worker
+   leaves behind.
 
 Timing: the command gets ``timeout`` seconds inside the job; the worker
 waits ``timeout + start_seconds`` (``CLOUD_RUN_SANDBOX_START_SECONDS``,
-default 20) counted from the start of packing, so a cold start does not eat
-the test's own budget. verification.py stops waiting 30 seconds after the
-timeout, so keep ``start_seconds`` below that.
+default and maximum 20) counted from the start of packing, so a cold start
+does not eat the test's own budget, then cleans up for at most
+``CLEANUP_TIMEOUT`` (8) seconds. Both fit in the 30 seconds verification.py
+waits after the timeout.
+
+Known gap: a run request that fails on the worker's side (a dropped
+connection) after Cloud Run already created the execution leaves that
+execution unknown, so it is not cancelled; its task timeout ends it.
 
 All Google API calls go through a small client (``CloudRunJobClient``); the
 default, ``GcpRestClient``, calls the REST APIs (Cloud Run Admin v2, Cloud
@@ -86,9 +96,10 @@ from .local import _to_argv
 logger = logging.getLogger(__name__)
 
 DEFAULT_START_SECONDS = 20
-# Upper bound for CLOUD_RUN_SANDBOX_START_SECONDS: beyond verification's own
-# 30-second grace the worker would be cancelled before giving up itself.
-MAX_START_SECONDS = 25
+# Upper bound for CLOUD_RUN_SANDBOX_START_SECONDS: the worker's deadline plus
+# cleanup (start_seconds + CLEANUP_TIMEOUT) must stay within verification's
+# own 30-second grace, or verification gives up first.
+MAX_START_SECONDS = 20
 # Added to the task timeout so the platform, not only the worker, ends a run
 # whose worker died: start, download and upload happen inside the task too.
 TASK_TIMEOUT_MARGIN = 60
@@ -98,8 +109,8 @@ SIGNED_URL_MARGIN = 300
 MAX_SIGNED_URL_SECONDS = 7 * 24 * 3600
 # Seconds between execution status reads.
 POLL_INTERVAL = 2.0
-# Seconds allowed for each cleanup call (cancel, delete).
-CLEANUP_TIMEOUT = 10
+# Seconds allowed for all of cleanup (cancel, both deletes), run concurrently.
+CLEANUP_TIMEOUT = 8
 # Room for the JSON header in front of the output tail in the result object.
 RESULT_HEADER_BYTES = 1024
 # Exit codes the entrypoint uses for itself, as `docker run` and timeout(1) do.
@@ -377,6 +388,9 @@ class CloudRunJobClient(Protocol):
 @dataclass
 class _Run:
     prefix: str
+    # The run_job request, kept so cleanup can learn the execution's name
+    # when a cancellation arrived while it was in flight.
+    starting: Optional[asyncio.Future] = None
     execution: Optional[str] = None
     finished: bool = False
 
@@ -470,19 +484,22 @@ class CloudRunJobSandbox(DockerSandbox):
             deadline = started + timeout + self.config.start_seconds
             run = _Run(prefix=OBJECT_PREFIX + secrets.token_hex(16) + "/")
             client = self._client or GcpRestClient(self.config)
-            async with client:
-                try:
-                    return await asyncio.wait_for(
-                        self._execute(client, run, argv, timeout, archive),
-                        deadline - loop.time(),
-                    )
-                except asyncio.TimeoutError:
-                    raise CommandTimeoutError(
-                        f"sandboxed command did not finish within {timeout:g} "
-                        f"seconds (+{self.config.start_seconds}s to start the job)"
-                    ) from None
-                finally:
-                    await self._cleanup(client, run)
+            await client.__aenter__()
+            try:
+                return await asyncio.wait_for(
+                    self._execute(client, run, argv, timeout, archive),
+                    deadline - loop.time(),
+                )
+            except asyncio.TimeoutError:
+                raise CommandTimeoutError(
+                    f"sandboxed command did not finish within {timeout:g} "
+                    f"seconds (+{self.config.start_seconds}s to start the job)"
+                ) from None
+            finally:
+                # Cleanup (which also closes the client) is its own task: a
+                # cancellation of this coroutine stops waiting for it but
+                # does not interrupt it.
+                await _shielded(self._cleanup(client, run))
         finally:
             archive.close()
 
@@ -513,11 +530,14 @@ class CloudRunJobSandbox(DockerSandbox):
             MAX_OUTPUT_ENV: str(limit),
             OUTPUT_RANGE_ENV: size_range,
         }
-        run.execution = await client.run_job(
-            [*ENTRYPOINT_ARGS, *argv],
-            env,
-            seconds + self.config.start_seconds + TASK_TIMEOUT_MARGIN,
+        run.starting = asyncio.ensure_future(
+            client.run_job(
+                [*ENTRYPOINT_ARGS, *argv],
+                env,
+                seconds + self.config.start_seconds + TASK_TIMEOUT_MARGIN,
+            )
         )
+        run.execution = await asyncio.shield(run.starting)
         while True:
             status = await client.get_execution(run.execution)
             if status.done:
@@ -561,21 +581,65 @@ class CloudRunJobSandbox(DockerSandbox):
         return code, body.decode("utf-8", errors="replace"), note
 
     async def _cleanup(self, client: CloudRunJobClient, run: _Run) -> None:
-        """Cancel an unfinished execution, then delete both objects. Failures
-        are logged, never raised: they must not hide the run's result. The
-        task timeout and the bucket lifecycle rule are the backstops."""
-        if run.execution and not run.finished:
+        """Cancel an unfinished execution and delete both objects, within one
+        CLEANUP_TIMEOUT, then close the client. The input is deleted at
+        once; the output only after the cancel, so a job still running
+        cannot write it again afterwards. Failures are logged, never
+        raised: they must not hide the run's result. The task timeout and
+        the bucket lifecycle rule are the backstops."""
+
+        async def delete(name: str) -> None:
             try:
-                await asyncio.wait_for(
-                    client.cancel_execution(run.execution), CLEANUP_TIMEOUT
-                )
-            except Exception as e:
-                logger.warning("could not cancel %s: %s", run.execution, e)
-        for name in (run.input_name, run.output_name):
-            try:
-                await asyncio.wait_for(client.delete_object(name), CLEANUP_TIMEOUT)
+                await client.delete_object(name)
             except Exception as e:
                 logger.warning("could not delete sandbox object %s: %s", name, e)
+
+        async def stop_then_delete_output() -> None:
+            if run.execution is None and run.starting is not None:
+                try:
+                    run.execution = await run.starting
+                except Exception:
+                    pass  # the run request failed: no execution to cancel
+            if run.execution and not run.finished:
+                try:
+                    await client.cancel_execution(run.execution)
+                except Exception as e:
+                    logger.warning("could not cancel %s: %s", run.execution, e)
+            await delete(run.output_name)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(stop_then_delete_output(), delete(run.input_name)),
+                CLEANUP_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "sandbox cleanup of %s did not finish within %ss (execution %s)",
+                run.prefix,
+                CLEANUP_TIMEOUT,
+                run.execution or "unknown",
+            )
+        finally:
+            if run.starting is not None and not run.starting.done():
+                run.starting.cancel()
+            try:
+                await client.__aexit__(None, None, None)
+            except Exception as e:
+                logger.warning("could not close the sandbox client: %s", e)
+
+
+# Cleanup tasks still running after the exec_command that started them was
+# cancelled; kept so they are not garbage collected mid-flight.
+_CLEANUPS: "set[asyncio.Task[None]]" = set()
+
+
+async def _shielded(coro: Awaitable[None]) -> None:
+    """Await ``coro`` in its own task, which cancelling the caller leaves
+    running."""
+    task = asyncio.ensure_future(coro)
+    _CLEANUPS.add(task)
+    task.add_done_callback(_CLEANUPS.discard)
+    await asyncio.shield(task)
 
 
 # --- Google REST APIs -----------------------------------------------------------

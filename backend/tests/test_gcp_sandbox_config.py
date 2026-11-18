@@ -85,6 +85,21 @@ def test_job_runs_the_entrypoint_once_as_the_sandbox_account(sandbox_tf):
     assert re.search(r"subnetwork\s*=\s*google_compute_subnetwork\.sandbox\.id", vpc)
 
 
+# A member naming the sandbox account by its address instead of the resource:
+# "serviceAccount:x-sandbox@p.iam...", "serviceAccount:${var.name_prefix}-sandbox@...".
+_SANDBOX_SA_LITERAL = re.compile(r"serviceAccount:[^\"\s]*-sandbox@")
+
+
+def _bindings_granting_the_sandbox_account(tf):
+    """IAM resources whose body names the job's service account, by
+    reference or by its email address."""
+    return sorted(
+        name
+        for name, body in _resources(tf, r"google_\w*iam\w*").items()
+        if "google_service_account.sandbox" in body or _SANDBOX_SA_LITERAL.search(body)
+    )
+
+
 def test_job_service_account_has_no_role_anywhere():
     tf = _all_tf()
     # The account is used once, as the job's identity, and is never a member
@@ -92,13 +107,31 @@ def test_job_service_account_has_no_role_anywhere():
     assert 'resource "google_service_account" "sandbox"' in tf
     uses = re.findall(r"google_service_account\.sandbox\.(\w+)", tf)
     assert set(uses) == {"email"}
-    bindings = _resources(tf, r"google_\w*iam\w*")
-    assert bindings
-    for name, body in bindings.items():
-        assert "google_service_account.sandbox" not in body, name
+    assert _resources(tf, r"google_\w*iam\w*")
+    assert _bindings_granting_the_sandbox_account(tf) == []
     project_bindings = r"google_project_iam_(?:member|binding|policy)"
     for name, body in _resources(tf, project_bindings).items():
         assert "sandbox" not in body, name
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "google_service_account.sandbox.member",
+        '"serviceAccount:${google_service_account.sandbox.email}"',
+        '"serviceAccount:${var.name_prefix}-sandbox@${var.project}.iam.gserviceaccount.com"',
+        '"serviceAccount:am-sandbox@proj.iam.gserviceaccount.com"',
+    ],
+)
+def test_the_no_role_check_catches_a_binding_by_address(member):
+    tf = (
+        'resource "google_storage_bucket_iam_member" "leak" {\n'
+        "  bucket = google_storage_bucket.sandbox.name\n"
+        '  role   = "roles/storage.objectAdmin"\n'
+        f"  member = {member}\n"
+        "}\n"
+    )
+    assert _bindings_granting_the_sandbox_account(tf) != []
 
 
 # --- network ------------------------------------------------------------------

@@ -505,6 +505,103 @@ async def test_cancellation_cancels_the_execution_and_deletes_objects(repo):
     assert sorted(client.deleted) == sorted(n for n, *_ in client.signed)
 
 
+async def test_cancellation_while_starting_still_cancels_the_execution(repo):
+    # The outer wait_for fires while run_job's request is in flight: the
+    # execution it creates must still be cancelled once its name is known.
+    client = FakeClient(hang=True)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_run_job(args, env, task_timeout_seconds):
+        # Cleanup may already have deleted the input: a real job reads it
+        # only later, so this stand-in does not read it at all.
+        started.set()
+        await release.wait()
+        client.events.append("run")
+        return EXECUTION
+
+    client.run_job = slow_run_job
+    task = asyncio.ensure_future(
+        sandbox(repo, client).exec_command(["sleep", "999"], timeout=60)
+    )
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client.cancelled == [EXECUTION]
+    assert sorted(client.deleted) == sorted(n for n, *_ in client.signed)
+    assert client.exited == 1
+
+
+async def test_cleanup_is_not_cut_short_by_a_second_cancellation(repo):
+    # verification.py's own wait_for may fire while cleanup is running; the
+    # cancel and both deletes still happen, and the client is closed after.
+    config = CloudRunJobSandboxConfig(**{**CONFIG.__dict__, "start_seconds": 0})
+    client = FakeClient(hang=True)
+    in_cleanup = asyncio.Event()
+    real_cancel = client.cancel_execution
+
+    async def slow_cancel(execution):
+        in_cleanup.set()
+        await asyncio.sleep(0.2)
+        await real_cancel(execution)
+
+    client.cancel_execution = slow_cancel
+    task = asyncio.ensure_future(
+        sandbox(repo, client, config).exec_command(["sleep", "999"], timeout=0.1)
+    )
+    await asyncio.wait_for(in_cleanup.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if client.exited:
+            break
+        await asyncio.sleep(0.01)
+    assert client.cancelled == [EXECUTION]
+    assert sorted(client.deleted) == sorted(n for n, *_ in client.signed)
+    assert client.exited == 1
+
+
+async def test_cleanup_has_one_budget_for_all_its_calls(monkeypatch, repo):
+    # Every cleanup call hangs: cleanup still ends after one CLEANUP_TIMEOUT,
+    # not one per call, and the input archive is deleted alongside the cancel.
+    monkeypatch.setattr(crj, "CLEANUP_TIMEOUT", 0.5)
+    config = CloudRunJobSandboxConfig(**{**CONFIG.__dict__, "start_seconds": 0})
+    client = FakeClient(hang=True)
+    real_delete = client.delete_object
+
+    async def hang(*args):
+        await asyncio.sleep(3600)
+
+    async def delete(name):
+        if name.endswith("workspace.tar"):
+            return await real_delete(name)
+        await hang()
+
+    client.cancel_execution = hang
+    client.delete_object = delete
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(CommandTimeoutError):
+        await sandbox(repo, client, config).exec_command(["sleep", "999"], timeout=0.1)
+    # 0.1 s timeout plus one 0.5 s budget; one budget per call would be 1.1 s.
+    assert loop.time() - started < 0.95
+    assert client.deleted == [client._signed_name("GET")]
+    assert client.exited == 1
+
+
+def test_start_allowance_leaves_room_for_cleanup_within_verifications_grace():
+    # verification.py waits timeout + 30 s; the worker's own deadline plus
+    # cleanup must fit in that, or cleanup is the part that gets cut off.
+    assert crj.MAX_START_SECONDS + crj.CLEANUP_TIMEOUT < 30
+    with pytest.raises(RunnerError, match="CLOUD_RUN_SANDBOX_START_SECONDS"):
+        CloudRunJobSandboxConfig.from_env(
+            _full_env(CLOUD_RUN_SANDBOX_START_SECONDS=str(crj.MAX_START_SECONDS + 1))
+        )
+
+
 async def test_timeout_inside_the_job_is_a_timeout(repo):
     client = FakeClient(
         lambda argv, tar: (result_object(124, b"started\n", timed_out=True), False)
