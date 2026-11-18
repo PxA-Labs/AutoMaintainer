@@ -166,8 +166,14 @@ def test_unknown_repository_is_refused(sb, tmp_path):
     assert "code_chunks" not in sb.tables
 
 
-@pytest.mark.parametrize("sha", ["", "HEAD", "zz" * 20, "1" * 41, "abc; rm -rf /"])
+@pytest.mark.parametrize(
+    "sha",
+    # Abbreviated shas too: commit_sha is compared with the full
+    # `git rev-parse HEAD` and stored, so it must be the full 40 characters.
+    ["", "HEAD", "zz" * 20, "1" * 41, "abc; rm -rf /", "abc1234", "1" * 39],
+)
 def test_bad_commit_sha_is_refused(sb, tmp_path, sha):
+    _write(tmp_path, FILES)
     with pytest.raises(ValueError):
         rag_tasks.index_repository(
             sb,
@@ -176,6 +182,72 @@ def test_bad_commit_sha_is_refused(sb, tmp_path, sha):
             commit_sha=sha,
             clone_path=tmp_path,
         )
+
+
+def test_an_upper_case_commit_sha_is_stored_lower_case(sb, tmp_path):
+    _write(tmp_path, FILES)
+    result = rag_tasks.index_repository(
+        sb,
+        HashingEmbedder(),
+        repository_id=REPO_ID,
+        commit_sha="ABCDEF" + "0" * 34,
+        clone_path=tmp_path,
+    )
+    assert result["commit_sha"] == "abcdef" + "0" * 34
+    assert {r["commit_sha"] for r in _rows(sb)} == {"abcdef" + "0" * 34}
+
+
+OTHER_ORG = "bbbbbbbb-0000-4000-8000-0000000000b0"
+
+
+def test_reindexing_after_an_org_transfer_moves_every_chunk_to_the_new_org(
+    sb, tmp_path
+):
+    _write(tmp_path, FILES)
+    rag_tasks.index_repository(
+        sb,
+        HashingEmbedder(),
+        repository_id=REPO_ID,
+        commit_sha=SHA1,
+        clone_path=tmp_path,
+    )
+    old = {r["symbol"]: r["embedding"] for r in _rows(sb)}
+    sb.tables["repositories"] = [{"id": REPO_ID, "org_id": OTHER_ORG}]
+
+    # The same commit: before, every row was "present" and kept its old org.
+    e = CountingEmbedder()
+    result = rag_tasks.index_repository(
+        sb, e, repository_id=REPO_ID, commit_sha=SHA1, clone_path=tmp_path
+    )
+    rows = _rows(sb)
+    assert len(rows) == 3
+    assert {r["org_id"] for r in rows} == {OTHER_ORG}
+    # The stored embeddings are reused, not paid for again.
+    assert e.embedded == [] and result["reused"] == 3
+    assert {r["symbol"]: r["embedding"] for r in rows} == old
+    assert result["deleted"] == 3
+
+
+def test_an_org_transfer_does_not_touch_other_repositories(sb, tmp_path):
+    other = {
+        "org_id": ORG,
+        "repository_id": 9,
+        "commit_sha": SHA1,
+        "path": "x.py",
+        "start_line": 1,
+        "content_sha": "x",
+    }
+    sb.tables["code_chunks"] = [dict(other)]
+    sb.tables["repositories"] = [{"id": REPO_ID, "org_id": OTHER_ORG}]
+    _write(tmp_path, FILES)
+    rag_tasks.index_repository(
+        sb,
+        HashingEmbedder(),
+        repository_id=REPO_ID,
+        commit_sha=SHA1,
+        clone_path=tmp_path,
+    )
+    assert _rows(sb, repository_id=9) == [other]
 
 
 def test_missing_clone_path_is_refused(sb, tmp_path):
@@ -279,6 +351,14 @@ def test_task_refuses_a_checkout_at_another_commit(monkeypatch, sb, clone):
     with pytest.raises(ValueError, match="HEAD"):
         rag_tasks.index_repository_task.run(REPO_ID, "f" * 40, str(path))
     assert "code_chunks" not in sb.tables
+
+
+def test_task_accepts_the_checkout_sha_in_upper_case(monkeypatch, sb, clone):
+    path, sha = clone
+    _enable(monkeypatch, sb)
+    result = rag_tasks.index_repository_task.run(REPO_ID, sha.upper(), str(path))
+    assert result["status"] == "indexed" and result["commit_sha"] == sha
+    assert {r["commit_sha"] for r in _rows(sb)} == {sha}
 
 
 def _enable(monkeypatch, sb):

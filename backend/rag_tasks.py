@@ -13,7 +13,9 @@ are upserted on the table's unique key with ignore-duplicates, so running
 the same commit twice embeds nothing and writes nothing.
 
 The organization is read from the repositories row, never taken from the
-caller, so a chunk cannot be filed under another tenant.
+caller, so a chunk cannot be filed under another tenant. Rows of the
+repository filed under another organization (it was transferred) are
+deleted before writing, so any run, even of the same commit, moves them.
 
 Trade-offs:
 
@@ -70,7 +72,9 @@ logger = logging.getLogger(__name__)
 
 RAG_INDEXING_ENV = "RAG_INDEXING_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
-_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+# A full SHA-1 commit id (lower-cased before the check): it is compared with
+# `git rev-parse HEAD` and stored, so an abbreviated sha is refused.
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 TABLE = "code_chunks"
 ON_CONFLICT = "repository_id,commit_sha,path,start_line,content_sha"
@@ -168,7 +172,7 @@ def _stored(sb, repository_id: int, shas: list[str]) -> dict[str, dict]:
     for i in range(0, len(shas), LOOKUP_BATCH_SIZE):
         rows = (
             sb.table(TABLE)
-            .select("content_sha, commit_sha, path, start_line, embedding")
+            .select("content_sha, org_id, commit_sha, path, start_line, embedding")
             .eq("repository_id", repository_id)
             .in_("content_sha", shas[i : i + LOOKUP_BATCH_SIZE])
             .execute()
@@ -193,8 +197,9 @@ def index_repository(
     clone_path: Path | str,
 ) -> dict:
     """Index ``clone_path`` as ``repository_id`` at ``commit_sha``; a summary."""
-    if not isinstance(commit_sha, str) or not _SHA_RE.match(commit_sha):
-        raise ValueError(f"not a commit sha: {commit_sha!r}")
+    if not isinstance(commit_sha, str) or not _SHA_RE.match(commit_sha.lower()):
+        raise ValueError(f"not a full commit sha: {commit_sha!r}")
+    commit_sha = commit_sha.lower()
     root = Path(clone_path)
     if not root.is_dir():
         raise ValueError(f"clone path {str(root)!r} is not a directory")
@@ -216,7 +221,7 @@ def index_repository(
     present = {
         (row["path"], row["start_line"], sha)
         for sha, row in stored.items()
-        if row.get("commit_sha") == commit_sha
+        if row.get("commit_sha") == commit_sha and row.get("org_id") == org_id
     }
 
     to_embed = [c for c in ordered if c.content_sha not in stored]
@@ -247,6 +252,19 @@ def index_repository(
                 "embedding": [float(x) for x in embedding],
             }
         )
+    # Rows filed under another organization (the repository was moved since
+    # it was last indexed) go before the upsert: they would otherwise stay
+    # readable by the old organization's members, and with ignore-duplicates
+    # they would also block the new rows of an already indexed commit. Their
+    # embeddings were read above and are reused.
+    moved = (
+        sb.table(TABLE)
+        .delete()
+        .eq("repository_id", repository_id)
+        .neq("org_id", org_id)
+        .execute()
+        .data
+    )
     for i in range(0, len(rows), WRITE_BATCH_SIZE):
         sb.table(TABLE).upsert(
             rows[i : i + WRITE_BATCH_SIZE],
@@ -270,7 +288,7 @@ def index_repository(
         "chunks": len(ordered),
         "embedded": len(to_embed),
         "reused": len(ordered) - len(to_embed),
-        "deleted": len(deleted or []),
+        "deleted": len(moved or []) + len(deleted or []),
     }
     logger.info("rag index: %s", result)
     return result
@@ -301,7 +319,7 @@ def index_repository_task(repository_id: int, commit_sha: str, clone_path: str) 
     if not root.is_dir():
         raise ValueError(f"clone path {clone_path!r} is not a directory")
     head = _checkout_head(root)
-    if head != commit_sha:
+    if not isinstance(commit_sha, str) or head != commit_sha.lower():
         raise ValueError(f"checkout HEAD is {head}, not {commit_sha}")
 
     client = _redis()

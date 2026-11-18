@@ -16,7 +16,14 @@ agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
 
 1. **Chunking.** `chunk_repository(path)` walks a checkout (skipping `.git`,
    `node_modules`, virtualenvs, build output, symbolic links, lock files,
-   minified files, binary and non-UTF-8 files, and files over 256 kB). Python,
+   minified files, binary and non-UTF-8 files, and files over 256 kB). Files
+   named like credentials are never chunked, so they are neither sent to
+   Vertex nor readable in `code_chunks`: `.env*`, `*.pem` and `*.key` (the
+   secret entries of `change_limits.DEFAULT_DENYLIST`), SSH private keys
+   (`id_rsa*`, `id_ed25519*` ...), keystores (`*.p12`, `*.pfx`, `*.jks`) and
+   `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`. This is a name list, not
+   secret scanning: a token committed inside ordinary source is still
+   indexed. Python,
    JavaScript and TypeScript files are split with the existing tree-sitter
    indexer (`ast_indexer`, read-only): one chunk per top-level function or
    method (`Class.method`, `Outer.Inner.method` for nested classes; nested
@@ -84,7 +91,8 @@ locally, point `DATABASE_URL_RLS_TEST` at any PostgreSQL 16 with pgvector.
 
 `rag_tasks.index_repository_task(repository_id, commit_sha, clone_path)`
 indexes one checkout that is already at `commit_sha` (it checks with
-`git rev-parse HEAD`). It does nothing unless `RAG_INDEXING_ENABLED` is `1`,
+`git rev-parse HEAD`; `commit_sha` must be the full 40-character sha, in
+either case, and is stored lower-case). It does nothing unless `RAG_INDEXING_ENABLED` is `1`,
 `true`, `yes` or `on`.
 
 - **Incremental.** A chunk whose `content_sha` is already stored for the
@@ -112,12 +120,13 @@ Known limits: commit order is not checked (indexing an older commit after a
 newer one leaves the older one until the next run). A chunk's `org_id` is
 copied from the repository when it is indexed: if a repository row moves to
 another organization, its chunks stay readable by the **old** organization's
-members until its chunks are deleted. Indexing a *new* commit fixes it (new
-rows take the new org, the old commit's rows are deleted); re-indexing the
-*same* commit does not, because existing rows are kept as they are. Whoever
-transfers a repository between organizations should delete its
-`code_chunks` rows (service role) in the same change; round 18 can enforce
-this with a trigger on `repositories.org_id`. HNSW is searched before
+members until the repository is indexed again. Any index run (the same
+commit or a new one) first deletes the repository's rows filed under
+another organization, reusing their embeddings, and writes them again under
+the current one. Between the transfer and that run the exposure remains, so
+whoever transfers a repository between organizations should delete its
+`code_chunks` rows (service role) in the same change, or enqueue an index
+run; round 18 can enforce this with a trigger on `repositories.org_id`. HNSW is searched before
 the org/repository filter is applied, so with many repositories in one table
 fewer than k rows can come back (pgvector's `hnsw.ef_search`, 40 by default,
 bounds the candidates; raising it, or pgvector 0.8's iterative scans, are the
