@@ -154,6 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Add adk and rag extras and the Cloud Monitoring metrics exporter ([#533](https://github.com/PxA-Labs/AutoMaintainer/pull/533)) - @purvanshjoshi
 - **deps**: Bump langgraph from 1.2.20 to 1.2.21 in /backend ([#503](https://github.com/PxA-Labs/AutoMaintainer/pull/503)) - @dependabot[bot]
 - **deps-dev**: Bump pytest-asyncio from 1.4.1.post1 to 1.5.0 in /backend ([#501](https://github.com/PxA-Labs/AutoMaintainer/pull/501)) - @dependabot[bot]
 - **deps**: Bump fastapi from 0.162.5 to 0.162.7 in /backend ([#499](https://github.com/PxA-Labs/AutoMaintainer/pull/499)) - @dependabot[bot]
