@@ -236,6 +236,79 @@ jobs:
         print(f"{len(names)} automaintainer modules import cleanly")
         EOF
 
+  test-extras:
+    # #532: the ADK reviewer (adk extra) and retrieval (rag extra) tests skip
+    # in the matrix below, which installs only the server extra. This job
+    # installs both from the lock and runs those tests. They use fakes for
+    # the model, embeddings, GitHub and Supabase: no provider is called.
+    name: Test with the adk and rag extras
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+    env:
+      UV_PYTHON: "3.11"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: true
+        cache-dependency-glob: "backend/uv.lock"
+
+    - name: Install ripgrep
+      # The reviewer's search tool shells out to rg; its tests skip without it.
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends ripgrep
+
+    - name: Install dependencies from uv.lock (server, adk, rag)
+      run: |
+        uv sync --frozen --extra server --extra adk --extra rag --group dev
+
+    - name: Run the specialist, ADK reviewer, rag and red-team tests
+      run: |
+        uv run --frozen pytest -v -rsxX -p no:cacheprovider \
+          --junitxml="$RUNNER_TEMP/extras-junit.xml" \
+          tests/specialists \
+          tests/concurrency/test_concurrency_adk_reviewer.py \
+          tests/rag \
+          tests/redteam
+
+    - name: Fail if any of those tests skipped
+      # A skip here means an extra or a tool went missing, which would turn
+      # this job into a silent no-op. Strict xfails (red-team known gaps) are
+      # reported as type="pytest.xfail" and are not counted.
+      run: |
+        python - "$RUNNER_TEMP/extras-junit.xml" <<'EOF'
+        import sys
+        import xml.etree.ElementTree as ET
+
+        skipped = [
+            f"{case.get('classname')}::{case.get('name')}: {s.get('message')}"
+            for case in ET.parse(sys.argv[1]).iter("testcase")
+            for s in case.findall("skipped")
+            if s.get("type") != "pytest.xfail"
+        ]
+        assert not skipped, "skipped tests:\n" + "\n".join(skipped)
+        print("no skipped tests")
+        EOF
+
   test:
     name: Test (${{ matrix.os }} - Py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
