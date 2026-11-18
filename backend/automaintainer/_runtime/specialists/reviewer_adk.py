@@ -666,3 +666,7 @@ async def review_pull_request(state: dict, gh_repo: Any, pr: Any, diff_text):
             return await review(request, tools)
     except CheckoutError as e:
         return _reject(f"the pull request head could not be checked out: {e}"), None
+    except Exception as e:  # mkdtemp, the token lookup, ...: fail closed
+        logger.warning("ADK review checkout failed: %s", type(e).__name__)
+        reason = f"the pull request head could not be checked out ({type(e).__name__})"
+        return _reject(reason), None

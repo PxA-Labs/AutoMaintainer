@@ -176,14 +176,21 @@ async def test_real_adk_review_through_the_node(monkeypatch, head):
     assert "1| x = 2" in factory.turns[1].tool_results[0]
 
 
-async def test_a_failed_checkout_is_a_rejection(monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [
+        reviewer_adk.CheckoutError("the branch moved since its head was read"),
+        OSError("No space left on device"),
+    ],
+)
+async def test_a_failed_checkout_is_a_rejection(monkeypatch, error):
     monkeypatch.setenv("REVIEWER_BACKEND", "adk")
     monkeypatch.setattr(config_module, "_adk_missing", lambda: None)
     _, pr, _ = _setup(monkeypatch)
 
     @asynccontextmanager
     async def broken(clone_url, branch, head_sha):
-        raise reviewer_adk.CheckoutError("the branch moved since its head was read")
+        raise error
         yield  # pragma: no cover
 
     monkeypatch.setattr(reviewer_adk, "checkout_head", broken)
@@ -192,3 +199,4 @@ async def test_a_failed_checkout_is_a_rejection(monkeypatch):
     assert result["merge_status"] == "changes_requested"
     review = agents.parse_decision(result["review"], agents.MaintainerDecision)
     assert "could not be checked out" in review.reasons[0]
+    pr.merge.assert_not_called()
