@@ -107,9 +107,18 @@ variable "labels" {
   default = {}
 }
 
+# Project of the provider, for the globally unique sandbox bucket name.
+data "google_client_config" "current" {}
+
 locals {
   tag               = "${var.name}-worker"
   self_hosted_redis = var.redis_url == null
+
+  # Sandboxed verification (sandbox.tf, #158): the worker runs each test
+  # command as one execution of this Cloud Run job. The names are decided
+  # here and exported, so sandbox.tf creates exactly what the worker uses.
+  sandbox_job_name    = "${var.name}-sandbox"
+  sandbox_bucket_name = "${data.google_client_config.current.project}-${var.name}-sandbox"
 
   worker_env = join("\n", [
     "REGISTRY_HOST=${var.registry_host}",
@@ -124,6 +133,14 @@ locals {
   container_env = merge(var.app_env, {
     REDIS_URL              = local.self_hosted_redis ? "redis://127.0.0.1:6379/0" : var.redis_url
     AUTOMAINTAINER_SECRETS = join(",", [for k, v in var.secrets : "${k}=${v}"])
+    # Verification runs in the Cloud Run job, never on this VM.
+    SANDBOX_BACKEND           = "cloud_run_job"
+    CLOUD_RUN_SANDBOX_PROJECT = data.google_client_config.current.project
+    CLOUD_RUN_SANDBOX_REGION  = var.region
+    CLOUD_RUN_SANDBOX_JOB     = local.sandbox_job_name
+    CLOUD_RUN_SANDBOX_BUCKET  = local.sandbox_bucket_name
+    # Signs the per-run URLs (signBlob on itself).
+    CLOUD_RUN_SANDBOX_SIGNER = var.service_account_email
   })
 
   user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
@@ -237,4 +254,14 @@ output "instance_id" {
 
 output "internal_ip" {
   value = google_compute_address.worker.address
+}
+
+output "sandbox_job_name" {
+  description = "Name of the Cloud Run job the worker runs verification in (created by sandbox.tf)."
+  value       = local.sandbox_job_name
+}
+
+output "sandbox_bucket_name" {
+  description = "Bucket the worker exchanges working copies and results through (created by sandbox.tf)."
+  value       = local.sandbox_bucket_name
 }
