@@ -540,6 +540,202 @@ running tasks are requeued (`acks_late`). A new secret version is read when
 a Cloud Run instance or the worker container starts: redeploy (or reset the
 VM) after rotating a key.
 
+### Sandboxed verification
+
+`infra/terraform/sandbox.tf` runs every verification command as one
+execution of the Cloud Run job `automaintainer-sandbox` (#158), and the
+worker container gets `SANDBOX_BACKEND=cloud_run_job` with the job and
+bucket names. [VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend)
+describes the backend and its threat model. In short: the job runs as
+`automaintainer-sandbox@`, which holds no role at all; its egress goes into
+its own VPC (`automaintainer-sandbox-vpc`) that has no default route, no NAT,
+no peering and a deny-all egress firewall, with one exception, TCP 443 to
+Private Google Access, so it can fetch its working copy and upload its
+result through two URLs the worker signs for that run only. The bucket
+(`<project>-automaintainer-sandbox`) has uniform access, public access
+prevention and a 1-day lifecycle delete. The worker may run, read and cancel
+executions of that one job, use objects in that bucket and sign blobs as
+itself. `VERIFY_ALLOW_LOCAL` stays refused. Once the steps below pass, this
+replaces "Verification stays off for untrusted repositories" above:
+verification results become real, so `MERGE_POLICY=ci` can merge again.
+
+**What stays open: Google APIs.** This is weaker than the Docker backend's
+`--network=none`. The one allowed destination, the Private Google Access
+VIP (199.36.153.8/30), serves *every* `*.googleapis.com` API, not only this
+bucket. The job's own identity can do nothing, but test code needs no
+identity to write to a bucket someone else made publicly writable, or to
+poll one for commands. So a hostile test can still send the repository's
+contents and its own output out through Google Cloud Storage. Under
+`MERGE_POLICY=ci`, that is the remaining risk for private repositories
+whose issues come from outsiders. VPC Service Controls around the project
+would close it, but it is not set up here; see
+[VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend).
+
+**The sandbox settings cannot be changed through `app_env`.**
+`modules/worker` merges `SANDBOX_BACKEND` and the `CLOUD_RUN_SANDBOX_*`
+names *over* `var.app_env`, so a value set there is silently replaced. This
+fails closed: no `app_env` entry can switch the worker back to local or
+Docker verification. To change them, edit `modules/worker/main.tf`.
+`CLOUD_RUN_SANDBOX_START_SECONDS` is not set by the module, so `app_env`
+does control it.
+
+**Owner steps** (after the first deploy):
+
+1. **Point the job at an image with python3 and the test toolchain.** The
+   default `sandbox_image` is Google's sample job image, which has no
+   `python3`, so until this step every verification reports an error. The
+   app image works (Python 3.11, git, node):
+
+   ```bash
+   IMAGE="$(terraform output -raw image_repository)@$(gcloud artifacts docker images describe \
+     "$(terraform output -raw image_repository):<deployed git sha>" --format='value(image_summary.digest)')"
+   # terraform.tfvars:  sandbox_image = "<IMAGE>"
+   terraform plan -out=tfplan && terraform apply tfplan
+   gcloud compute instances reset automaintainer-worker --zone us-central1-a
+   ```
+
+   The deploy workflow does not update the job; the entrypoint is sent with
+   each execution, so the image only needs changing when the tests need a
+   newer toolchain. Pin it by digest.
+
+2. **Run the smoke test** below and keep its output with the deployment
+   notes.
+
+**Smoke test.** Opt-in and manual: it starts real executions (a few cents).
+Run from `infra/terraform` with the owner's credentials.
+
+```bash
+P=automaintainer-prod; R=us-central1; JOB=automaintainer-sandbox
+BUCKET=$(terraform output -raw sandbox_bucket)
+WORKER_IP=$(gcloud compute instances describe automaintainer-worker --zone ${R}-a \
+  --project $P --format='value(networkInterfaces[0].networkIP)')
+
+# 1. Start latency: five runs of a no-op; note each wall time.
+for i in 1 2 3 4 5; do
+  /usr/bin/time -f "%e s" gcloud run jobs execute $JOB --region $R --project $P \
+    --wait --args="-c,print(1)" >/dev/null
+done
+
+# 2. Isolation probes, one execution. "^|^" makes | the list separator.
+PROBE='import json, socket, sys, urllib.request as u
+def tcp(host, port):
+    try:
+        socket.create_connection((host, port), timeout=5).close()
+        return "OPEN"
+    except OSError as e:
+        return "blocked (" + type(e).__name__ + ")"
+worker, bucket = sys.argv[1], sys.argv[2]
+for name, host, port in [("worker redis", worker, 6379), ("worker ssh", worker, 22),
+                         ("internet 1.1.1.1", "1.1.1.1", 443),
+                         ("github.com", "github.com", 443),
+                         ("other Google API by name", "iamcredentials.googleapis.com", 443),
+                         ("storage via private VIP", "storage.googleapis.com", 443)]:
+    print(name, tcp(host, port))
+md = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/"
+h = {"Metadata-Flavor": "Google"}
+print("metadata identity", u.urlopen(u.Request(md + "email", headers=h), timeout=5).read().decode())
+token = json.load(u.urlopen(u.Request(md + "token", headers=h), timeout=5))["access_token"]
+try:
+    u.urlopen(u.Request("https://storage.googleapis.com/storage/v1/b/" + bucket + "/o",
+                        headers={"Authorization": "Bearer " + token}), timeout=10)
+    print("bucket list ALLOWED")
+except u.HTTPError as e:
+    print("bucket list HTTP", e.code)'
+gcloud run jobs execute $JOB --region $R --project $P --wait \
+  --args="^|^-c|$PROBE|$WORKER_IP|$BUCKET"
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=$JOB" \
+  --project $P --limit 20 --format='value(textPayload)'
+```
+
+Expected: every `tcp` probe `blocked` except `storage via private VIP`
+(`OPEN`); `metadata identity` is `automaintainer-sandbox@...`, never the
+worker's account; `bucket list HTTP 403`. With `redis_mode = "memorystore"`,
+add the Memorystore host to the probe list. Denied connections also appear
+in Logging under the `automaintainer-sandbox-deny-egress` firewall rule.
+
+The metadata server cannot be blocked: a Cloud Run job always reaches its
+own (169.254.169.254 is served outside the VPC). The check is therefore that
+it answers as the sandbox account, whose token is useless (no role), and not
+that the address is unreachable.
+
+**3. The backend's own path, from the worker container.** The probes above
+start executions with `gcloud`. They do not test the calls the worker
+itself makes: the V4 signed URLs, the `runWithOverrides` body, the
+execution name in the run response, and whether the worker's custom role is
+enough without `actAs` on the sandbox account. This step does. Run it on the
+VM. It sends a throwaway directory, never a repository.
+
+```bash
+gcloud compute ssh automaintainer-worker --zone ${R}-a --project $P -- \
+  sudo docker exec -i automaintainer-worker python - <<'EOF'
+import asyncio, tempfile, time
+from pathlib import Path
+from automaintainer.runners.cloud_run_job_sandbox import create
+from automaintainer.runners.base import CommandTimeoutError
+
+async def main():
+    work = Path(tempfile.mkdtemp())
+    (work / "hello.txt").write_text("copied in\n")
+    box = create(work)  # reads CLOUD_RUN_SANDBOX_* from the container's env
+    t = time.monotonic()
+    print(await box.exec_command(["python3", "-c", "print(open('hello.txt').read())"], timeout=60))
+    print("round trip %.1f s" % (time.monotonic() - t))
+    print(await box.exec_command(["python3", "-c", "import sys; sys.exit(3)"], timeout=60))
+    try:
+        await box.exec_command(["sleep", "30"], timeout=5)
+    except CommandTimeoutError as e:
+        print("timeout ok:", e)
+
+asyncio.run(main())
+EOF
+gcloud storage ls "gs://$BUCKET/executions/" --project $P   # expect nothing left
+```
+
+Expected: `(0, 'copied in\n\n', '')` with a round trip a few seconds above
+the start latency from step 1, then `(3, '', '')`, then `timeout ok`.
+The bucket should be empty, and
+`gcloud run jobs executions list --job $JOB --region $R --project $P`
+should show three new executions: the first succeeded, the other two failed.
+The third failed because the entrypoint killed `sleep` at 5 s. It was not
+cancelled. A `403` from `signBlob` or `:run` means the worker's role is
+missing a permission. `the job run returned no execution` means the response
+shape is not the one the backend expects. In both cases verification fails closed with an `error`
+until it is fixed.
+
+Then open an issue on a test repository with the App installed and check the
+run's verification: the PR's `automaintainer/verification` status should be
+`success` or `failure`, not `error`. Logs Explorer, resource "Cloud Run Job",
+shows the execution; the worker's log shows no `could not delete` or
+`could not cancel` warnings.
+
+**When to fall back to GKE Sandbox.** Keep Cloud Run Jobs if a start takes
+well under `CLOUD_RUN_SANDBOX_START_SECONDS` (20 s) and every probe is as
+expected. Otherwise:
+
+- *Start latency.* If starts regularly approach 20 s (the most the worker
+  allows: 20 s plus up to 8 s of cleanup must fit in verification's own
+  30-second grace), lower
+  `sandbox_memory` and the image size. If that is not enough, or the probe
+  shows `storage via private VIP` blocked (Direct VPC egress did not use the
+  private zone, so the job cannot fetch its copy; verification then fails
+  closed with an error), the job model does not fit.
+- *Egress.* If any probe other than storage is `OPEN`, stop: remove the App
+  from untrusted repositories and set `sandbox_image` back to the default
+  (verification fails closed) until it is understood.
+
+The fallback is a GKE Standard cluster with a GKE Sandbox (gVisor) node pool
+(recent Autopilot versions also accept `runtimeClassName: gvisor`; check the
+current GKE documentation before choosing): one Kubernetes Job per
+verification, `runtimeClassName: gvisor`, a Kubernetes service account
+bound through Workload Identity to an account with no role, a default-deny
+egress `NetworkPolicy` (with an allow rule for Private Google Access only),
+no NAT for the node subnet, and the metadata server reachable only through
+GKE's metadata server (which serves the pod's own identity). Pods start in
+seconds on a warm node, at the cost of a cluster to run and pay for (a
+management fee plus at least one always-on node). It needs a new
+`SandboxBackend` against the Kubernetes API; that client is not in
+`backend/uv.lock` today.
+
 ### Cloud Trace
 
 | Variable | Default | Purpose |
