@@ -665,6 +665,29 @@ def _diff_files(pr) -> list[tuple[str, str]]:
     ]
 
 
+async def _head_retriever(repository_id, request: ReviewRequest):
+    """``(retriever, top_k)`` for search_code: the run's RAG index when
+    retrieval is on and it holds exactly the PR head commit, else None
+    (ripgrep). Shares the PM's resolution (agents.resolve_retriever), so an
+    engine's injected factory serves both. Never fails the review."""
+    enabled, top_k = agents.rag_retrieval_settings()
+    if not enabled or not repository_id:
+        return None, top_k
+    try:
+        async with asyncio.timeout(agents.RAG_RETRIEVAL_TIMEOUT_SECONDS):
+            retriever = await asyncio.to_thread(
+                agents.resolve_retriever, repository_id, request.head_sha
+            )
+    except Exception as e:  # TimeoutError included
+        logger.warning(
+            "ADK review: the code index is unavailable (%s); search_code uses "
+            "ripgrep",
+            type(e).__name__,
+        )
+        return None, top_k
+    return retriever, top_k
+
+
 async def review_pull_request(state: dict, gh_repo: Any, pr: Any, diff_text):
     """The ADK review of the maintainer node; ``(decision, parse_error)``.
 
@@ -700,6 +723,7 @@ async def review_pull_request(state: dict, gh_repo: Any, pr: Any, diff_text):
         files = await asyncio.to_thread(_diff_files, pr)
     except Exception as e:  # pydantic or GitHub: fail closed
         return _reject(f"the review could not be prepared ({type(e).__name__})"), None
+    retriever, top_k = await _head_retriever(state.get("repository_id"), request)
     try:
         async with checkout_head(
             gh_repo.clone_url, pr.head.ref, request.head_sha
@@ -708,6 +732,8 @@ async def review_pull_request(state: dict, gh_repo: Any, pr: Any, diff_text):
                 root,
                 diff_files=files,
                 verification_log=_verification_log(request.verification),
+                retriever=retriever,
+                search_k=top_k,
             )
             return await review(request, tools)
     except CheckoutError as e:

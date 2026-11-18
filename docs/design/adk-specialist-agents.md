@@ -82,8 +82,11 @@ log sees far more than a truncated diff.
 
 - `get_diff(path=None)`: the PR diff, whole or per file, paginated.
 - `read_file(path, start, end)`: a file at the PR head.
-- `search_code(query)`: search in the run's clone (ripgrep; later the RAG
-  retriever).
+- `search_code(query)`: with retrieval on (`rag_retrieval_enabled`) and the
+  RAG index holding exactly the PR head commit, the nearest code chunks of
+  the run's repository; otherwise ripgrep over the PR head checkout, as
+  before. An index error or empty result falls back to ripgrep. See
+  [docs/RAG.md](../RAG.md).
 - `get_verification_log()`: the test output of this iteration, truncated.
 
 **Budgets.** At most 8 tool calls and a token cap per review. A per-review
@@ -268,5 +271,18 @@ in `evals/e2e/pricing.py` does not cover it; pass `--prices`).
 
 - Which evaluation tasks give enough bad changes for the false-approval rate to
   mean something? This depends on the evaluation set (roadmap step 2).
-- Should the PM node be the second specialist, or should the RAG retriever
-  arrive first and be shared by both?
+
+## Decided
+
+- **The RAG retriever arrived first and is shared** (round 18, #526). The PM
+  node stays a single LangGraph prompt; it gets retrieved code in its prompt
+  (`agents.retrieved_context`), and the Reviewer's `search_code` uses the
+  same resolution (`agents.resolve_retriever`: an engine's injected factory,
+  else a pgvector retriever over the run's database client). Both are behind
+  `rag_retrieval_enabled`, off by default. Whether the PM becomes a
+  tool-using specialist is left until the retrieval numbers on the
+  evaluation set (Vertex embeddings) are in: a retriever in the prompt is
+  cheaper than a tool loop, and the loop only pays off if the PM needs to
+  look further than the top chunks. Retrieved chunks are one more source of
+  untrusted text; the red-team fixtures run with retrieval on, through the
+  PM prompt and through `search_code`, before it can be enabled (rule 6).
