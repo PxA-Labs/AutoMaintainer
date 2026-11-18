@@ -349,6 +349,20 @@ def estimated_llm_cost_usd(model: str, tokens: int, kind: str) -> Optional[float
     return tokens * entry[f"{kind}_per_mtok"] / 1_000_000
 
 
+def estimated_llm_cost_upper_bound_usd(model: str, tokens: int) -> Optional[float]:
+    """Estimated USD cost of ``tokens`` not split into input and output.
+
+    Priced at the higher of the model's two rates, so the figure can only
+    overstate the cost (by at most output/input - 1, about 34 % for
+    llama-3.3-70b-versatile): a cost alert built on it fires early rather
+    than late. None if the model is unpriced.
+    """
+    entry = _parse_llm_prices(os.getenv(LLM_PRICES_ENV, "")).get(model)
+    if entry is None:
+        return None
+    return tokens * max(entry[k] for k in _PRICE_KEYS) / 1_000_000
+
+
 # --- Cloud Trace (#527) ---
 # OTEL_CLOUD_TRACE_ENABLED=true adds a span exporter that sends the traces
 # above to Google Cloud Trace, next to (not instead of) the console and OTLP
@@ -926,9 +940,14 @@ def record_llm_tokens(
     )
     cost = estimated_llm_cost_usd(model, tokens, kind_label)
     if cost is not None:
-        llm_estimated_cost_usd_total.add(
-            cost, {"model": model_label, "phase": phase_label}
-        )
+        record_llm_estimated_cost(model, cost, phase)
+
+
+def record_llm_estimated_cost(model: str, usd: float, phase: Optional[str] = None):
+    """Add ``usd`` to the ESTIMATED LLM cost (per model and phase)."""
+    llm_estimated_cost_usd_total.add(
+        usd, {"model": _identifier(model), "phase": _one_of(phase, LLM_PHASES)}
+    )
 
 
 def record_llm_request(model: str, duration: float, success: bool):
