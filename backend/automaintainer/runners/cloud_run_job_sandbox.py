@@ -81,6 +81,7 @@ import httpx
 
 from .base import CommandTimeoutError, RunnerError
 from .docker_sandbox import DEFAULT_MAX_OUTPUT_BYTES, DockerSandbox, _archive_workspace
+from .local import _to_argv
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +447,6 @@ class CloudRunJobSandbox(DockerSandbox):
         RunnerError when the job could not run the command or a Google API
         call failed. Both objects are deleted in every case.
         """
-        from .local import _to_argv
-
         argv = _to_argv(cmd)
         if not timeout or timeout <= 0:
             timeout = 60
