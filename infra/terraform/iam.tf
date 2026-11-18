@@ -2,7 +2,7 @@
 #
 #   api       Cloud Run runtime: reads its secrets; writes traces if enabled.
 #   worker    VM runtime: reads its secrets, pulls the image, writes logs and
-#             metrics.
+#             metrics; calls Vertex AI when rag_enabled.
 #   deployer  GitHub Actions through WIF: pushes images, deploys new API
 #             revisions and sets the worker's image metadata. It cannot read
 #             secrets, change IAM or touch any other resource.
@@ -43,6 +43,16 @@ resource "google_project_iam_member" "worker" {
   ])
   project = var.project_id
   role    = each.value
+  member  = google_service_account.worker.member
+}
+
+# Code retrieval (#526): the worker embeds chunks (indexing) and queries
+# (PM prompt, Reviewer search_code) with Vertex AI. The API never does: it
+# only enqueues runs, so it gets no Vertex AI role.
+resource "google_project_iam_member" "worker_aiplatform" {
+  count   = var.rag_enabled ? 1 : 0
+  project = var.project_id
+  role    = "roles/aiplatform.user"
   member  = google_service_account.worker.member
 }
 

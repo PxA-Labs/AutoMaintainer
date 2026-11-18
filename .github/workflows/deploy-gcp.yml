@@ -89,8 +89,12 @@ jobs:
           context: .
           push: true
           tags: ${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
-          # Public values inlined into the dashboard bundle (never secrets).
+          # Public values inlined into the dashboard bundle (never secrets),
+          # and the backend extras: IMAGE_EXTRAS is optional ("server" when
+          # unset); Terraform's github_repository_variables output says
+          # "server,rag" when rag_enabled is on (docs/RAG.md).
           build-args: |
+            EXTRAS=${{ vars.IMAGE_EXTRAS || 'server' }}
             NEXT_PUBLIC_SUPABASE_URL=${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
             NEXT_PUBLIC_BACKEND_URL=${{ vars.NEXT_PUBLIC_BACKEND_URL }}
