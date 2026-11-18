@@ -212,7 +212,7 @@ def test_live_mode_uses_the_key_pool_and_records_usage(tmp_path, monkeypatch):
 def test_live_outputs_never_contain_a_key(tmp_path, monkeypatch, capsys):
     # Model-written code runs in the process that holds the key; if it
     # prints the key, the reports, cassettes and log must not carry it.
-    secret = "gsk_eval_secret_0123456789"
+    secret = "gsk_eval_secret_0123456789"  # gitleaks:allow (fake key)
     monkeypatch.setenv("GROQ_API_KEY", secret)
     item = run.load_e2e_tasks(["inflection_ordinal_teens"])[0]
     leaky = item.task.read_target() + f"\nraise RuntimeError({secret!r})\n"

@@ -79,6 +79,7 @@ measured.
 ### 1. Prerequisites
 - [Node.js](https://nodejs.org/en/) (v22.18+; the gitnexus CLI requires `^22.18 || >=24.11`)
 - [Python](https://www.python.org/) (3.11+)
+- [uv](https://docs.astral.sh/uv/) (backend dependencies; CI uses 0.13.8)
 - A [Groq API Key](https://console.groq.com/keys)
 - A [GitHub Token](https://github.com/settings/tokens) or GitHub App credentials
 - A [Supabase Project](https://supabase.com/) (Free Tier supported)
@@ -124,7 +125,7 @@ NEXT_PUBLIC_BACKEND_URL="http://localhost:8000"
 Backend dependencies are managed with [uv](https://docs.astral.sh/uv/) (`backend/pyproject.toml` + `backend/uv.lock`):
 ```bash
 cd backend
-uv sync --extra server       # creates backend/.venv from uv.lock (incl. test deps)
+uv sync --extra server       # creates backend/.venv from uv.lock (incl. the dev group: pytest, black, flake8)
 # optional: --extra adk (google-adk + litellm), --extra rag (google-genai, Vertex AI embeddings)
 uv run uvicorn main:app --reload --port 8000
 ```
@@ -145,7 +146,7 @@ docker compose up --build   # http://localhost:8000
 ### Python SDK
 The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`); `pip install "./backend[server]"` adds the server dependencies:
 ```bash
-cd backend && uv build        # dist/automaintainer_backend-<version>-py3-none-any.whl
+cd backend && uv build        # dist/automaintainer-<version>-py3-none-any.whl (+ the sdist)
 ```
 ```python
 import asyncio
