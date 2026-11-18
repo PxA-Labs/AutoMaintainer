@@ -2,22 +2,34 @@
 
 ``FakeModel`` is a real ``google.adk`` ``BaseLlm``, so the real ADK runner,
 session, tool dispatch and callbacks run; only the model's answers are
-scripted. ``policy(request, seen)`` returns, for each model turn, either the
-final text or a list of ``(tool name, args)`` calls; ``seen`` is the list of
-turns so far. Every turn is recorded as a ``Turn`` (system instruction, the
-user texts and the tool results the model received).
+scripted. ``policy(turn, turns)`` returns (or awaits to), for each model
+turn, either the final text, a list of ``(tool name, args)`` calls, or an
+exception to raise; ``turns`` is the list of turns so far. Every turn is
+recorded as a ``Turn`` (system instruction, the user texts and the tool
+results the model received).
+
+This module imports without the ``adk`` extra (CI's default install); tests
+that run ADK are marked ``needs_adk`` and skip there.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import importlib.util
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from google.adk.models.base_llm import BaseLlm
-from google.adk.models.llm_response import LlmResponse
-from google.genai import types
-from pydantic import Field
+import pytest
+
+try:
+    HAVE_ADK = importlib.util.find_spec("google.adk") is not None
+except ImportError:  # no "google" namespace package at all
+    HAVE_ADK = False
+needs_adk = pytest.mark.skipif(
+    not HAVE_ADK, reason="the adk extra (google-adk) is not installed"
+)
 
 APPROVE = '{"verdict": "approve", "reasons": ["looks right"]}'
 REJECT = (
@@ -45,53 +57,6 @@ def calls(*pairs):
     return list(pairs)
 
 
-class FakeModel(BaseLlm):
-    policy: Callable[..., Any]
-    api_key: Any = None
-    tokens_per_turn: int = 100
-    delay: float = 0.0
-    turns: list = Field(default_factory=list)
-
-    async def generate_content_async(self, llm_request, stream=False):
-        system = llm_request.config.system_instruction
-        if not isinstance(system, str):
-            system = "".join(getattr(p, "text", "") or "" for p in system.parts)
-        user, results = [], []
-        for content in llm_request.contents:
-            for part in content.parts or []:
-                if part.text and content.role == "user":
-                    user.append(part.text)
-                if part.function_response is not None:
-                    results.append(str(part.function_response.response))
-        tools = [
-            d.name
-            for t in (llm_request.config.tools or [])
-            for d in (t.function_declarations or [])
-        ]
-        turn = Turn(system, user, results, tools, self.api_key, self.model)
-        self.turns.append(turn)
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        answer = self.policy(turn, self.turns)
-        if isinstance(answer, BaseException):
-            raise answer
-        if isinstance(answer, list):
-            parts = [
-                types.Part(function_call=types.FunctionCall(name=name, args=args))
-                for name, args in answer
-            ]
-        else:
-            parts = [types.Part(text=answer)]
-        yield LlmResponse(
-            content=types.Content(role="model", parts=parts),
-            usage_metadata=types.GenerateContentResponseUsageMetadata(
-                prompt_token_count=self.tokens_per_turn - 10,
-                candidates_token_count=10,
-                total_token_count=self.tokens_per_turn,
-            ),
-        )
-
-
 def scripted(*answers):
     """A policy answering the given turns in order (the last one repeats)."""
 
@@ -99,6 +64,64 @@ def scripted(*answers):
         return answers[min(len(turns), len(answers)) - 1]
 
     return policy
+
+
+@functools.cache
+def _fake_model_class():
+    from google.adk.models.base_llm import BaseLlm
+    from google.adk.models.llm_response import LlmResponse
+    from google.genai import types
+    from pydantic import Field
+
+    class FakeModel(BaseLlm):
+        policy: Callable[..., Any]
+        api_key: Any = None
+        tokens_per_turn: int = 100
+        delay: float = 0.0
+        turns: list = Field(default_factory=list)
+
+        async def generate_content_async(self, llm_request, stream=False):
+            system = llm_request.config.system_instruction
+            if not isinstance(system, str):
+                system = "".join(getattr(p, "text", "") or "" for p in system.parts)
+            user, results = [], []
+            for content in llm_request.contents:
+                for part in content.parts or []:
+                    if part.text and content.role == "user":
+                        user.append(part.text)
+                    if part.function_response is not None:
+                        results.append(str(part.function_response.response))
+            tools = [
+                d.name
+                for t in (llm_request.config.tools or [])
+                for d in (t.function_declarations or [])
+            ]
+            turn = Turn(system, user, results, tools, self.api_key, self.model)
+            self.turns.append(turn)
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            answer = self.policy(turn, self.turns)
+            if inspect.isawaitable(answer):
+                answer = await answer
+            if isinstance(answer, BaseException):
+                raise answer
+            if isinstance(answer, list):
+                parts = [
+                    types.Part(function_call=types.FunctionCall(name=name, args=args))
+                    for name, args in answer
+                ]
+            else:
+                parts = [types.Part(text=answer)]
+            yield LlmResponse(
+                content=types.Content(role="model", parts=parts),
+                usage_metadata=types.GenerateContentResponseUsageMetadata(
+                    prompt_token_count=self.tokens_per_turn - 10,
+                    candidates_token_count=10,
+                    total_token_count=self.tokens_per_turn,
+                ),
+            )
+
+    return FakeModel
 
 
 @dataclass
@@ -112,7 +135,7 @@ class ModelFactory:
     built: list = field(default_factory=list)
 
     def __call__(self, model_name, api_key):
-        model = FakeModel(
+        model = _fake_model_class()(
             model=model_name,
             policy=self.policy,
             api_key=api_key,

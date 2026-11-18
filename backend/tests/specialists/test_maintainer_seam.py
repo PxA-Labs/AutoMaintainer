@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import agents
-from adk_fakes import APPROVE, REJECT, ModelFactory, calls, scripted
+from adk_fakes import APPROVE, REJECT, ModelFactory, calls, needs_adk, scripted
 from automaintainer import config as config_module
 from automaintainer.config import AutoMaintainerConfig
 from automaintainer.context import EngineContext, current_engine
@@ -152,6 +152,7 @@ def head(tmp_path, monkeypatch):
     return checkouts
 
 
+@needs_adk
 async def test_real_adk_review_through_the_node(monkeypatch, head):
     monkeypatch.setenv("REVIEWER_BACKEND", "adk")
     repo, pr, seen = _setup(monkeypatch)
@@ -177,6 +178,7 @@ async def test_real_adk_review_through_the_node(monkeypatch, head):
 
 async def test_a_failed_checkout_is_a_rejection(monkeypatch):
     monkeypatch.setenv("REVIEWER_BACKEND", "adk")
+    monkeypatch.setattr(config_module, "_adk_missing", lambda: None)
     _, pr, _ = _setup(monkeypatch)
 
     @asynccontextmanager

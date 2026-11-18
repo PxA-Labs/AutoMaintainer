@@ -13,12 +13,14 @@ import sys
 import pytest
 
 import agents
-from adk_fakes import APPROVE, REJECT, ModelFactory, calls, scripted
+from adk_fakes import APPROVE, REJECT, ModelFactory, calls, needs_adk, scripted
 from automaintainer._runtime.specialists import reviewer_adk
 from automaintainer._runtime.specialists.contracts import ReviewRequest
 from automaintainer._runtime.specialists.reviewer_adk import ReviewBudget
 from automaintainer._runtime.specialists.tools import ReviewTools
 from events import ErrorEvent, TelemetryEvent
+
+pytestmark = needs_adk
 
 SHA = "b" * 40
 TOOL_NAMES = {"get_diff", "read_file", "search_code", "get_verification_log"}
@@ -242,6 +244,27 @@ async def test_run_stop_requested_during_the_review_rejects(factory, review_tool
 
     assert_rejected(decision, "cancelled")
     assert len(factory.turns) == 1
+
+
+async def test_stop_requested_while_the_model_approves_still_rejects(
+    factory, review_tools
+):
+    """The stop arrives during the turn that approves: no tool call or model
+    call follows, but the approval must still not come out."""
+    stop = {"now": False}
+
+    def policy(turn, turns):
+        stop["now"] = True
+        return APPROVE
+
+    factory.policy = policy
+    token = agents._run_should_stop.set(lambda: stop["now"])
+    try:
+        decision, _ = await run_review(review_tools)
+    finally:
+        agents._run_should_stop.reset(token)
+
+    assert_rejected(decision, "cancelled")
 
 
 async def test_cancelling_the_task_propagates_and_never_approves(factory, review_tools):

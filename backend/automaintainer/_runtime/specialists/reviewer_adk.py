@@ -438,6 +438,9 @@ async def _converse(request: ReviewRequest, tools: ReviewTools, usage: _Usage, m
             # A model call started and never returned: ADK swallowed its
             # cancellation and ended the invocation without an answer.
             usage.abort("the review was cancelled")
+        # A stop requested during the last model call: no callback runs
+        # after it, and its answer (perhaps an approval) must not be used.
+        usage.check_stop()
         return _final_text(events)
 
     try:
