@@ -631,7 +631,13 @@ Not isolated:
 - **The signed URLs themselves.** They are in the task's environment, so the
   command can read them. They let it reread its own copy and rewrite its own
   result; the rewritten result must still agree with the task's exit
-  status, and a test can always choose its own exit code anyway.
+  status, and a test can always choose its own exit code anyway. Outside
+  the sandbox, the URLs are also readable by anyone who holds
+  `run.executions.get` (the execution's overrides) or can read the project's
+  Admin Activity audit logs (the `jobs.run` request body). They expire
+  after the command timeout plus about five minutes and the objects are
+  deleted after each run, so a leaked URL is short-lived; restrict both
+  permissions to the people who already administer the worker.
 - **Metadata.** Project id, region and the sandbox account's email are
   visible from the metadata server.
 - **The change influencing its own tests** (see Limitations), as with every
