@@ -14,6 +14,10 @@ the same in all of them):
   (verification and hidden tests) in the process that holds the key; see
   docs/EVALS.md before running it.
 
+``--reviewer-backend adk`` (live only) runs the maintainer node's review
+with the ADK Reviewer instead of the single-shot prompt (#525); see
+docs/EVALS.md for the comparison.
+
 Exit codes: 0 success; 1 a gate failed (rates, ``--fail-on-stale``);
 2 a harness error (missing key or cassette, a run that could not be scored).
 """
@@ -51,6 +55,7 @@ from .runner import run_pipeline_task, run_review_case
 from .taskset import load_e2e_tasks, load_review_cases
 
 MODES = ("oracle", "noop", "replay", "live")
+REVIEWER_BACKENDS = ("langgraph", "adk")
 SUITES = ("pipeline", "reviewer", "all")
 LIVE_MODEL = "llama-3.3-70b-versatile"
 KEY_VARIABLES = ["GROQ_API_KEY"] + [f"GROQ_API_KEY_{i}" for i in range(1, 20)]
@@ -97,7 +102,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--min-false-approval-rate", type=float, default=None)
     p.add_argument("--max-false-rejection-rate", type=float, default=None)
     p.add_argument("--fail-on-stale", action="store_true")
+    p.add_argument(
+        "--reviewer-backend",
+        choices=REVIEWER_BACKENDS,
+        default="langgraph",
+        help="who reviews in the maintainer node (#525); adk: live mode only",
+    )
     args = p.parse_args(argv)
+    if args.reviewer_backend == "adk" and args.mode != "live":
+        # The ADK Reviewer calls its model itself, not through the harness
+        # transport: offline it would reach a provider with the offline key,
+        # and no cassette holds its calls.
+        p.error("--reviewer-backend adk needs --mode live")
     if args.repeats is None and args.mode != "replay":
         # Replay resolves it from the cassettes (_replay_repeats).
         args.repeats = 3 if args.mode == "live" else 1
@@ -403,7 +419,11 @@ def main(argv=None, live_transport_factory=None) -> int:
             return 2
     used = {t.id for t in pipeline_tasks} | {c.task_id for c in cases}
     tasks = [task_by_id[i] for i in sorted(used)]
-    run_kwargs = {"model": args.model, "timeout": args.timeout}
+    run_kwargs = {
+        "model": args.model,
+        "timeout": args.timeout,
+        "reviewer_backend": args.reviewer_backend,
+    }
     if args.mode == "live":
         keys = _live_keys()
         if not keys:
@@ -456,6 +476,7 @@ def main(argv=None, live_transport_factory=None) -> int:
             "verification": "local runner",
             "github": "git-backed fake",
             "supabase": "in-memory fake",
+            "reviewer_backend": args.reviewer_backend,
         },
     }
     # Model-written code runs in this process and could print a key into
