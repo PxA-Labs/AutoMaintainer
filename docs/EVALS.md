@@ -1,24 +1,393 @@
-# Agent quality evals
+# Agent quality evaluation
 
-The backend test suite mocks every model call, so it checks plumbing, not
-whether the agent writes correct code. The eval harness in `backend/evals/`
-measures that. It runs the **Implementer** step on small fixture repositories
-and checks the result with hidden tests. This is the MVP of epic #414.
+The backend test suite mocks every model call. It checks plumbing, not whether
+the agents produce correct changes. The evaluation harnesses in
+`backend/evals/` measure that.
 
-What it measures: for a given issue text and target file, the prompt that
-`agents.implementer_node` builds, the model's reply, and
+| Harness | Command | What it runs | Measures |
+| --- | --- | --- | --- |
+| [End-to-end](#end-to-end-evaluation-whole-engine) | `python -m evals.e2e.run` | The whole `AutoMaintainerEngine` on 24 tasks, plus the Maintainer step alone on 27 Reviewer cases | Resolve rate, PRs merged without help, fix iterations, false approvals and rejections, tokens, cost, latency |
+| [Implementer](#implementer-harness) | `python -m evals.run` | The Implementer prompt and output normalizer on 30 single-file tasks | Resolve rate of one Implementer call |
+
+The end-to-end evaluation is the baseline that the ADK Reviewer (#525) and
+code retrieval (#526, [RAG.md](RAG.md)) are measured against. The Implementer
+harness is older and narrower; it remains in CI.
+
+**Current status.** Only offline modes have run. The committed cassettes are
+synthetic: they test the harnesses, not a model. No real-model result is
+committed. The first live baseline is an owner step
+([Running the live baseline](#running-the-live-baseline)).
+
+All commands below run from `backend/` with the backend dependencies
+installed (`uv sync --frozen --group dev --extra server`).
+
+## End-to-end evaluation (whole engine)
+
+`backend/evals/e2e/` runs a targeted run on each task's issue through the real
+LangGraph graph (Architect, Visionary, PM, Implementer, Maintainer and the
+retry loop), the real verification step, change limits and merge policy. On a
+targeted run the Architect and Visionary nodes take the issue as given and
+make no model call, so the PM, Implementer and Maintainer are the agents whose
+model behaviour is measured.
+
+Three dependencies are replaced, all through the engine's injection points
+(`AutoMaintainerEngine(supabase=, llm=, github=, emitter=, nodes=)`). The
+engine's runtime code is not modified.
+
+- **GitHub:** `fakes.GitRepository`, a bare git repository that holds only the
+  task's repository snapshot, behind the subset of the PyGithub API the nodes
+  call. Every agent write is a real commit with a fixed author and dates, so
+  SHAs are reproducible. The clone URL is a `file:` URL, so verification
+  clones and tests the pushed head as it would on GitHub.
+- **Supabase:** `fakes.InMemorySupabase` (run row, checkpoints, audit rows).
+- **The model:** an injected transport. `oracle` and `noop` are scripted
+  agents, `replay` answers from cassettes and `live` calls Groq.
+
+The engine configuration (`evals/e2e/runner.py`, `make_config`):
+`merge_policy="human"`, three iterations, the default change limits,
+verification on with the local runner (`runner_type="local"`) and
+`reviewer_backend="langgraph"` unless `--reviewer-backend` says otherwise.
+Code retrieval is not enabled. A repository writer starts every run.
+
+### Quick start
+
+```bash
+python -m pytest -q evals/e2e        # data validation and unit tests
+python -m evals.e2e.run --mode oracle --out oracle.json --min-resolve-rate 1.0
+python -m evals.e2e.run --mode noop   --out noop.json   --max-resolve-rate 0
+python -m evals.e2e.run --mode replay --out replay.json --fail-on-stale
+```
+
+Each run writes a JSON report (`--out`, default `e2e-results.json`) and a
+Markdown summary (`--markdown`, default `--out` with `.md`). Live mode is
+described in [Running the live baseline](#running-the-live-baseline).
+
+### Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--mode` | required | `oracle`, `noop`, `replay` or `live` ([Modes](#modes)). |
+| `--suite` | `all` | `pipeline`, `reviewer` or `all`. |
+| `--tasks`, `--cases` | `all` | Comma-separated task or Reviewer case ids. |
+| `--repeats` | 3 in `live`, 1 in `oracle` and `noop` | Runs per task and case. `replay` always runs the number of repeats the cassettes recorded. It refuses a different `--repeats` and cassettes that recorded different numbers of runs, so no recording is counted twice or partly dropped. |
+| `--jobs` | 2 | Runs in flight at once. |
+| `--cassettes` | `evals/e2e/cassettes/fixtures` | Directory replayed in `replay` mode. |
+| `--record` | none | Save cassettes of this run into a directory. |
+| `--model` | `llama-3.3-70b-versatile` in `live` | Model for every role. |
+| `--temperature`, `--seed` | 0, 1234 | Sampling settings for `live`. |
+| `--requests-per-minute`, `--tokens-per-minute` | 30, 6000 in `live` | The engine's client-side rate budget. |
+| `--prices` | built-in table | JSON price table ([Price table](#price-table-estimate)). |
+| `--timeout` | 120 | Seconds per pytest run. |
+| `--reviewer-backend` | `langgraph` | `langgraph` or `adk`; `adk` needs `--mode live` ([Comparing Reviewer backends](#comparing-reviewer-backends-525)). |
+| `--fail-on-stale` | off | Exit 1 if any replayed call's prompt changed since recording. |
+
+Gates (each exits 1 when it fails): `--min-resolve-rate`,
+`--max-resolve-rate`, `--min-merged-rate`, `--max-false-approval-rate`,
+`--min-false-approval-rate`, `--max-false-rejection-rate`.
+
+Exit codes: 0 success; 1 a gate failed or `--fail-on-stale` found a stale
+call; 2 a harness error (missing key or cassette, or a run that could not be
+scored). Any harness error voids the rates.
+
+### Task set
+
+24 tasks, each in `evals/e2e/tasks/<id>/`. The layout is that of the
+Implementer set (`task.json`, `repo/`, `hidden_tests/`, `solution/`, see
+[Task format](#task-format)), and `task.json` adds `source`, `defect` and
+`harness_files`. Each task is one upstream file at a pinned commit, taken
+from ten permissively licensed projects. The table reflects the `source`
+records in `task.json`:
+
+| Project | License | Commit | Tasks |
+| --- | --- | --- | --- |
+| [boltons](https://github.com/mahmoud/boltons) | BSD-3-Clause | `4332b35a` | 6 |
+| [inflection](https://github.com/jpvanhal/inflection) | MIT | `b00d4d34` | 3 |
+| [cachetools](https://github.com/tkem/cachetools) | MIT | `498bd83c` | 2 |
+| [hashids-python](https://github.com/davidaurelio/hashids-python) | MIT | `138a12e8` | 2 |
+| [isoweek](https://github.com/gisle/isoweek) | BSD-2-Clause | `4848cc22` | 2 |
+| [pytimeparse](https://github.com/wroberts/pytimeparse) | MIT | `6d26b2a9` | 2 |
+| [python-json-pointer](https://github.com/stefankoegl/python-json-pointer) | BSD-3-Clause | `54039218` | 2 |
+| [toolz](https://github.com/pytoolz/toolz) | BSD-3-Clause | `451af60d` | 2 |
+| [xmltodict](https://github.com/martinblech/xmltodict) | MIT | `8d7f1fdb` | 2 |
+| [shortuuid](https://github.com/skorokithakis/shortuuid) | BSD-3-Clause | `16374d28` | 1 |
+
+How each task was built:
+
+- **Oracle fix** (`solution/`): the upstream file, reformatted with black so
+  the repository's `black --check` gate passes (layout and quotes only).
+- **Snapshot** (`repo/`): the same file with one injected regression
+  (described in `task.json` `defect`), the upstream `LICENSE`, a small visible
+  test file written for the evaluation and, where the upstream package
+  `__init__.py` imports modules the snapshot leaves out, an empty package
+  marker. These additions are listed in `harness_files`.
+- **Issue:** written as a bug report (symptom, reproduction, expected
+  behaviour). It names the target file, which targeted runs require.
+- **Hidden tests:** written for the evaluation; they check only what the
+  issue states.
+
+These are real code with synthetic regressions, not historical upstream
+issues. The bugs and fixes are known exactly, but a model may have seen the
+fixed upstream code during training, which makes the tasks easier than
+unseen code. Treat the scores as a regression baseline for this pipeline, not
+as a benchmark result.
+
+`evals/e2e/tests/test_e2e_data.py` checks, for every task, that the oracle
+passes the hidden tests, that the snapshot fails them without breaking its
+own tests, and that the hidden tests, the fix and `task.json` are absent from
+the git object store the agents and the verification clone see and
+unreachable through the fake API (including by path traversal).
+
+### Reviewer change set
+
+`evals/e2e/reviewer/` holds 27 cases, each a `case.json` and the changed
+files:
+
+- **14 defective changes**, by defect class: `wrong-logic` 4,
+  `broken-api` 2, `deleted-test` 2, `injected-instruction` 2 (an instruction
+  to the reviewer in a comment), `missing-edge-case` 2,
+  `special-cased-values` 1, `swallowed-exception` 1. The hidden tests catch
+  every one of them (checked by the data validation tests).
+- **13 correct changes**: the oracle fixes of the same tasks.
+
+For each case the harness opens a PR with the change (replacement `pm` and
+`implementer` nodes), verifies it with the engine's own verification step,
+and the real `maintainer` node reviews it with that result in its prompt
+(`max_iterations=1`).
+
+### Modes
+
+| Mode | Agents | Purpose |
+| --- | --- | --- |
+| `oracle` | Scripted: approve and write the reference fix; the Reviewer always gives the right verdict. | Must resolve every task and judge every case correctly. Checks the tasks and the harness. |
+| `noop` | Scripted: the Implementer returns the file unchanged; the Reviewer approves everything. | Must resolve nothing and approve every defective change. Catches tasks that pass without a fix. |
+| `replay` | Answers from cassettes (default: the committed `cassettes/fixtures`). | Offline and deterministic. Used in CI. |
+| `live` | Groq, with the keys in `GROQ_API_KEY` and `GROQ_API_KEY_1` to `GROQ_API_KEY_19`. | The actual measurement. Manual only. |
+
+### Metrics
+
+Per run (`pipeline.runs` in the JSON report):
+
+| Field | Meaning |
+| --- | --- |
+| `attempted` | The PM approved and the Implementer ran at least once. |
+| `pr_opened` | The run opened a pull request. |
+| `resolved` | The hidden tests pass and the repository's tests still pass on the final PR head (the newest PR). |
+| `maintainer_approved` | The last Maintainer verdict approved. Under `human` the PR then waits for a person. |
+| `merged_without_help` | `maintainer_approved` and `resolved`: the PR would have merged correctly with no human change. |
+| `fix_iterations` | Implementer iterations, 1 to 3. |
+| `prompt_tokens`, `completion_tokens` | From the provider's usage (live, or cassettes recorded live); `null` for scripted agents. |
+| `cost_usd` | Tokens priced with the price table; `null` when usage or price is unknown. |
+| `latency_s` | Wall-clock time of the engine run, scoring excluded. |
+| `stale_calls` | Replayed calls whose prompt changed since recording. |
+
+Aggregation:
+
+- **Per task:** rates over its repeats, and mean and standard deviation of
+  iterations, tokens, cost and latency.
+- **Overall:** each metric is computed per repeat across all tasks, then
+  reported as mean and standard deviation over the repeats.
+  `resolved_ci95` is a 95% Wilson interval over all runs pooled. Repeats of
+  one task are correlated, so this interval is too narrow when they agree.
+- **Reviewer:** `false_approval_rate` is defective changes approved divided by
+  defective changes. `false_rejection_rate` is correct changes rejected
+  divided by correct changes. Both are computed per repeat, then reported as
+  mean and standard deviation, with approvals per defect class.
+
+### Price table (estimate)
+
+`evals/e2e/pricing.py` holds a built-in table in USD per million tokens:
+
+| Model | Input | Output |
+| --- | --- | --- |
+| `llama-3.3-70b-versatile` | 0.59 | 0.79 |
+| `llama-3.1-8b-instant` | 0.05 | 0.08 <!-- gitleaks:allow --> |
+
+These are Groq's earlier public list prices. They could not be confirmed
+when the table was written, so treat every cost in a report as an estimate.
+The report records the price source. Pass `--prices FILE` with current
+prices before quoting a cost.
+
+### Cassettes and the fixture baseline
+
+A cassette (`cassettes/<set>/<pipeline|reviewer>/<id>.json`) stores, per
+repeat, every model call: role, answer, usage, latency and the hash of the
+normalised prompt. Normalisation drops the verification output block (host
+test output), timings, host paths and SHAs. A replay on another machine is
+therefore not stale, while any change to what the agents are asked is.
+
+The committed set `cassettes/fixtures/` is synthetic. `evals/e2e/make_fixtures.py`
+records it from the scripted oracle and no-op agents and mixes them by a fixed
+rule: every third task by sorted id replays the no-op, and every fourth
+defective change replays the rubber-stamp Reviewer. A full replay must
+therefore score:
+
+| Suite | Fixture baseline |
+| --- | --- |
+| Pipeline | 16/24 resolved (0.667), 16/24 merged without help |
+| Reviewer | 3/14 false approvals (0.214), 0/13 false rejections |
+
+`evals/e2e/tests/test_e2e_fixtures.py` pins these two rates, and the CI gates
+below enforce them. They describe the harness and the engine plumbing, never
+a model. After a prompt change, regenerate the set with
+`python -m evals.e2e.make_fixtures` and check that only hashes changed.
+
+### CI gates
+
+`.github/workflows/evals.yml` runs the `e2e-offline` job on pull requests to
+`main` that touch `backend/automaintainer/_runtime/agents.py`,
+`backend/agents.py`, `backend/evals/**`, `backend/pyproject.toml`,
+`backend/uv.lock` or the workflow itself. It installs
+`--extra server --group dev` and runs:
+
+| Step | Command and gates |
+| --- | --- |
+| Data validation and unit tests | `python -m pytest -q evals/e2e` |
+| Oracle | `--mode oracle`: `--min-resolve-rate 1.0 --min-merged-rate 1.0 --max-false-approval-rate 0 --max-false-rejection-rate 0` |
+| No-op | `--mode noop`: `--max-resolve-rate 0 --min-false-approval-rate 1.0 --max-false-rejection-rate 0` |
+| Fixture replay | `--mode replay --fail-on-stale`: `--min-resolve-rate 0.66 --max-resolve-rate 0.67 --min-false-approval-rate 0.21 --max-false-approval-rate 0.22 --max-false-rejection-rate 0` |
+
+The replay bands bracket the fixture baseline (16/24 = 0.667 and
+3/14 = 0.214). Results are uploaded as the `e2e-results-offline` artifact.
+Changes to engine files outside the listed paths do not trigger the job.
+
+### Running the live baseline
+
+Live mode calls Groq and costs money, so only the owner runs it. Read the
+cautions below first.
+
+**In CI.** Dispatch `.github/workflows/evals.yml` manually with `suite` set to
+`e2e` (or `both`; the default `implementer` runs only the Implementer live
+job). The inputs are `e2e_tasks` and `e2e_cases` (default `all`),
+`e2e_repeats` (default 3) and `model` (default `llama-3.3-70b-versatile`). The
+`e2e-live` job first runs the oracle on the same subset as a sanity check,
+then runs live with `--jobs 1`, records cassettes, and uploads the
+`e2e-results-live` artifact. The job uses the `GROQ_API_KEY` repository
+secret.
+
+**Locally:**
+
+```bash
+GROQ_API_KEY=... python -m evals.e2e.run --mode live --record my-cassettes --out live.json
+```
+
+To replay a recording, from the artifact or a local run:
+
+```bash
+python -m evals.e2e.run --mode replay --cassettes evals/e2e/cassettes/<name> --fail-on-stale
+```
+
+A full run at the default 3 repeats is 72 pipeline runs and 81 Reviewer runs.
+Use `--tasks` and `--cases` to bound cost.
+
+Cautions:
+
+- **Model-written code runs in the process that holds the key.**
+  Verification and the hidden tests execute the PR head. The child processes
+  get a scrubbed environment, but on Linux they can read the parent's
+  environment (`/proc/<ppid>/environ`). Use a dedicated, low-limit evaluation
+  key, run only where that exposure is acceptable, and rotate the key after a
+  run. Unlike the Implementer harness, generation and scoring cannot be split
+  into two processes, because the pipeline interleaves model calls with test
+  runs.
+- **Redaction is partial.** Every `GROQ_API_KEY*` value is replaced with
+  `[REDACTED]` in the JSON and Markdown reports, the printed summary and
+  recorded cassettes. A key that model code encodes or splits before printing
+  is not caught.
+- **Same-host leakage.** The leak guards keep the hidden tests and the fix
+  out of the fake GitHub API and the clone the agents see. Model-written code
+  still runs on the host and could read `evals/e2e/tasks/*/solution/`,
+  `hidden_tests/` or the committed cassettes (whose Implementer answers hold
+  the oracle fix) by absolute path. That takes deliberately adversarial code,
+  but a resolved task in live mode is not proof that the model never saw the
+  answer. Scoring needs the hidden tests, so the harness does not isolate
+  them. Check resolved diffs by hand before quoting a live number.
+- **Not production behaviour.** Live mode uses plain completions through the
+  injected transport at a fixed temperature (0) and seed. Production's
+  GitNexus tool loop and its silent 8B fallback are not exercised, because
+  they cannot report per-call usage.
+
+### Comparing Reviewer backends (#525)
+
+`--reviewer-backend langgraph|adk` selects who reviews in the maintainer
+node: the single-shot prompt (`langgraph`, the default and the deployment
+default of `REVIEWER_BACKEND`) or the ADK Reviewer (`adk`, see the
+[design note](design/adk-specialist-agents.md)). The report records the
+backend under `metadata.engine.reviewer_backend`. `adk` is accepted only in
+`--mode live`: the ADK Reviewer calls its model itself, not through the
+harness transport, so there is nothing to replay, and offline it would reach
+a provider with the offline key. The `evals.yml` workflow does not pass this
+option, so the comparison runs locally.
+
+Owner procedure:
+
+1. Run the tool-calling spike (`python -m evals.spike_adk_groq`, see the
+   design note) and record a GO.
+2. Run both backends with a dedicated evaluation key and the same model:
+
+   ```bash
+   uv sync --frozen --group dev --extra server --extra adk
+   export GROQ_API_KEY=...   # read the live-mode cautions first
+   for backend in langgraph adk; do
+     uv run --frozen python -m evals.e2e.run --mode live --suite reviewer \
+       --repeats 3 --reviewer-backend "$backend" \
+       --out "e2e-reviewer-$backend.json"
+   done
+   ```
+
+3. Read `reviewer.summary.overall` in each report:
+   - `false_approval_rate`: mean and standard deviation over the repeats,
+     each over the 14 defective cases. This figure decides. Compare it with
+     the `langgraph` live run of the same model, day and key, and with the
+     fixture baseline of 3/14 (0.214). The fixture figure is synthetic; it is
+     the harness's reference, not a model's.
+   - `false_rejection_rate` over the 13 correct cases.
+   - `latency_s` per run. For fix iterations, run `--suite pipeline` with
+     each backend and compare `fix_iterations`.
+   - Cost: the token and cost columns count only calls made through the
+     harness transport. With `adk` they leave out the Reviewer's own calls
+     (its runs show `llm_calls` 0). Take those tokens from the provider's
+     usage page for the evaluation key. For a Gemini fallback, pass
+     `--prices` with its prices.
+
+With 14 defective cases, one approval moves the rate by 0.071, so treat a
+difference smaller than the two spreads as no difference. The decision rule
+from the design note: enable `adk` only if its false-approval mean is not
+worse than the `langgraph` live mean and at least one other figure improves.
+Otherwise keep `REVIEWER_BACKEND=langgraph` and record the numbers in #525.
+
+### Limitations of the end-to-end evaluation
+
+- **Synthetic regressions in real code** that a model may have seen in
+  training; single-file fixes; small libraries; Python only.
+- **Small n.** 24 tasks and 27 Reviewer cases give wide intervals. Compare
+  versions task by task, as described in
+  [Comparing two versions fairly](#comparing-two-versions-fairly).
+- **Offline GitHub.** No other CI checks, permissions or webhooks. Only
+  targeted runs and `MERGE_POLICY=human` are covered.
+- **Not a sandbox.** Verification runs the snapshot's tests with the local
+  runner on the host. Running live evaluations inside a sandbox backend is
+  still open (#532).
+- **The Reviewer suite starts from a PR the harness opens,** so it measures
+  the Maintainer step in isolation. The pipeline suite includes it in
+  context.
+- **Not yet built:** a script that rebuilds the task set from upstream
+  (`build_tasks.py`). `task.json` records each defect, upstream commit and
+  path.
+
+## Implementer harness
+
+The Implementer harness is the MVP of epic #414. It runs the Implementer
+step on small fixture repositories and checks the result with hidden tests.
+For a given issue text and target file, it measures whether the prompt that
+`agents.implementer_node` builds, the model's reply and
 `agents.normalize_generated_code` together produce a file that makes the
 hidden acceptance tests pass without breaking the repository's own tests.
 
-It does **not** measure the Architect, Visionary, PM or Maintainer, the
-GitNexus tool loop, GitHub interaction, or multi-iteration repair. See
-[Limitations](#limitations). The [end-to-end evaluation](#end-to-end-evaluation-whole-engine)
-below covers the whole engine, the review loop and the Reviewer's false
-approvals.
+It does not measure the Architect, Visionary, PM or Maintainer, the GitNexus
+tool loop, GitHub interaction or multi-iteration repair. The
+[end-to-end evaluation](#end-to-end-evaluation-whole-engine) covers those.
 
-## Quick start
-
-From `backend/`, with the backend dependencies installed:
+### Quick start
 
 ```bash
 # Check the harness itself. The oracle must score 100% and the no-op 0%.
@@ -39,59 +408,71 @@ python -m evals.run --mode replay --cassettes my-cassettes --fail-on-stale --out
 python -m evals.compare before.json after.json
 
 # Unit tests for the harness (they also run in the normal backend suite).
-python -m pytest -q evals
+python -m pytest -q evals --ignore=evals/e2e
 ```
 
-Other options: `--tasks a,b`, `--jobs N` (tasks evaluated in parallel),
-`--timeout S` (limit per pytest run), `--model`, `--temperature` (default 0),
-`--seed` (default 1234), `--cassettes DIR`, `--fail-on-stale` (replay:
-exit 1 if any cassette answered a different prompt) and `--generate-only`
-(live: only record cassettes into `--record DIR`; no candidate code runs and
-the results file has `aggregate: null`).
-
-### What CI runs, and subsets
-
-- **Pull requests** that touch `backend/agents.py`, `backend/evals/**` or the
-  lockfile run the offline job in `.github/workflows/evals.yml` on **all 30
-  tasks**: the harness unit tests, the oracle (must be 100%), the no-op (must
-  be 0%) and the synthetic replay (`--min-resolve-rate 0.6 --fail-on-stale`).
-  Every task starts several fresh pytest subprocesses (test collection,
-  repository tests, hidden tests), so with `--jobs 4` each mode takes a
-  minute or two.
-- **Live runs** are manual (`workflow_dispatch`); the `tasks` input takes
-  `all` or a comma-separated subset, which also bounds the API cost.
-- For a quick local check while editing the prompt or normalizer, run one
-  task per category, then the full set before you push:
-
-```bash
-python -m evals.run --mode replay --tasks page_count,env_bool_override,retry_exception_filter,lru_eviction,version_compare,carrier_registry
-```
-
-A subset changes `taskset_hash`, so `evals.compare` only compares runs over
-the same subset. Never quote a subset's rate as the set's rate.
+Other options: `--tasks a,b`, `--jobs N` (tasks evaluated in parallel,
+default 1), `--timeout S` (seconds per pytest run, default 60), `--model`
+(default `llama-3.3-70b-versatile`), `--temperature` (default 0), `--seed`
+(default 1234), `--cassettes DIR`, `--fail-on-stale` (replay: exit 1 if any
+cassette answered a different prompt) and `--generate-only` (live: only record
+cassettes into `--record DIR`; no candidate code runs and the results file has
+`aggregate: null`).
 
 Exit codes:
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | A `--min-resolve-rate` / `--max-resolve-rate` gate failed, or `--fail-on-stale` found stale cassettes |
+| 1 | A `--min-resolve-rate` or `--max-resolve-rate` gate failed, or `--fail-on-stale` found stale cassettes |
 | 2 | Harness or infrastructure error: missing key, missing cassette, or a failed LLM call |
 
-## Modes and baselines
+### CI
+
+The `offline` job of `.github/workflows/evals.yml` runs on the same pull
+request paths as the end-to-end job, on all 30 tasks:
+
+| Step | Command and gate |
+| --- | --- |
+| Harness unit tests | `python -m pytest -q evals --ignore=evals/e2e` |
+| Oracle | `--mode oracle --min-resolve-rate 1.0` |
+| No-op | `--mode noop --max-resolve-rate 0.0` |
+| Cassette replay | `--mode replay --min-resolve-rate 0.6 --fail-on-stale` |
+
+Each mode runs with `--jobs 4`. Every task starts several fresh pytest
+subprocesses (test collection, repository tests, hidden tests).
+
+Live runs are manual: dispatch the workflow with `suite` set to
+`implementer` (the default) or `both`. The `tasks` input takes `all` or a
+comma-separated subset, which also bounds the API cost. The `live` job runs
+the oracle, then generates in a step that holds `GROQ_API_KEY` and runs no
+tests (`--generate-only`), then scores the recorded cassettes in a separate
+step without the secret.
+
+For a quick local check while editing the prompt or normalizer, run one task
+per category, then the full set before you push:
+
+```bash
+python -m evals.run --mode replay --tasks page_count,env_bool_override,retry_exception_filter,lru_eviction,version_compare,carrier_registry
+```
+
+A subset changes `taskset_hash`, so `evals.compare` only compares runs over
+the same subset. Do not quote a subset's rate as the set's rate.
+
+### Modes
 
 | Mode | Candidate file | Purpose |
 | --- | --- | --- |
 | `noop` | none (repository unchanged) | Hidden tests must fail and the repository's tests must pass. This catches vacuous or already-passing tests. |
 | `oracle` | `tasks/<id>/solution/` | Must resolve 100%. This checks the tasks and the harness end to end. |
 | `replay` | `cassettes/<set>/<id>.json` | Offline and deterministic. Used in CI. |
-| `live` | the model, via `langchain_groq.ChatGroq` | The actual measurement. |
+| `live` | the model, through `langchain_groq.ChatGroq` | The actual measurement. |
 
-The oracle's reference file goes through `normalize_generated_code` like model
-output does. So the oracle also shows that normalization accepts a correct
-bare file.
+The oracle's reference file goes through `normalize_generated_code` like
+model output does, so the oracle also shows that normalization accepts a
+correct bare file.
 
-## Task format
+### Task format
 
 ```
 backend/evals/tasks/<task_id>/
@@ -103,7 +484,7 @@ backend/evals/tasks/<task_id>/
   solution/      reference version of target_file, used by the oracle
 ```
 
-`kind`, `category` and `difficulty` come from closed lists; the loader
+`kind`, `category` and `difficulty` come from closed lists. The loader
 (`evals/taskset.py`) rejects any other value, so a typo cannot create a new
 bucket:
 
@@ -118,49 +499,47 @@ text and the current content of `target_file`. The prompt is identical to the
 production one: `evals/tests/test_prompt_parity.py` runs the real
 `implementer_node` with a mocked GitHub client and compares the prompts.
 
-### Leakage rules
+#### Leakage rules
 
-- **Never** put hidden tests, the solution, or anything derived from them into
-  a prompt, an issue body, a cassette you share for prompt tuning, or a
+- Never put hidden tests, the solution or anything derived from them into a
+  prompt, an issue body, a cassette you share for prompt tuning, or a
   few-shot example. A task whose hidden tests the model has seen is no longer
   an evaluation task. Retire it and write a new one.
-- Do not tune prompts against the hidden test output of a task and then report
-  that task's score as unbiased. Keep a held-out split once the set is large
-  enough (see epic #414).
+- Do not tune prompts against the hidden test output of a task and then
+  report that task's score as unbiased. Keep a held-out split once the set is
+  large enough (see epic #414).
 - `test_taskset.py` checks that no hidden test name and no solution text
   appears in the rendered prompt.
 
-### Leaky-task guards
+#### Leaky-task guards
 
 A task is useless if a candidate can pass it without doing the work. Every
-task is held to these rules, and `evals/tests/test_taskset.py` enforces the
-ones that can be checked statically:
+task follows these rules, and `evals/tests/test_taskset.py` enforces the ones
+that can be checked statically:
 
 - **Behaviour, not files.** Hidden and repository tests call the code; they
   never read source or fixture files (`open(`, `read_text`, `inspect`,
   `__file__`, `Path(`, `os.path`, `glob`, `importlib`, `subprocess`,
-  `exec(`/`eval(` are rejected). The candidate controls the target file, so a
-  test that inspects it could be satisfied by a comment.
+  `exec(` and `eval(` are rejected). The candidate controls the target file,
+  so a test that inspects it could be satisfied by a comment.
 - **No trivial pass.** Every hidden test file imports the target module and
   holds at least two tests, with several inputs per behaviour (often
   parametrized), so no single hard-coded return value or stub passes. Hidden
   tests never compare against constants defined in the target module, which
   the candidate could change.
 - **Fail before, pass after.** The no-op baseline must fail every task's
-  hidden tests without a regression, and the oracle must pass all of them (CI
-  runs both on every PR that touches the harness).
+  hidden tests without a regression, and the oracle must pass all of them.
 - **Fair.** Hidden tests check only what the issue states, including exact
   formats and exception types, so a correct reading of the issue passes.
 
-### Provenance of the current set
+#### Provenance of the task set
 
-The set has **30 tasks**. All of them were **written from scratch for this
-harness in 2026-11**: the first 10 for the MVP, 20 more to narrow the
-confidence intervals. None is taken or adapted from any public repository,
-issue tracker or benchmark, such as SWE-bench, HumanEval or MBPP, so a model
-cannot have memorized them from public data. They are small and synthetic,
-so they measure basic single-file editing ability, not performance on
-real-world issues.
+The set has 30 tasks. All of them were written from scratch for this harness
+in 2026-11: the first 10 for the MVP and 20 more to narrow the confidence
+intervals. None is taken or adapted from a public repository, issue tracker
+or benchmark such as SWE-bench, HumanEval or MBPP, so a model cannot have
+memorized them from public data. They are small and synthetic, so they
+measure basic single-file editing, not performance on real-world issues.
 
 | | Count |
 | --- | --- |
@@ -168,42 +547,42 @@ real-world issues.
 | Difficulty | 11 easy, 13 medium, 6 hard |
 | Category | 7 edge-case, 6 input-validation, 6 data-structure, 5 logic, 4 api-change, 2 error-handling |
 
-`error-handling` is the thinnest category; prefer it for the next tasks. The
+`error-handling` is the thinnest category; prefer it for new tasks. The
 results file carries each task's `kind` and `difficulty`; join on `task_id`
 with `task.json` for `category`.
 
-### Adding a task
+#### Adding a task
 
 1. Create `tasks/<new_id>/` with the layout above. `id` must equal the
-   directory name. Write it yourself; do not copy public code, issues or
-   benchmark problems. Set `kind`, `category` and `difficulty` from the lists
-   above and `provenance` to a string starting with `original`.
+   directory name. Write the task yourself; do not copy public code, issues
+   or benchmark problems. Set `kind`, `category` and `difficulty` from the
+   lists above and `provenance` to a string starting with `original`.
 2. The issue body must name the target file in a form `extract_target_file`
    understands, for example `` `pkg/module.py` ``, and should name no other
    file path. A test enforces this.
-3. Describe the required behavior in the issue precisely enough that the
-   hidden tests are fair. Hidden tests must check only what the issue states.
-   Follow the [leaky-task guards](#leaky-task-guards).
+3. Describe the required behaviour precisely enough that the hidden tests are
+   fair. Hidden tests check only what the issue states. Follow the
+   [leaky-task guards](#leaky-task-guards).
 4. Add at least one pre-existing test under `repo/tests/` that passes before
-   and after the fix. For a refactor, these tests pin the old behaviour.
-   Name hidden test files `test_hidden_<topic>.py`, so they never share a
-   basename with a repository test.
+   and after the fix. For a refactor, these tests pin the old behaviour. Name
+   hidden test files `test_hidden_<topic>.py`, so they never share a basename
+   with a repository test.
 5. Run `python -m evals.run --mode oracle --tasks <new_id>` (must resolve) and
    `--mode noop --tasks <new_id>` (must not resolve, with
    `regression: false`).
-6. Replay needs a cassette for **every** task (a missing one is a harness
-   error, exit 2). Hand-write `cassettes/synthetic/<new_id>.json` in the
-   shape of the existing ones (`"synthetic": true`, `"model":
-   "synthetic-fixture"`, a `note` that says what the response exercises),
-   then run `python -m evals.rehash` to fill in `prompt_sha256` and
-   `prompt_version`. Never paste a real model's output into the synthetic
-   set.
+6. Replay needs a cassette for every task; a missing one is a harness error
+   (exit 2). Hand-write `cassettes/synthetic/<new_id>.json` in the shape of
+   the existing ones (`"synthetic": true`, `"model": "synthetic-fixture"`, a
+   `note` that says what the response exercises), then run
+   `python -m evals.rehash` to fill in `prompt_sha256` and `prompt_version`.
+   Never paste a real model's output into the synthetic set.
 7. Update the expected replay score in `evals/tests/test_harness.py` and, if
    the rate changes, the replay `--min-resolve-rate` gate in
-   `.github/workflows/evals.yml` (the committed set is kept at exactly 60%,
-   so adding correct and failing cassettes in a 3:2 ratio keeps the gate).
-8. Run `python -m pytest -q evals` (this includes the full oracle, no-op and
-   replay runs) and `black evals`, and update the counts in this document.
+   `.github/workflows/evals.yml`. The committed set is kept at exactly 60%,
+   so adding correct and failing cassettes in a 3:2 ratio keeps the gate.
+8. Run `python -m pytest -q evals --ignore=evals/e2e` (this includes the full
+   oracle, no-op and replay runs) and `black evals`, and update the counts in
+   this document.
 
 The backend suite never collects files under `tasks/`; `evals/conftest.py`
 excludes them.
@@ -212,62 +591,60 @@ excludes them.
 
 pytest's exit code is not trusted on its own: candidate code that calls
 `os._exit(0)` at import makes pytest exit 0 without running a test. Each run
-writes a JUnit report into a fresh directory, and a run counts as passed only
-if pytest exits 0, the report exists, and exactly as many tests passed as
-`pytest --collect-only` finds on the reference solution (no failures, errors
-or skips). The repository tests and the hidden tests run in two separate
-fresh copies, so the hidden tests do not exist on disk while the candidate
-runs the first time, and nothing that run writes (edited tests, a planted
-`conftest.py` or `sitecustomize.py`) carries over.
+writes a JUnit report into a fresh directory. A run counts as passed only if
+pytest exits 0, the report exists, and exactly as many tests passed as
+`pytest --collect-only` finds on the reference solution, with no failures,
+errors or skips. The repository tests and the hidden tests run in two
+separate fresh copies. The hidden tests do not exist on disk while the
+candidate runs the first time, and nothing that run writes (edited tests, a
+planted `conftest.py` or `sitecustomize.py`) carries over.
 
 The target file is resolved from the issue text with
 `agents.extract_target_file`, as `implementer_node` does when no plan names
 it. If that gives no path or a different path, the task is recorded as
 `target_mismatch`: unresolved, not an error, and no model call is made.
 
-## Reading results
+### Reading results
 
 `results.json` has three parts:
 
 - `metadata`: `mode`, `prompt_version` (hash of the prompt template),
   `git_sha` and `git_dirty`, `taskset_hash` (content hash of the evaluated
-  tasks), `task_ids`, `timeout_s`, Python and platform, start time. Live runs
-  also record `model`, `temperature` and `seed`. Replay runs record the
+  tasks), `task_ids`, `timeout_s`, Python and platform, and start time. Live
+  runs also record `model`, `temperature` and `seed`. Replay runs record the
   values stored in the cassettes and `synthetic_cassettes`.
 - `aggregate`:
-  - `n`, `resolved` and `resolve_rate`
-  - `resolve_rate_ci95`: a 95% Wilson score interval
-  - `output_rejected` and its rate
-  - `regressions` and its rate
-  - `target_mismatches`, `timed_out`, `errors` and `stale_cassettes`
-  - when `errors > 0`, `resolve_rate` and `resolve_rate_ci95` are `null`:
-    the run is incomplete, and neither counting errored tasks as failures nor
-    dropping them gives an honest rate
-  - `latency_ms_mean` and `latency_ms_median`
-  - `tokens`: input, output and total, when the provider reports them
-- `tasks`: one record per task, described below.
+  - `n`, `resolved` and `resolve_rate`;
+  - `resolve_rate_ci95`, a 95% Wilson score interval;
+  - `output_rejected` and its rate;
+  - `regressions` and its rate;
+  - `target_mismatches`, `timed_out`, `errors` and `stale_cassettes`;
+  - `latency_ms_mean` and `latency_ms_median`;
+  - `tokens` (input, output and total), when the provider reports them.
 
-Fields of each task record:
+  When `errors > 0`, `resolve_rate` and `resolve_rate_ci95` are `null`: the
+  run is incomplete, and neither counting errored tasks as failures nor
+  dropping them gives an honest rate.
+- `tasks`: one record per task:
 
 | Field | Meaning |
 | --- | --- |
-| `resolved` | The hidden tests pass **and** the pre-existing tests still pass (fail-to-pass plus pass-to-pass). |
+| `resolved` | The hidden tests pass and the pre-existing tests still pass (fail-to-pass plus pass-to-pass). |
 | `hidden_tests_passed` | The hidden tests alone pass. |
 | `regression` | A pre-existing test failed after the change. `null` if the change was never applied. |
-| `target_mismatch` / `target_resolved` | `extract_target_file` on the issue text did not return the task's `target_file`; `target_resolved` is what it returned. |
-| `output_rejected` / `rejection_reason` | `normalize_generated_code` raised: refusal, truncation (`finish_reason=length`), ambiguous fences, empty output. Production aborts the run in this case. |
+| `target_mismatch`, `target_resolved` | `extract_target_file` on the issue text did not return the task's `target_file`; `target_resolved` is what it returned. |
+| `output_rejected`, `rejection_reason` | `normalize_generated_code` raised: refusal, truncation (`finish_reason=length`), ambiguous fences or empty output. Production aborts the run in this case. |
 | `patch` | Unified diff of the applied change, for failure analysis. |
 | `test_output` | Tail of the failing pytest output. |
 | `stale_cassette` | The cassette was recorded for a different prompt. Its result does not describe the current prompt. |
-| `error` | An infrastructure failure, such as a missing cassette or a network error. The run exits with code 2. Never report a run with errors. |
+| `error` | An infrastructure failure, such as a missing cassette or a network error. The run exits with code 2. Do not report a run with errors. |
 
 Report the interval with the rate, for example "18/30 resolved (60%, 95% CI
-42–75%)". With n=30, the interval is roughly ±17 points around 50%; at the
-MVP's n=10 it was about ±25 (6/10: 31–83%).
+42–75%)". With n=30 the interval is roughly ±17 points around 50%.
 
-### About the committed cassettes
+### The committed cassettes
 
-`cassettes/synthetic/` is **hand-written**. It is not output from a real model.
+`cassettes/synthetic/` is hand-written. It is not output from a real model.
 It covers every outcome the harness can classify:
 
 - 18 correct answers in every reply shape the normalizer must accept: the
@@ -280,12 +657,13 @@ It covers every outcome the harness can classify:
   with a syntax error;
 - 4 plausible but wrong fixes that fail the hidden tests only.
 
-Each cassette's `note` says which case it is. Replaying it measures the
-**harness and the output normalizer**, not the model. CI gates on its known
-score (18/30, `--min-resolve-rate 0.6`) and `evals/tests/test_harness.py`
-pins each failure class above per task plus the 18/30 total, so a change to `normalize_generated_code` that
-starts rejecting well-formed output, or accepting malformed output, fails the
-PR. To track real model behavior offline, record a set with
+Each cassette's `note` says which case it is. Replaying the set measures the
+harness and the output normalizer, not the model. CI gates on its known score
+(18/30, `--min-resolve-rate 0.6`), and `evals/tests/test_harness.py` pins each
+failure class per task and the 18/30 total. A change to
+`normalize_generated_code` that starts rejecting well-formed output, or
+accepting malformed output, therefore fails the PR. To track real model
+behaviour offline, record a set with
 `--mode live --record evals/cassettes/<name>` and replay it with
 `--cassettes`.
 
@@ -294,11 +672,9 @@ Every cassette stores the hash of the prompt it answered. CI replays with
 cassettes are dealt with explicitly. For the synthetic set, run
 `python -m evals.rehash`: its responses test the normalizer, not the model, so
 re-binding them is correct. `evals.rehash` refuses real-model cassettes; those
-must be re-recorded, because their answers were for the old prompt. A stale
-synthetic set never tells you how the new prompt performs; only a live run
-does.
+must be re-recorded, because their answers were for the old prompt.
 
-## Determinism
+### Determinism
 
 Live mode calls the model with `temperature=0` and a fixed `seed`; both are
 saved in the results. Groq treats `seed` as best effort, so outputs can still
@@ -307,336 +683,57 @@ when you need byte-for-byte reproducibility. Hidden tests run with
 `PYTHONHASHSEED=0` and with pytest plugin autoloading disabled. Results are
 sorted by task id, so `--jobs` does not change them.
 
-## Comparing two prompt or model versions fairly
+### Comparing two versions fairly
 
-1. Use the **same tasks**. `python -m evals.compare` refuses to compare when
-   the `taskset_hash` values differ.
+This applies to both harnesses.
+
+1. Use the same tasks. `python -m evals.compare` refuses to compare when the
+   `taskset_hash` values differ.
 2. Change one thing at a time. The comparison lists any differences in mode,
    model, temperature, seed or timeout as `uncontrolled_settings`.
-3. Compare **paired** outcomes, task by task, not two separate rates. Only the
+3. Compare paired outcomes, task by task, not two separate rates. Only the
    tasks where exactly one version succeeded carry information. `compare`
    lists them (`only_a_resolved` and `only_b_resolved`) and gives the exact
-   McNemar p-value. Even 5 discordant tasks that all favor one side give
-   only p=0.0625; it takes 6 of 6 (p=0.031) to reach p<0.05. Most differences
-   you will see at n=30 are noise.
-4. Overlapping Wilson intervals are not a valid test of a difference, because
-   they ignore the pairing. Use the McNemar result.
-5. Run live comparisons more than once (epic #414 asks for at least 3 seeds),
-   and record real-model cassettes so a reviewer can replay exactly what you
-   measured.
+   McNemar p-value. Even 5 discordant tasks that all favour one side give
+   only p=0.0625; it takes 6 of 6 (p=0.031) to reach p<0.05. Most
+   differences at n=30 are noise.
+4. Overlapping Wilson intervals are not a valid test of a difference,
+   because they ignore the pairing. Use the McNemar result.
+5. Run live comparisons more than once (epic #414 asks for at least 3
+   seeds), and record real-model cassettes so a reviewer can replay exactly
+   what you measured.
 6. Read the failure `patch` and `test_output` fields, not only the totals. A
    higher score can come from tasks that are easier for one prompt by chance.
 
-## Limitations
+### Limitations
 
-- **Small n, wide intervals.** 30 tasks give a 95% CI that is about 30 to 35
-  points wide in the middle of the range (18/30: 42–75%). Use the harness to
-  catch large regressions and to look at failures, not to rank close
-  alternatives. Per-category counts (2 to 7 tasks) are far too small for
-  per-category rates; read them as failure examples.
+- **Small n, wide intervals.** 30 tasks give a 95% CI about 30 to 35 points
+  wide in the middle of the range (18/30: 42–75%). Use the harness to catch
+  large regressions and to inspect failures, not to rank close alternatives.
+  Per-category counts (2 to 7 tasks) are too small for per-category rates.
 - **Single-file, small Python tasks.** The Implementer rewrites one whole
   file. The tasks contain no multi-file edits, no other languages, no large
-  files, and no tasks where the model must find the right file.
+  files and no tasks where the model must find the right file.
 - **Implementer only.** The plain completion here replaces production's
   GitNexus MCP tool loop (`run_llm_with_tools`), which also runs at the
-  provider's default temperature. The planning agents, the Maintainer review
-  loop and false-approve rates are not covered yet.
+  provider's default temperature.
 - **Synthetic tasks.** They were written for this harness, which keeps them
   free of contamination, but they are easier and cleaner than real issues.
-  Epic #414 plans real-issue tasks with dated splits.
-- **Not a sandbox.** Model-written code runs in a local `pytest` subprocess.
-  The subprocess gets a minimal environment with no API keys and a timeout,
-  but it keeps network access and file-system access and runs as the same
-  user. A stripped environment does not hide secrets from it: on Linux it can
-  read `/proc/<ppid>/environ` of the `evals.run` process, which holds
-  `GROQ_API_KEY` in a one-step live run. Use `--generate-only` and score the
-  recorded cassettes in a separate process without the key, as the workflow's
-  live job does. Code that targets the harness (for example by forging the
-  JUnit report it can locate) is also out of scope for these checks. Run live
-  evals only where that is acceptable. The containerized sandbox runner is the
-  planned replacement.
-- **One sample per task.** There are no repeated seeds or bootstrap intervals
-  yet.
+- **Not a sandbox.** Model-written code runs in a local `pytest` subprocess
+  with a minimal environment (no API keys) and a timeout, but with network
+  and file-system access, as the same user. A stripped environment does not
+  hide secrets: on Linux the subprocess can read `/proc/<ppid>/environ` of
+  the `evals.run` process, which holds `GROQ_API_KEY` in a one-step live run.
+  Use `--generate-only` and score the recorded cassettes in a separate
+  process without the key, as the workflow's `live` job does. Code that
+  targets the harness itself (for example by forging the JUnit report it can
+  locate) is out of scope for these checks. Run live evaluations only where
+  that is acceptable. Running them inside a sandbox backend
+  ([VERIFICATION.md](VERIFICATION.md#sandbox-backends)) is still open (#532).
+- **One sample per task.** There are no repeated seeds or bootstrap
+  intervals.
 - **Not production quality.** Live mode differs from production in three
   ways at once: no MCP tool loop, `temperature=0` instead of the provider
   default, and one sample per task. Read a live resolve rate as a regression
   signal for the prompt and normalizer, not as the Implementer's quality in
-  production, and do not quote it without repeated seeds.
-
-## End-to-end evaluation (whole engine)
-
-`backend/evals/e2e/` is the evaluation baseline of the roadmap (step 2), which
-the ADK Reviewer (#525) and RAG (#526) are measured against. It runs the
-**whole `AutoMaintainerEngine`** on each task: a targeted run on the task's
-issue through the real LangGraph graph (Architect, Visionary, PM, Implementer,
-Maintainer and the retry loop), the real verification step, change limits and
-merge policy. On a targeted run the Architect and Visionary nodes run but
-take the issue as given and make no model call: every recorded run holds
-only PM, Implementer and Maintainer calls, so only those three agents'
-model behaviour is measured. Only three things are replaced, all through the engine's own
-injection points (`AutoMaintainerEngine(supabase=, llm=, github=, emitter=,
-nodes=)`); the engine's runtime code is not modified:
-
-- **GitHub**: `fakes.GitRepository`, a bare git repository holding only the
-  task's repository snapshot, behind the subset of the PyGithub API the nodes
-  call. Every agent write is a real commit (fixed author and dates, so SHAs
-  are reproducible) and the clone URL is a `file:` URL, so verification clones
-  and tests the pushed head as it would on GitHub.
-- **Supabase**: `fakes.InMemorySupabase` (run row, checkpoints, audit rows).
-- **The model**: an injected transport. `oracle` and `noop` are scripted
-  agents, `replay` answers from cassettes, `live` calls Groq.
-
-The engine runs with `MERGE_POLICY=human`, three iterations, the default
-change limits and verification on with the local runner
-(`runner_type="local"`); the run is started by a repository writer.
-
-### Quick start
-
-From `backend/`:
-
-```bash
-python -m pytest -q evals/e2e                       # data validation and unit tests
-python -m evals.e2e.run --mode oracle --out oracle.json --min-resolve-rate 1.0
-python -m evals.e2e.run --mode noop   --out noop.json   --max-resolve-rate 0
-python -m evals.e2e.run --mode replay --out replay.json --fail-on-stale
-# Live (manual; needs GROQ_API_KEY, default 3 repeats). Read "Live mode" first.
-GROQ_API_KEY=... python -m evals.e2e.run --mode live --record my-cassettes --out live.json
-```
-
-Options: `--suite pipeline|reviewer|all`, `--tasks a,b`, `--cases a,b`,
-`--repeats N` (default 3 in live, 1 in oracle and noop; replay always runs
-exactly the number of runs the cassettes recorded, refuses a different
-`--repeats` and refuses cassettes that recorded different numbers of runs,
-so a recording is never counted twice and no recorded repeat is dropped),
-`--jobs N` (runs in flight),
-`--cassettes DIR`, `--record DIR`, `--model`, `--temperature`, `--seed`,
-`--requests-per-minute`/`--tokens-per-minute` (the engine's client-side
-budget; live defaults to the engine defaults, 30 and 6000), `--prices FILE`,
-`--markdown PATH` (default: `--out` with `.md`). Gates:
-`--min-resolve-rate`, `--max-resolve-rate`, `--min-merged-rate`,
-`--max-false-approval-rate`, `--min-false-approval-rate`,
-`--max-false-rejection-rate`, `--fail-on-stale`. Exit codes are those of
-`evals.run`: 0 success, 1 a gate failed, 2 a harness error (missing key or
-cassette, a run that could not be scored). Any harness error voids the rates.
-
-### Task set and provenance
-
-24 tasks, each in `evals/e2e/tasks/<id>/` (layout of the Implementer set plus
-`source`, `defect` and `harness_files` in `task.json`). Each task is **one
-real upstream file at a pinned commit**, from ten permissively licensed
-projects. Upstream code was fetched read-only from GitHub at these commits:
-
-| Project | License | Commit | Tasks |
-| --- | --- | --- | --- |
-| [boltons](https://github.com/mahmoud/boltons) | BSD-3-Clause | `4332b35a` | 6 |
-| [inflection](https://github.com/jpvanhal/inflection) | MIT | `b00d4d34` | 3 |
-| [isoweek](https://github.com/gisle/isoweek) | BSD-2-Clause | `4848cc22` | 2 |
-| [hashids-python](https://github.com/davidaurelio/hashids-python) | MIT | `138a12e8` | 2 |
-| [pytimeparse](https://github.com/wroberts/pytimeparse) | MIT | `6d26b2a9` | 2 |
-| [python-json-pointer](https://github.com/stefankoegl/python-json-pointer) | BSD-3-Clause | `54039218` | 2 |
-| [toolz](https://github.com/pytoolz/toolz) | BSD-3-Clause | `451af60d` | 2 |
-| [cachetools](https://github.com/tkem/cachetools) | MIT | `498bd83c` | 2 |
-| [xmltodict](https://github.com/martinblech/xmltodict) | MIT | `8d7f1fdb` | 2 |
-| [shortuuid](https://github.com/skorokithakis/shortuuid) | BSD-3-Clause | `16374d28` | 1 |
-
-What was done to each, exactly:
-
-- The **oracle fix** (`solution/`) is the upstream file, reformatted with
-  black so the repository's `black --check` gate passes (layout and quotes
-  only; the data-validation tests prove it still passes the hidden tests).
-- The **snapshot** (`repo/`) is the same file with **one injected
-  regression** (described in `task.json` `defect`), plus the upstream
-  `LICENSE`, a small visible test file written for the eval and, where the
-  upstream package `__init__.py` imports modules the snapshot leaves out, an
-  empty package marker (listed in `harness_files`).
-- The **issue** is written like a bug report (symptom, reproduction, expected
-  behaviour) and names the target file, which targeted runs require.
-- The **hidden tests** were written for the eval and check only what the
-  issue states.
-
-So these are **real code with synthetic regressions**, not historical
-upstream issues: the bugs and fixes are known exactly, but a model may have
-seen the (fixed) upstream code during training, which makes the tasks easier
-than unseen code. Treat the scores as a regression baseline for this
-pipeline, not as a benchmark result. Total task data is under 1 MB.
-
-`evals/e2e/tests/test_e2e_data.py` proves for every task that the oracle
-passes the hidden tests, the snapshot fails them without breaking its own
-tests, and that the hidden tests, the fix and `task.json` are absent from the
-git object store the agents and the verification clone see and unreachable
-through the fake API (including path traversal).
-
-### Reviewer change set
-
-`evals/e2e/reviewer/` holds 14 **defective changes** with a defect class
-(`wrong-logic`, `missing-edge-case`, `special-cased-values`, `broken-api`,
-`deleted-test`, `injected-instruction` in a comment, `swallowed-exception`)
-and 13 **correct changes** (the oracle fixes of the same tasks). The hidden
-tests catch every defective change (data validation). For each case the
-harness opens a PR with the change (replacement `pm` and `implementer` nodes),
-verifies it with the engine's own verification step, and the **real
-`maintainer` node** reviews it with that result in its prompt
-(`max_iterations=1`).
-
-### Metrics
-
-Per run (`pipeline.runs` in the JSON):
-
-| Field | Meaning |
-| --- | --- |
-| `attempted` | The PM approved and the Implementer ran at least once. |
-| `pr_opened` | The run opened a pull request. |
-| `resolved` | The hidden tests pass **and** the repository's tests still pass on the final PR head. |
-| `maintainer_approved` | The last Maintainer verdict approved (under `human` the PR then waits for a person). |
-| `merged_without_help` | `maintainer_approved` and `resolved`: the PR would have merged correctly with no human change. |
-| `fix_iterations` | Implementer iterations (1 to 3). |
-| `prompt_tokens`, `completion_tokens` | From the provider's usage (live, or cassettes recorded live); `null` for scripted agents. |
-| `cost_usd` | Tokens priced with the price table (below); `null` when usage or price is unknown. |
-| `latency_s` | Wall-clock time of the engine run, scoring excluded. |
-| `stale_calls` | Replayed calls whose prompt changed since recording. |
-
-Per task: rates over its repeats and mean ± standard deviation of
-iterations, tokens, cost and latency. Overall: each metric is computed per
-repeat across all tasks, then reported as mean ± standard deviation over
-repeats; `resolved_ci95` is a Wilson interval over all runs pooled (repeats
-of one task are correlated, so it is too narrow when they agree).
-
-Reviewer: `false_approval_rate` = defective changes approved / defective
-changes, `false_rejection_rate` = correct changes rejected / correct changes,
-per repeat then mean ± standard deviation, plus approvals per defect class.
-
-**Prices.** `evals/e2e/pricing.py` has a built-in table (USD per million
-tokens: `llama-3.3-70b-versatile` 0.59 in / 0.79 out, `llama-3.1-8b-instant` <!-- gitleaks:allow -->
-0.05 / 0.08). These are Groq's earlier public list prices and **could not be
-confirmed** when the table was written (Groq's model page showed "Contact
-sales"). The report records the price source; pass `--prices FILE` with the
-current prices before quoting a cost.
-
-### Cassettes and replay fixtures
-
-A cassette (`cassettes/<set>/<pipeline|reviewer>/<id>.json`) stores, per
-repeat, every model call: role, answer, usage, latency and the hash of the
-**normalised** prompt. Normalisation drops the verification output block
-(host test output), timings, host paths and SHAs, so a replay on another
-machine is not stale, while any change to what the agents are asked is.
-
-The committed set `cassettes/fixtures/` is **synthetic**: recorded from the
-scripted oracle and no-op agents and mixed by a fixed rule (every third task
-replays the no-op, every fourth defective change the rubber-stamp Reviewer),
-so a full replay must score exactly 16/24 resolved and 3/14 false approvals
-with no stale call. It tests the harness and the engine plumbing, never a
-model. After a prompt change, regenerate it with
-`python -m evals.e2e.make_fixtures` and check that only hashes changed.
-
-**Recording real cassettes.** No API key was available when this harness was
-written, so no real-model cassette is committed. To record one:
-`python -m evals.e2e.run --mode live --record evals/e2e/cassettes/<name>`
-(or download the `e2e-results-live` artifact of the manual workflow), then
-replay it with `--mode replay --cassettes evals/e2e/cassettes/<name>
---fail-on-stale`.
-
-### Live mode
-
-- Manual only: `workflow_dispatch` of `.github/workflows/evals.yml` with
-  `suite` set to `e2e` (or `both`; the default `implementer` runs only the
-  Implementer live job) and inputs `e2e_tasks`, `e2e_cases`, `e2e_repeats`,
-  `model`, or locally.
-- It uses plain completions through the injected transport, at a fixed
-  temperature (0) and seed: production's GitNexus tool loop and its silent
-  8B fallback are not exercised, because they cannot report per-call usage.
-- **It runs model-written code in the process that holds the key**:
-  verification and the hidden tests execute the PR head. The child processes
-  get a scrubbed environment, but on Linux they can read the parent's
-  environment (`/proc/<ppid>/environ`). Use a dedicated, low-limit evaluation
-  key, run only where that exposure is acceptable, and rotate the key after a
-  run. Unlike the Implementer harness, generation and scoring cannot be split
-  into two processes, because the pipeline interleaves model calls with test
-  runs. Every key in `GROQ_API_KEY*` is replaced with `[REDACTED]` in the
-  JSON and Markdown reports, the printed summary and recorded cassettes, so
-  a key printed by model code does not reach the uploaded artifact; a key
-  that model code encodes or splits first is not caught.
-- **The answers are on the same host.** The leak guards keep the hidden
-  tests and the fix out of the fake GitHub API and the clone the agents see,
-  but model-written code runs on the host and could read
-  `evals/e2e/tasks/*/solution/`, `hidden_tests/` or the committed cassettes
-  (whose Implementer answers hold the oracle fix) by absolute path. That
-  takes deliberately adversarial code, so the risk is low, but a resolved
-  task in live mode is not proof the model never saw the answer. The harness
-  does not isolate these files (scoring needs the hidden tests); check
-  resolved diffs by hand before quoting a live number.
-- 24 tasks plus 27 Reviewer cases at 3 repeats is about 150 runs and up to
-  ~700 model calls; use `--tasks`/`--cases` subsets to bound cost.
-
-### Comparing Reviewer backends (#525)
-
-`--reviewer-backend langgraph|adk` selects who reviews in the maintainer
-node: the single-shot prompt (`langgraph`, the default) or the ADK Reviewer
-(`adk`, see [the design note](design/adk-specialist-agents.md)). The default
-leaves every run, replay and gate exactly as before, and the report records
-the backend under `metadata.engine.reviewer_backend`. `adk` is accepted in
-`--mode live` only: the ADK Reviewer calls its model itself, not through the
-harness transport, so there is nothing to replay and offline it would reach
-a provider with the offline key.
-
-Before comparing, run the spike (`python -m evals.spike_adk_groq`, see the
-design note) and record GO. Then, from `backend/`, with a dedicated
-evaluation key and the same model for both backends:
-
-```bash
-uv sync --frozen --group dev --extra server --extra adk
-export GROQ_API_KEY=...   # read the live-mode cautions above first
-for backend in langgraph adk; do
-  uv run --frozen python -m evals.e2e.run --mode live --suite reviewer \
-    --repeats 3 --reviewer-backend "$backend" \
-    --out "e2e-reviewer-$backend.json"
-done
-```
-
-At least 3 repeats (the live default); more narrow the spread. Read
-`reviewer.summary.overall` in each JSON report:
-
-- `false_approval_rate`: mean ± standard deviation over the repeats, each
-  repeat over the 14 defective cases. This is the number that decides.
-  Compare it with the fixture baseline, the committed replay's **3/14
-  (0.214)** false approvals with the `langgraph` backend (synthetic, from the
-  rubber-stamp mix, so it is the harness's reference, not a model's), and
-  above all with the `langgraph` live run of the same model, day and key.
-- `false_rejection_rate` over the 13 correct cases, the same way.
-- `latency_s` per run. Fix iterations per run come from the pipeline suite:
-  run `--suite pipeline` with each backend and compare `fix_iterations`.
-- Cost: the report's token and cost columns count the calls made through
-  the harness transport, so with `adk` they leave out the Reviewer's own
-  calls (its runs show `llm_calls` 0). The ADK review's tokens are in the
-  run's `TelemetryEvent` (`tokens_used`), which this report does not read
-  yet; until it does, take them from the provider's usage page for the
-  evaluation key. For the Gemini fallback pass `--prices` with its prices.
-
-With 14 defective cases one approval moves the rate by 0.071, so treat a
-difference smaller than the two spreads as no difference. The design
-note's rule: enable `adk` only if its false-approval mean is not worse
-than the `langgraph` live mean and at least one other figure improves;
-otherwise keep the default and record the numbers in #525.
-
-### CI
-
-Pull requests that touch `backend/evals/**` (and the other paths of the
-workflow) run the `e2e-offline` job: the e2e tests (data validation
-included), the oracle (100% resolved and merged without help, 0% false
-approvals and rejections), the no-op (0% resolved, 100% false approvals) and
-the fixture replay with exact gates and `--fail-on-stale`. Live runs only on
-manual dispatch.
-
-### Limitations of the end-to-end evaluation
-
-- **Synthetic regressions in real code**, possibly seen in pre-training (see
-  above); single-file fixes; small libraries; Python only.
-- **n = 24 tasks and 27 Reviewer cases**: intervals are wide; compare
-  versions task by task, as described for the Implementer set.
-- **Offline GitHub**: no other CI checks, permissions or webhooks; only
-  targeted runs and `MERGE_POLICY=human` are covered. Changes to engine files
-  outside the workflow's paths do not trigger the job.
-- **Not a sandbox**: verification runs the snapshot's tests with the local
-  runner on the host, like the Implementer harness.
-- The **Reviewer measurement** starts from a PR the harness opens, so it
-  measures the Maintainer step in isolation; the pipeline measurement
-  includes it in context.
+  production.

@@ -1,82 +1,176 @@
 # AutoMaintainer on Google Cloud (Terraform)
 
-Infrastructure for the production deployment on Google Cloud (#527). The
-owner's step-by-step guide, the trade-offs that affect operators and the
-cost estimate are in [docs/DEPLOYMENT.md, Option D](../../docs/DEPLOYMENT.md#option-d-google-cloud-terraform).
-This file describes the configuration itself.
+This directory describes the production deployment on Google Cloud (#527):
+the API on Cloud Run, the Celery worker and beat on one Compute Engine VM,
+Redis on that VM or in Memorystore, Secret Manager, Artifact Registry, the
+verification sandbox, monitoring and a billing budget. Supabase stays the
+database.
+
+This file describes the configuration. The owner's runbook (first apply,
+secret values, first deploy, optional features) and the cost estimate are in
+[docs/DEPLOYMENT.md, Option D](../../docs/DEPLOYMENT.md#option-d-google-cloud-terraform).
+
+- [Layout](#layout)
+- [State](#state)
+- [Variables that matter](#variables-that-matter)
+- [Optional switches](#optional-switches)
+- [Design notes](#design-notes)
+- [Least privilege](#least-privilege)
+- [Checks and CI](#checks-and-ci)
+- [Cost](#cost)
+- [Owner steps](#owner-steps)
+- [Caveats](#caveats)
 
 ## Layout
 
 | File | Contents |
 |---|---|
-| `versions.tf`, `providers.tf` | Terraform >= 1.9, `hashicorp/google` 8.x (locked in `.terraform.lock.hcl`), default labels |
-| `main.tf` | Project APIs, Artifact Registry, the network, optional Memorystore, the worker and WIF modules |
+| `versions.tf` | Terraform >= 1.9 and `hashicorp/google` `~> 8.0` (exact version locked in `.terraform.lock.hcl`) |
+| `providers.tf` | Provider settings and the default labels `app = automaintainer`, `managed-by = terraform` |
+| `variables.tf` | Project, GitHub, budget, network, API, Cloud Trace and Cloud Monitoring switches, code retrieval, worker, Redis, `app_env` and `secrets` |
+| `main.tf` | Project APIs, Artifact Registry (keeps the 20 newest images, deletes older ones after 30 days), the network module, optional Memorystore, the worker and WIF modules, and `local.app_env`, the environment shared by the API and the worker |
 | `run.tf` | Cloud Run service for the API and its public invoker binding |
-| `iam.tf` | The `api`, `worker` and `deployer` service accounts and their roles |
-| `secrets.tf` | Secret Manager containers (no versions) and per-secret access |
-| `sandbox.tf` | The Cloud Run job verification runs in, its isolated network and bucket, and the worker's role on them (docs/DEPLOYMENT.md, "Sandboxed verification") |
-| `monitoring.tf` | Metric writer role for the API, the alert e-mail channel, the alert policies and the operations dashboard ([Monitoring](#monitoring)) |
-| `budget.tf` | Billing budget and optional e-mail channels |
-| `outputs.tf` | `api_url`, `image_repository`, `wif_provider`, `deployer_service_account`, and every repository variable the deploy workflow needs |
+| `iam.tf` | The `api`, `worker` and `deployer` service accounts and their roles, and the deployer's two custom roles |
+| `secrets.tf` | Secret Manager containers (no versions), per-secret access, and the `redis-url` secret |
+| `sandbox.tf` | Verification sandbox: the Cloud Run job, its own VPC, DNS zone and firewall, its bucket, its service account, the worker's custom runner role, and the variables and outputs that belong to it |
+| `monitoring.tf` | Metric writer role for the API, the alert e-mail channel, five alert policies, the operations dashboard, and their variables and outputs |
+| `budget.tf` | Billing budget and its optional e-mail channels |
+| `outputs.tf` | `api_url`, `image_repository`, `wif_provider`, `deployer_service_account`, `github_repository_variables`, `secret_ids`, `redis_mode`, `redis_address`, `redis_url_secret_id` |
 | `modules/network` | VPC, subnet with Private Google Access, Cloud Router and Cloud NAT |
-| `modules/worker` | The worker VM, its fixed internal IP, firewall rules, cloud-init, the scripts it installs and `secrets_exec.py` |
-| `modules/github_wif` | Workload identity pool and GitHub OIDC provider, and the deployer's `workloadIdentityUser` binding |
+| `modules/worker` | The worker VM, its fixed internal IP, firewall rules, `cloud-init.yaml.tftpl`, and the scripts it installs: `run-worker.sh`, `watch-image.sh`, `run-redis.sh` and `secrets_exec.py` |
+| `modules/github_wif` | Workload identity pool, GitHub OIDC provider, and the deployer's `workloadIdentityUser` binding |
 | `backend.tf.example` | Partial GCS backend; copy to `backend.tf` (git-ignored) to use remote state |
-| `terraform.tfvars.example` | Example values, without secrets |
+| `terraform.tfvars.example` | Example values, without secrets; copy to `terraform.tfvars` (git-ignored) |
 
 ## State
 
-With no `backend.tf`, state is local (`terraform.tfstate`, git-ignored). The
-production state lives in a GCS bucket the owner creates once; the bucket
-name is passed at init (`-backend-config="bucket=..."`), so it is never
-committed. The state holds no secret values: Terraform creates only secret
-containers. It does hold resource names, internal IPs and the API URL, and
-with `redis_mode = "memorystore"` and AUTH, Memorystore's generated AUTH
-string (see Redis AUTH below).
+Without a `backend.tf`, state is local (`terraform.tfstate`, git-ignored).
+The production state lives in a GCS bucket the owner creates once. The
+bucket name is passed at init (`-backend-config="bucket=..."`) and never
+committed; `backend.tf.example` sets the prefix `automaintainer/prod`.
+
+The state holds no secret values: Terraform creates only secret containers,
+and the owner adds the values. It does hold resource names, internal IPs and
+the API URL. One exception: with `redis_mode = "memorystore"` and
+`redis_auth_enabled`, the provider records Memorystore's generated AUTH
+string in the state (attribute `auth_string`). No setting avoids it, so keep
+the state bucket readable by the owner only.
+
+## Variables that matter
+
+Defaults are in `variables.tf`, `sandbox.tf` and `monitoring.tf`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `project_id`, `region`, `zone` | `automaintainer-prod`, `us-central1`, `us-central1-a` | `zone` must be in `region` |
+| `billing_account_id` | none (required) | For the budget |
+| `monitoring_alert_email` | none (required) | An address, or `null` for no alert e-mail channel |
+| `budget_amount`, `budget_alert_thresholds` | `100`, `[0.5, 0.9, 1.0]` | Alerts on actual spend; a fixed rule also alerts at 100 % of forecast spend |
+| `mount_secrets` | `false` | Mount the secrets into the API. `false` for the first apply, `true` once every mounted secret has a version |
+| `app_env` | `{}` | Non-secret environment for the API and the worker (both get the same values). Some names are refused or overridden; see [Design notes](#design-notes) |
+| `secrets` | six entries | Which secret each service reads; see [Least privilege](#least-privilege) |
+| `redis_mode` | `vm` | `vm` or `memorystore` |
+| `redis_auth_enabled` | `true` | Redis requires a password from the `redis-url` secret |
+| `api_max_instances`, `api_concurrency` | `3`, `40` | The minimum is fixed at 1 instance |
+| `api_cpu`, `api_memory`, `api_request_timeout_seconds` | `1`, `1Gi`, `3600` | The timeout also caps the life of a WebSocket |
+| `worker_machine_type`, `worker_disk_size_gb`, `worker_concurrency` | `e2-medium`, `30`, `2` | |
+| `worker_stop_timeout_seconds` | `300` | Time running tasks get when the worker restarts |
+| `subnet_cidr`, `sandbox_subnet_cidr` | `10.10.0.0/24`, `10.20.0.0/26` | Keep both at /26 or larger |
+| `sandbox_image` | Google's sample job image | Has no `python3`; set it to the app image by digest after the first deploy |
+| `sandbox_cpu`, `sandbox_memory`, `sandbox_task_timeout_seconds` | `1`, `2Gi`, `1800` | Per verification task |
+| `enable_iap_ssh` | `true` | SSH to the worker through Identity-Aware Proxy |
+| `deletion_protection` | `true` | Guards the Cloud Run service, the sandbox job and the worker VM |
+| `github_repository`, `github_repository_id`, `github_repository_owner_id`, `github_environment` | `PxA-Labs/AutoMaintainer`, its numeric ids, `production` | Checked by the WIF provider |
+
+## Optional switches
+
+Every switch below is off by default except `redis_auth_enabled` and
+`enable_iap_ssh`.
+
+| Switch | What it creates or changes |
+|---|---|
+| `cloud_trace_enabled` | Grants the API account `roles/cloudtrace.agent` and sets `OTEL_CLOUD_TRACE_ENABLED=true` on the API. The worker gets no trace role, so it should not export traces; a value of `OTEL_CLOUD_TRACE_ENABLED` in `app_env` still reaches it (see [Design notes](#design-notes)) |
+| `cloud_monitoring_enabled` | Sets `OTEL_CLOUD_MONITORING_ENABLED=true` on the API and the worker. The metric writer role, the 5xx alert and the dashboard exist without it |
+| `monitoring_app_alerts_enabled` | Creates the four alert policies on the backend's own metrics (run failure rate, p95 run duration, estimated LLM cost, worker heartbeat). Turn it on only after each metric has been written once |
+| `rag_enabled` | Enables `aiplatform.googleapis.com`, grants the worker account `roles/aiplatform.user`, sets `RAG_INDEXING_ENABLED=true`, `RAG_RETRIEVAL_ENABLED=true` and `GOOGLE_CLOUD_LOCATION=<rag_location>`, and changes the `IMAGE_EXTRAS` entry of `github_repository_variables` to `server,rag` |
+| `redis_mode = "memorystore"` | Enables `redis.googleapis.com` and creates a basic-tier Memorystore instance (Redis 7.2, `noeviction`, `memorystore_size_gb`) instead of the Redis container on the VM |
+| `redis_auth_enabled` (default `true`) | Creates the `redis-url` secret container and its access for both accounts; the API and worker read `REDIS_URL` from it; the VM's Redis starts with `requirepass`; Memorystore gets `auth_enabled` |
+| `enable_iap_ssh` (default `true`) | Creates the firewall rule for SSH from Identity-Aware Proxy |
+
+The verification sandbox in `sandbox.tf` has no switch: it is always
+created, and the worker always uses it. Until `sandbox_image` points at an
+image with `python3`, every verification reports an error (fail closed).
+
+## Monitoring
+
+`monitoring.tf` always creates the 5xx alert policy and the dashboard.
+`cloud_monitoring_enabled` turns on the metrics export, and
+`monitoring_app_alerts_enabled` adds the four alert policies on the
+backend's own metrics. Cloud Monitoring refuses a policy on a metric that
+has never been written, so enable the metrics first, wait until each metric
+has been recorded, then enable the app alerts. The ordered steps are in
+[DEPLOYMENT.md, Metrics and alerts](../../docs/DEPLOYMENT.md#metrics-and-alerts),
+and the metrics, policies and dashboard are described in
+[OBSERVABILITY.md](../../docs/OBSERVABILITY.md#cloud-monitoring-alerts-and-dashboard).
 
 ## Design notes
 
 **Image ownership.** Terraform creates the Cloud Run service with Google's
 public placeholder image and the VM with an empty `automaintainer-image`
-metadata key, and ignores both afterwards. `.github/workflows/deploy-gcp.yml`
-owns the image: it deploys a new Cloud Run revision by digest and sets the
-metadata key. Every other setting stays here, and an apply keeps the image
-that is live.
+metadata key, and ignores both afterwards.
+`.github/workflows/deploy-gcp.yml` owns the image: it deploys a new Cloud
+Run revision by digest and sets the metadata key. Every other setting stays
+here, and an apply keeps the image that is live.
 
 **First apply without secret values.** Cloud Run refuses a revision that
-mounts a secret without a version. `mount_secrets` (default `false`) lets the
-first apply succeed before the owner has added any value; set it to `true`
-after step 3 of the guide. The worker reads its secrets only when its
-container starts, which is after the first deploy.
+mounts a secret without a version. `mount_secrets = false` lets the first
+apply succeed before the owner has added any value. Set it to `true` after
+the values exist. The worker reads its secrets only when its container
+starts, which is after the first deploy.
+
+**Shared environment.** `local.app_env` (`main.tf`) is `var.app_env` plus
+`ENVIRONMENT=production`, `GOOGLE_CLOUD_PROJECT=<project_id>`,
+`OTEL_CLOUD_MONITORING_ENABLED` and, with `rag_enabled`, the three RAG
+variables. The API adds `OTEL_CLOUD_TRACE_ENABLED` and, until the
+`redis-url` secret is mounted, a `REDIS_URL` without password. The worker
+module adds `SANDBOX_BACKEND=cloud_run_job` and
+`CLOUD_RUN_SANDBOX_{PROJECT,REGION,JOB,BUCKET,SIGNER}` over `app_env`, so
+those cannot be changed or turned off from `app_env`.
+
+**Refused `app_env` names.** Validation rejects `AUTH_DEV_BYPASS`,
+`ENABLE_TERMINAL` and `VERIFY_ALLOW_LOCAL` (unsafe in a deployment);
+`ENVIRONMENT`, `REDIS_URL` and `PORT` (set by Terraform or Cloud Run);
+`OTEL_CLOUD_MONITORING_ENABLED` (use `cloud_monitoring_enabled`);
+`RAG_INDEXING_ENABLED`, `RAG_RETRIEVAL_ENABLED` and `GOOGLE_CLOUD_LOCATION`
+(use `rag_enabled` and `rag_location`); any name that is also in
+`var.secrets`; and multi-line values (the worker passes `app_env` through a
+`docker run` env file). `GOOGLE_CLOUD_PROJECT` is not refused, but
+Terraform overrides it on both services. `OTEL_CLOUD_TRACE_ENABLED` is not
+refused either, and Terraform overrides it on the API only: a value set in
+`app_env` reaches the worker unchanged. Do not set it there. The worker then
+tries to export to Cloud Trace without `roles/cloudtrace.agent`, which only
+the API account receives (`iam.tf`).
 
 **Worker VM.** Container-Optimized OS, shielded VM, OS Login, no public IP,
-outbound through Cloud NAT. cloud-init (re-applied on every boot, since `/etc`
-is not persistent on COS) installs three systemd units:
+outbound through Cloud NAT. cloud-init, re-applied on every boot because
+`/etc` is not persistent on COS, installs three systemd units:
 
 - `automaintainer-worker`: `run-worker.sh` reads the image name from the
   metadata server, pulls it from Artifact Registry with
   `docker-credential-gcr`, and runs
   `celery -A celery_app worker -Q agent_runs,maintenance,github_sync,default -B`
-  through `secrets_exec.py`, with the clones in the `automaintainer-workspaces`
-  volume. It is restarted 30 seconds after any exit. Stopping it gives
-  running tasks `worker_stop_timeout_seconds`; Celery requeues the rest
-  (`acks_late`).
+  through `secrets_exec.py`, with the clones in the
+  `automaintainer-workspaces` volume. systemd restarts it 30 seconds after
+  any exit. Stopping it gives running tasks `worker_stop_timeout_seconds`;
+  Celery requeues the rest (`acks_late`).
 - `automaintainer-image-watch`: polls the metadata key every 20 seconds and
   restarts the worker when it changes.
-- `automaintainer-redis` (`redis_mode = "vm"` only): Redis 7.4 with
-  `appendonly yes` and `noeviction`, opened in the host firewall to the subnet
-  only. With `redis_auth_enabled`, `run-redis.sh` reads the `redis-url`
-  secret with the VM's account (curl, no other tools) and gives Redis the
-  password as `requirepass` on stdin.
-
-**Redis AUTH.** `secrets.tf` creates the container `redis-url` (no version)
-when `redis_auth_enabled` (default `true`). Its version, added by the owner,
-is `redis://:<password>@<redis_address>/0` (`terraform output redis_address`).
-The API mounts it as `REDIS_URL` with the other secrets; the worker module
-puts it in `AUTOMAINTAINER_SECRETS` instead of a plain `REDIS_URL`, and
-`secrets_exec.py` refuses a value without a password. Memorystore gets
-`auth_enabled`; its AUTH string is generated by Google and, unlike every
-other secret here, recorded in the state by the provider (`auth_string`).
+- `automaintainer-redis` (`redis_mode = "vm"` only): Redis 7.4, pinned by tag
+  and digest, with `appendonly yes` and `noeviction`, opened in the host
+  firewall to the subnet only. With `redis_auth_enabled`, `run-redis.sh`
+  reads the `redis-url` secret with the VM's account and passes the password
+  to Redis as `requirepass` on stdin. It refuses a password shorter than 32
+  characters or with characters outside `A-Z a-z 0-9 . _ ~ -`.
 
 **Secrets on the VM.** `secrets_exec.py` (standard library only, run with
 the image's Python) reads each secret's latest version with the VM service
@@ -84,26 +178,34 @@ account's token and replaces itself with the Celery command. Values exist
 only in that process's environment, as on Cloud Run: not on disk, not on the
 `docker run` command line, and multi-line values such as the App's PEM key
 stay intact. A missing version stops the start (the unit retries) and names
-the variable, never the value. `backend/tests/test_gcp_worker_secrets_exec.py`
-covers it.
+the variable, never the value. For `REDIS_URL` it also refuses a value that
+is not a `redis://` or `rediss://` URL with a password.
+`backend/tests/test_gcp_worker_secrets_exec.py` covers it.
+
+**Redis AUTH.** With `redis_auth_enabled` (default `true`), `secrets.tf`
+creates the container `redis-url` with no version. The owner adds the
+version, `redis://:<password>@<redis_address>/0` (`terraform output
+redis_address`). The API mounts it as `REDIS_URL` once `mount_secrets` is
+`true`. The worker module puts it in `AUTOMAINTAINER_SECRETS` instead of a
+plain `REDIS_URL`. Memorystore gets `auth_enabled`, and Google generates its
+AUTH string (see [State](#state)). Redis traffic is not encrypted in either
+mode, so the password crosses the VPC in clear.
 
 **Network.** One regional subnet holds the VM and the IPs Cloud Run's Direct
 VPC egress assigns to API instances, so keep it at /26 or larger. The API
 sends only private ranges through the VPC (`PRIVATE_RANGES_ONLY`). Ingress to
-the VM is limited to Redis from the subnet (vm mode) and, if
+the VM is limited to Redis from the subnet (`vm` mode) and, with
 `enable_iap_ssh`, SSH from Identity-Aware Proxy.
 
-**Least privilege.** Secret access is granted per secret to the service that
-reads it (`GITHUB_APP_CLIENT_SECRET` only to the API, `GITHUB_TOKEN` to
-nobody unless PAT mode is chosen). The deployer can push to the one
-repository, act as the two runtime accounts (required to deploy a revision
-that runs as `api` and to change the metadata of a VM that runs as
-`worker`), deploy the one Cloud Run service, and get and set metadata on the
-one VM through a custom role, plus read zone operations. `setMetadata`
-cannot be limited to one key, so the deployer can also rewrite the VM's
-`user-data`, `startup-script` or `enable-oslogin` (effective at the next
-boot); that is about the code execution it already has by choosing the
-image.
+**Verification sandbox.** `sandbox.tf` runs each verification command as one
+execution of the Cloud Run job `<name_prefix>-sandbox`, as a service account
+with no role. The job's egress goes into its own VPC, which has no default
+route, no NAT, no peering, and a deny-all egress firewall except TCP 443 to
+Private Google Access (199.36.153.8/30). A private DNS zone resolves
+`storage.googleapis.com` to that range. The bucket
+`<project>-<name_prefix>-sandbox` has uniform access, public access
+prevention, no soft delete and a 1-day lifecycle delete. The threat model is
+in [docs/VERIFICATION.md](../../docs/VERIFICATION.md#cloud-run-jobs-sandbox-backend).
 
 **Who can deploy.** The WIF provider (`modules/github_wif`) accepts a GitHub
 OIDC token only if all of these hold, checked by Google:
@@ -121,54 +223,37 @@ impersonate the deployer, whatever the environment's settings on GitHub.
 Two gates remain on GitHub's side: the environment's required reviewers, and
 who may push `v*` tags (anyone with write access, unless a tag ruleset
 restricts it). A workflow file changed on `main` or in a tagged commit runs
-with deployer credentials, as any deploy pipeline does.
+with deployer credentials, as in any deploy pipeline.
 
-**Dangerous settings are refused.** `app_env` may not set
-`AUTH_DEV_BYPASS`, `ENABLE_TERMINAL` or `VERIFY_ALLOW_LOCAL`, nor the values
-Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`,
-`OTEL_CLOUD_MONITORING_ENABLED`, and `RAG_INDEXING_ENABLED`,
-`RAG_RETRIEVAL_ENABLED` and `GOOGLE_CLOUD_LOCATION` from `rag_enabled`).
+## Least privilege
 
-## Code retrieval
+One service account per role, each with only what it uses.
 
-`rag_enabled` (default `false`, #526) enables `aiplatform.googleapis.com`,
-grants the worker account `roles/aiplatform.user` (`iam.tf`; the API never
-calls Vertex AI) and adds the three RAG variables to `local.app_env`
-(`GOOGLE_CLOUD_LOCATION` from `rag_location`). The image needs the `rag`
-extra too: the output `github_repository_variables` then lists
-`IMAGE_EXTRAS = "server,rag"` for the deploy workflow. Owner steps:
-docs/DEPLOYMENT.md, "Code retrieval (RAG)"; data egress: docs/RAG.md.
+| Account | Roles |
+|---|---|
+| `<prefix>-api` | `secretmanager.secretAccessor` on each secret with `api = true` and, with `redis_auth_enabled`, on `redis-url`; `monitoring.metricWriter`; `cloudtrace.agent` with `cloud_trace_enabled` |
+| `<prefix>-worker` | `secretmanager.secretAccessor` on each secret with `worker = true` and, with `redis_auth_enabled`, on `redis-url`; `logging.logWriter`; `monitoring.metricWriter`; `artifactregistry.reader` on the one repository; `aiplatform.user` with `rag_enabled`; the custom `automaintainerSandboxRunner` role on the sandbox job; `storage.objectUser` on the sandbox bucket; `iam.serviceAccountTokenCreator` on itself (to sign the sandbox URLs) |
+| `<prefix>-deployer` | `artifactregistry.writer` on the one repository; `run.developer` on the one Cloud Run service; `iam.serviceAccountUser` on the `api` and `worker` accounts; the custom `automaintainerWorkerRoller` role (`compute.instances.get`, `compute.instances.setMetadata`) on the one VM; the custom `automaintainerZoneOperationReader` role (`compute.zoneOperations.get`) on the project |
+| `<prefix>-sandbox` | none |
 
-## Monitoring
+Secret access by default (`var.secrets`): the API and the worker read
+`SUPABASE_SERVICE_KEY`, `GROQ_API_KEY`, `GITHUB_APP_PRIVATE_KEY` and
+`GITHUB_WEBHOOK_SECRET`; only the API reads `GITHUB_APP_CLIENT_SECRET`;
+nobody reads `GITHUB_TOKEN` unless PAT mode is chosen by setting its `api`
+and `worker` flags.
 
-`monitoring.tf` holds the Cloud Monitoring side of the backend's metrics
-(docs/DEPLOYMENT.md, "Metrics and alerts"): `roles/monitoring.metricWriter`
-for the API account (the worker has it in `iam.tf`; the Monitoring API is
-enabled in `main.tf`), an e-mail notification channel from
-`monitoring_alert_email` (no default; `null` for none), five alert policies
-and an operations dashboard. The backend exports only when
-`cloud_monitoring_enabled = true`, which sets `OTEL_CLOUD_MONITORING_ENABLED`
-for the API and the worker (`local.app_env` in `main.tf`; `app_env` may not
-set it itself). The worker writes the run, token, cost and heartbeat
-metrics, the API its HTTP metrics.
+The deployer cannot read secrets or change IAM. It must act as the two
+runtime accounts to deploy a revision that runs as `api` and to change the
+metadata of a VM that runs as `worker`. `setMetadata` cannot be limited to
+one key, so the deployer can also rewrite the VM's `user-data`,
+`startup-script` or `enable-oslogin` (effective at the next boot). That is
+about the same power it already has by choosing the image.
 
-- The API 5xx ratio alert uses Cloud Run's built-in `request_count` and
-  exists from the first apply.
-- The run failure rate, p95 run duration, estimated LLM cost per day and
-  worker heartbeat alerts filter on `workload.googleapis.com/<metric>`.
-  Cloud Monitoring refuses (404) a policy on a metric type that has never
-  been written, so they are created only with
-  `monitoring_app_alerts_enabled = true`, after the first runs have exported
-  each metric. `backend/tests/test_gcp_monitoring_config.py` checks that each
-  filter names a metric and labels from the catalogue in
-  `backend/observability.py`.
-- Every application series is per process (`generic_task`, one `task_id` per
-  process, plus an `opentelemetry_id` label), so alerts and charts sum across
-  series; a restarted process starts new ones.
-- The cost alert sums 24 hours (`86400s`, within the 25-hour limit of
-  alerting alignment periods) of an *estimated* cost, not the bill.
+`roles/run.developer` on the service alone, with no project-level Run role,
+has not yet been exercised by a real deploy. If `gcloud run deploy` is
+denied, the error names the missing permission.
 
-## Checks
+## Checks and CI
 
 ```bash
 terraform fmt -check -recursive
@@ -176,30 +261,62 @@ terraform init -backend=false
 terraform validate
 ```
 
-CI runs these (`.github/workflows/ci-terraform.yml`), and
-`backend/tests/test_gcp_deploy_config.py` pins the security decisions above.
-No CI job holds Google credentials or runs `plan` or `apply`.
+`.github/workflows/ci-terraform.yml` runs these on pushes and pull requests
+that touch `infra/terraform/**`, with Terraform 1.17.1 and
+`-lockfile=readonly`. No CI job holds Google credentials or runs `plan` or
+`apply`; the owner runs both locally. These tests pin the configuration:
+
+- `backend/tests/test_gcp_deploy_config.py`: layout and state, secrets,
+  Cloud Run and VM settings, WIF, the refused `app_env` names, the budget,
+  the deploy workflow and the `rag_enabled` wiring;
+- `backend/tests/test_gcp_monitoring_config.py`: every alert and chart
+  filter against the metric catalogue in `backend/observability.py`;
+- `backend/tests/test_gcp_sandbox_config.py`: the sandbox network, bucket,
+  job and roles;
+- `backend/tests/test_gcp_redis_auth.py`: Redis AUTH, including
+  `run-redis.sh`;
+- `backend/tests/test_gcp_worker_secrets_exec.py`: `secrets_exec.py`.
+
+## Cost
+
+The estimate for the default settings is in
+[docs/DEPLOYMENT.md, Estimated monthly cost](../../docs/DEPLOYMENT.md#estimated-monthly-cost):
+about USD 40-60 a month with `redis_mode = "vm"` and about USD 75-95 with
+`memorystore`, at list prices that were not checked against the current
+price list. The budget (`budget_amount`, 100 by default) sends alerts but
+never stops spending.
+
+## Owner steps
+
+The ordered runbook is in
+[docs/DEPLOYMENT.md, Option D](../../docs/DEPLOYMENT.md#option-d-google-cloud-terraform):
+state bucket, default compute service account, `v*` tag ruleset, apply,
+secret values, repository variables, first deploy, then the sandbox image
+and smoke test and the optional features.
 
 ## Caveats
 
 - Custom IAM roles (`automaintainerWorkerRoller`,
-  `automaintainerZoneOperationReader`) are soft-deleted on destroy and their
-  ids stay reserved for weeks; an apply soon after a destroy in the same
-  project fails on them. Undelete them (`gcloud iam roles undelete`) or
-  change the `role_id`s.
-- The Redis image is pinned by tag and digest; bump both together. The VM
-  boots from the `cos-stable` image family, resolved once at creation (the
-  boot disk ignores later images, so a new COS release never recreates the
-  VM; recreate it deliberately to move to one). The Cloud Run placeholder
+  `automaintainerZoneOperationReader`, `automaintainerSandboxRunner`) are
+  soft-deleted on destroy, and their ids stay reserved for weeks. An
+  apply soon after a destroy in the same project fails on them. Undelete
+  them (`gcloud iam roles undelete`) or change the `role_id`s.
+- The VM boots from the `cos-stable` image family, resolved once at
+  creation. The boot disk ignores later images, so a new COS release never
+  recreates the VM; recreate it deliberately to move to one. The Redis image
+  is pinned by tag and digest; bump both together. The Cloud Run placeholder
   image is unpinned; it runs only until the first deploy and is ignored
   afterwards.
 - The worker container uses the host network and can reach the metadata
   server, so code running in it can obtain the worker service account's
-  token and read the worker's secrets. That is acceptable only while
-  verification of untrusted code is off (`VERIFY_ALLOW_LOCAL` refused).
-  Sandboxed verification (#158) must not run on this network.
-- `deletion_protection` (default `true`) guards the Cloud Run service and the
-  VM; set it to `false` and apply before a deliberate destroy.
-- Changing `app_env`, `var.secrets` or the Redis mode updates the VM's
-  metadata in place, but the VM reads it only at boot: reset the VM after
-  such a change.
+  token and read the worker's secrets. This is why verification runs in the
+  sandbox job and `VERIFY_ALLOW_LOCAL` is refused.
+- Private Google Access in the sandbox VPC reaches every `*.googleapis.com`
+  API, not only the bucket. VPC Service Controls would close that path; they
+  are not set up here.
+- `deletion_protection` (default `true`) guards the Cloud Run service, the
+  sandbox job and the VM; set it to `false` and apply before a deliberate
+  destroy.
+- Changing `app_env`, `var.secrets`, the Redis mode or a switch that changes
+  the worker's environment updates the VM's metadata in place, but the VM
+  reads it only at boot: reset the VM after such a change.
