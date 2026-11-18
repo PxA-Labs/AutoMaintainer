@@ -262,7 +262,7 @@ wheels = [
 ]
 
 [[package]]
-name = "automaintainer-backend"
+name = "automaintainer"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },
