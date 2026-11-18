@@ -58,6 +58,7 @@ flowchart LR
 | Redis | `backend/celery_app.py`, `backend/automaintainer/_runtime/redis_locks.py`, `backend/quotas.py` | Celery broker and result backend, per-repository locks, run heartbeats, inline-assist quotas. |
 | Supabase | `supabase_schema.sql` | Postgres with Row Level Security, Auth (GitHub OAuth), and Realtime for live logs. |
 | Dashboard | `dashboard/` | Next.js 16 static export: run control, live logs, run history, admin page, Monaco-based Web IDE, terminal client. |
+| Retrieval index (not wired into prompts yet) | `backend/automaintainer/_runtime/retrieval.py`, `backend/rag_tasks.py` | Function-level code chunks embedded with Vertex AI into the pgvector `code_chunks` table (org-scoped RLS), searched through `match_code_chunks`; indexing runs on the `maintenance` queue only when `RAG_INDEXING_ENABLED` is set. See [`docs/RAG.md`](./docs/RAG.md). |
 | GitNexus | `backend/automaintainer/_runtime/agents.py`, `backend/main.py` | The worker indexes each clone with `gitnexus analyze` / `gitnexus index` and gives the LLM GitNexus tools over MCP (stdio). The API also starts `gitnexus serve` at startup. Every GitNexus step is best-effort; on failure the agents use a plain completion. |
 
 The API and the `agent_runs` worker must share the workspace directory: the
