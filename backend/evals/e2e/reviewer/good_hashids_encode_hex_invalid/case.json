@@ -1,0 +1,10 @@
+{
+  "id": "good_hashids_encode_hex_invalid",
+  "task_id": "hashids_encode_hex_invalid",
+  "expected_verdict": "approve",
+  "defect_class": null,
+  "description": "The task's oracle fix (the unmodified upstream file).",
+  "changed_files": [],
+  "deleted_files": [],
+  "use_solution": true
+}

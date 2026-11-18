@@ -1,0 +1,24 @@
+{
+  "id": "timeparse_minutes_granularity",
+  "title": "granularity='minutes' has no effect",
+  "body": "`timeparse(text, granularity=\"minutes\")` in `pytimeparse/timeparse.py`\nshould read an ambiguous \"H:MM\" value as hours and minutes, as the\ndocstring shows, but it is still read as minutes and seconds:\n\n```python\n>>> timeparse(\"1:30\", granularity=\"minutes\")\n90      # expected 5400\n```\n\nExpected: with `granularity=\"minutes\"`, \"1:30\" is 5400 and \"2:05\" is\n7500. Unambiguous inputs (\"1:30:00\", \"1:30.5\", \"1h 30m\") and the\ndefault granularity are unchanged.\n",
+  "target_file": "pytimeparse/timeparse.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "pytimeparse",
+    "repository": "https://github.com/wroberts/pytimeparse",
+    "commit": "6d26b2a9204c591793077e6f26691f9e068b17ab",
+    "path": "pytimeparse/timeparse.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The granularity check compares against a misspelled value.",
+  "harness_files": [
+    "pytimeparse/__init__.py",
+    "tests/test_timeparse_basic.py"
+  ]
+}

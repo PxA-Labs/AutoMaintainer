@@ -1,0 +1,11 @@
+{
+  "id": "bad_lru_renamed_popitem",
+  "task_id": "cachetools_lru_read",
+  "expected_verdict": "reject",
+  "defect_class": "broken-api",
+  "description": "Fixes reads but renames LRUCache.popitem, so eviction falls back to the wrong order.",
+  "changed_files": [
+    "cachetools/__init__.py"
+  ],
+  "deleted_files": []
+}

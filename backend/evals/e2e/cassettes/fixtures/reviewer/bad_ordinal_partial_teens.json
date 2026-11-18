@@ -1,0 +1,21 @@
+{
+ "id": "bad_ordinal_partial_teens",
+ "kind": "reviewer",
+ "model": "noop-policy",
+ "note": "synthetic: scripted noop agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "a717ac4121ea6949065a5390716f9de0f4945973efa9490c485d07082e03ca8e",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "noop",
+ "synthetic": true
+}

@@ -1,0 +1,23 @@
+{
+  "id": "hashids_decode_salt",
+  "title": "decode() accepts hashids produced with a different salt",
+  "body": "In `hashids.py`, `Hashids.decode` is supposed to return an empty tuple\nfor anything that is not a valid hashid for this instance's salt,\nalphabet and minimum length. It currently returns whatever numbers the\ncharacters happen to map to:\n\n```python\n>>> Hashids(\"salt A\").decode(Hashids(\"salt B\").encode(5))\n(some unrelated numbers)   # expected ()\n```\n\nWe use the salt to keep ids from different tables apart, so this lets\nan id of one table resolve to a row of another. A string must decode\nto numbers only if encoding those numbers gives back exactly the same\nstring; otherwise `decode` must return `()`.\n",
+  "target_file": "hashids.py",
+  "kind": "bugfix",
+  "category": "input-validation",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "hashids",
+    "repository": "https://github.com/davidaurelio/hashids-python",
+    "commit": "138a12e85d09e7e76eebc1d0e059b2e28ba488e6",
+    "path": "hashids.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "decode() no longer re-encodes the result to verify the hashid.",
+  "harness_files": [
+    "tests/test_hashids_basic.py"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "toolz_update_in_copy",
+  "title": "update_in() mutates the dictionary it is given",
+  "body": "`update_in` in `toolz/dicttoolz.py` is documented to return a copy and\nnot to mutate the original dictionary, but the top-level dictionary\nis changed in place:\n\n```python\n>>> d = {\"a\": 1, \"b\": {\"c\": 2}}\n>>> update_in(d, [\"a\"], lambda x: x + 1)\n{'a': 2, 'b': {'c': 2}}\n>>> d\n{'a': 2, 'b': {'c': 2}}   # expected {'a': 1, 'b': {'c': 2}}\n```\n\nThe `factory` argument is also ignored for the outer dictionary:\n`update_in(d, [\"a\"], f, factory=OrderedDict)` must return an\n`OrderedDict`. `assoc_in` is affected too because it calls\n`update_in`. Expected: neither function mutates its input at any\ndepth, and the result (and every copied level) is built with\n`factory`.\n",
+  "target_file": "toolz/dicttoolz.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "toolz",
+    "repository": "https://github.com/pytoolz/toolz",
+    "commit": "451af60dec590a6010e2babdbf391ea8f815122f",
+    "path": "toolz/dicttoolz.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "update_in() works on the input dictionary instead of a factory() copy.",
+  "harness_files": [
+    "tests/test_dicttoolz_basic.py",
+    "toolz/__init__.py"
+  ]
+}

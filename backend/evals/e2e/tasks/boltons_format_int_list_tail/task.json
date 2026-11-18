@@ -1,0 +1,24 @@
+{
+  "id": "boltons_format_int_list_tail",
+  "title": "format_int_list() drops a range at the end of the list",
+  "body": "`format_int_list` in `boltons/strutils.py` loses the last values when\nthe list ends with a contiguous range:\n\n```python\n>>> format_int_list([1, 5, 6, 7])\n'1'      # expected '1,5-7'\n>>> format_int_list([2, 3])\n''       # expected '2-3'\n```\n\nExpected: every value is represented, a trailing contiguous run is\nwritten as \"min-max\" with the given `range_delim`, and\n`parse_int_list(format_int_list(xs)) == sorted(set(xs))`.\n",
+  "target_file": "boltons/strutils.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "boltons",
+    "repository": "https://github.com/mahmoud/boltons",
+    "commit": "4332b35a278d694f30c99881faa61cde695c7a96",
+    "path": "boltons/strutils.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The final contiguous range is never flushed to the output.",
+  "harness_files": [
+    "boltons/__init__.py",
+    "tests/test_strutils_basic.py"
+  ]
+}

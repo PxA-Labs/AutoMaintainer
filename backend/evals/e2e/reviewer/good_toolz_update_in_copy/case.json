@@ -1,0 +1,10 @@
+{
+  "id": "good_toolz_update_in_copy",
+  "task_id": "toolz_update_in_copy",
+  "expected_verdict": "approve",
+  "defect_class": null,
+  "description": "The task's oracle fix (the unmodified upstream file).",
+  "changed_files": [],
+  "deleted_files": [],
+  "use_solution": true
+}

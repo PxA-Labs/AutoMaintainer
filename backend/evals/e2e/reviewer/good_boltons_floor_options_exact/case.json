@@ -1,0 +1,10 @@
+{
+  "id": "good_boltons_floor_options_exact",
+  "task_id": "boltons_floor_options_exact",
+  "expected_verdict": "approve",
+  "defect_class": null,
+  "description": "The task's oracle fix (the unmodified upstream file).",
+  "changed_files": [],
+  "deleted_files": [],
+  "use_solution": true
+}

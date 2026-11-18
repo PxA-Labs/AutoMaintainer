@@ -1,0 +1,11 @@
+{
+  "id": "bad_ordinal_special_cased",
+  "task_id": "inflection_ordinal_teens",
+  "expected_verdict": "reject",
+  "defect_class": "special-cased-values",
+  "description": "Special-cases 11 to 13 exactly; 111 to 113 stay wrong.",
+  "changed_files": [
+    "inflection/__init__.py"
+  ],
+  "deleted_files": []
+}

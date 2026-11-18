@@ -12,7 +12,9 @@ hidden acceptance tests pass without breaking the repository's own tests.
 
 It does **not** measure the Architect, Visionary, PM or Maintainer, the
 GitNexus tool loop, GitHub interaction, or multi-iteration repair. See
-[Limitations](#limitations).
+[Limitations](#limitations). The [end-to-end evaluation](#end-to-end-evaluation-whole-engine)
+below covers the whole engine, the review loop and the Reviewer's false
+approvals.
 
 ## Quick start
 
@@ -360,3 +362,231 @@ sorted by task id, so `--jobs` does not change them.
   default, and one sample per task. Read a live resolve rate as a regression
   signal for the prompt and normalizer, not as the Implementer's quality in
   production, and do not quote it without repeated seeds.
+
+## End-to-end evaluation (whole engine)
+
+`backend/evals/e2e/` is the evaluation baseline of the roadmap (step 2), which
+the ADK Reviewer (#525) and RAG (#526) are measured against. It runs the
+**whole `AutoMaintainerEngine`** on each task: a targeted run on the task's
+issue through the real LangGraph graph (Architect, Visionary, PM, Implementer,
+Maintainer and the retry loop), the real verification step, change limits and
+merge policy. On a targeted run the Architect and Visionary nodes run but
+take the issue as given and make no model call: every recorded run holds
+only PM, Implementer and Maintainer calls, so only those three agents'
+model behaviour is measured. Only three things are replaced, all through the engine's own
+injection points (`AutoMaintainerEngine(supabase=, llm=, github=, emitter=,
+nodes=)`); the engine's runtime code is not modified:
+
+- **GitHub**: `fakes.GitRepository`, a bare git repository holding only the
+  task's repository snapshot, behind the subset of the PyGithub API the nodes
+  call. Every agent write is a real commit (fixed author and dates, so SHAs
+  are reproducible) and the clone URL is a `file:` URL, so verification clones
+  and tests the pushed head as it would on GitHub.
+- **Supabase**: `fakes.InMemorySupabase` (run row, checkpoints, audit rows).
+- **The model**: an injected transport. `oracle` and `noop` are scripted
+  agents, `replay` answers from cassettes, `live` calls Groq.
+
+The engine runs with `MERGE_POLICY=human`, three iterations, the default
+change limits and verification on with the local runner
+(`runner_type="local"`); the run is started by a repository writer.
+
+### Quick start
+
+From `backend/`:
+
+```bash
+python -m pytest -q evals/e2e                       # data validation and unit tests
+python -m evals.e2e.run --mode oracle --out oracle.json --min-resolve-rate 1.0
+python -m evals.e2e.run --mode noop   --out noop.json   --max-resolve-rate 0
+python -m evals.e2e.run --mode replay --out replay.json --fail-on-stale
+# Live (manual; needs GROQ_API_KEY, default 3 repeats). Read "Live mode" first.
+GROQ_API_KEY=... python -m evals.e2e.run --mode live --record my-cassettes --out live.json
+```
+
+Options: `--suite pipeline|reviewer|all`, `--tasks a,b`, `--cases a,b`,
+`--repeats N` (default 3 in live, 1 in oracle and noop; replay always runs
+exactly the number of runs the cassettes recorded, refuses a different
+`--repeats` and refuses cassettes that recorded different numbers of runs,
+so a recording is never counted twice and no recorded repeat is dropped),
+`--jobs N` (runs in flight),
+`--cassettes DIR`, `--record DIR`, `--model`, `--temperature`, `--seed`,
+`--requests-per-minute`/`--tokens-per-minute` (the engine's client-side
+budget; live defaults to the engine defaults, 30 and 6000), `--prices FILE`,
+`--markdown PATH` (default: `--out` with `.md`). Gates:
+`--min-resolve-rate`, `--max-resolve-rate`, `--min-merged-rate`,
+`--max-false-approval-rate`, `--min-false-approval-rate`,
+`--max-false-rejection-rate`, `--fail-on-stale`. Exit codes are those of
+`evals.run`: 0 success, 1 a gate failed, 2 a harness error (missing key or
+cassette, a run that could not be scored). Any harness error voids the rates.
+
+### Task set and provenance
+
+24 tasks, each in `evals/e2e/tasks/<id>/` (layout of the Implementer set plus
+`source`, `defect` and `harness_files` in `task.json`). Each task is **one
+real upstream file at a pinned commit**, from ten permissively licensed
+projects. Upstream code was fetched read-only from GitHub at these commits:
+
+| Project | License | Commit | Tasks |
+| --- | --- | --- | --- |
+| [boltons](https://github.com/mahmoud/boltons) | BSD-3-Clause | `4332b35a` | 6 |
+| [inflection](https://github.com/jpvanhal/inflection) | MIT | `b00d4d34` | 3 |
+| [isoweek](https://github.com/gisle/isoweek) | BSD-2-Clause | `4848cc22` | 2 |
+| [hashids-python](https://github.com/davidaurelio/hashids-python) | MIT | `138a12e8` | 2 |
+| [pytimeparse](https://github.com/wroberts/pytimeparse) | MIT | `6d26b2a9` | 2 |
+| [python-json-pointer](https://github.com/stefankoegl/python-json-pointer) | BSD-3-Clause | `54039218` | 2 |
+| [toolz](https://github.com/pytoolz/toolz) | BSD-3-Clause | `451af60d` | 2 |
+| [cachetools](https://github.com/tkem/cachetools) | MIT | `498bd83c` | 2 |
+| [xmltodict](https://github.com/martinblech/xmltodict) | MIT | `8d7f1fdb` | 2 |
+| [shortuuid](https://github.com/skorokithakis/shortuuid) | BSD-3-Clause | `16374d28` | 1 |
+
+What was done to each, exactly:
+
+- The **oracle fix** (`solution/`) is the upstream file, reformatted with
+  black so the repository's `black --check` gate passes (layout and quotes
+  only; the data-validation tests prove it still passes the hidden tests).
+- The **snapshot** (`repo/`) is the same file with **one injected
+  regression** (described in `task.json` `defect`), plus the upstream
+  `LICENSE`, a small visible test file written for the eval and, where the
+  upstream package `__init__.py` imports modules the snapshot leaves out, an
+  empty package marker (listed in `harness_files`).
+- The **issue** is written like a bug report (symptom, reproduction, expected
+  behaviour) and names the target file, which targeted runs require.
+- The **hidden tests** were written for the eval and check only what the
+  issue states.
+
+So these are **real code with synthetic regressions**, not historical
+upstream issues: the bugs and fixes are known exactly, but a model may have
+seen the (fixed) upstream code during training, which makes the tasks easier
+than unseen code. Treat the scores as a regression baseline for this
+pipeline, not as a benchmark result. Total task data is under 1 MB.
+
+`evals/e2e/tests/test_e2e_data.py` proves for every task that the oracle
+passes the hidden tests, the snapshot fails them without breaking its own
+tests, and that the hidden tests, the fix and `task.json` are absent from the
+git object store the agents and the verification clone see and unreachable
+through the fake API (including path traversal).
+
+### Reviewer change set
+
+`evals/e2e/reviewer/` holds 14 **defective changes** with a defect class
+(`wrong-logic`, `missing-edge-case`, `special-cased-values`, `broken-api`,
+`deleted-test`, `injected-instruction` in a comment, `swallowed-exception`)
+and 13 **correct changes** (the oracle fixes of the same tasks). The hidden
+tests catch every defective change (data validation). For each case the
+harness opens a PR with the change (replacement `pm` and `implementer` nodes),
+verifies it with the engine's own verification step, and the **real
+`maintainer` node** reviews it with that result in its prompt
+(`max_iterations=1`).
+
+### Metrics
+
+Per run (`pipeline.runs` in the JSON):
+
+| Field | Meaning |
+| --- | --- |
+| `attempted` | The PM approved and the Implementer ran at least once. |
+| `pr_opened` | The run opened a pull request. |
+| `resolved` | The hidden tests pass **and** the repository's tests still pass on the final PR head. |
+| `maintainer_approved` | The last Maintainer verdict approved (under `human` the PR then waits for a person). |
+| `merged_without_help` | `maintainer_approved` and `resolved`: the PR would have merged correctly with no human change. |
+| `fix_iterations` | Implementer iterations (1 to 3). |
+| `prompt_tokens`, `completion_tokens` | From the provider's usage (live, or cassettes recorded live); `null` for scripted agents. |
+| `cost_usd` | Tokens priced with the price table (below); `null` when usage or price is unknown. |
+| `latency_s` | Wall-clock time of the engine run, scoring excluded. |
+| `stale_calls` | Replayed calls whose prompt changed since recording. |
+
+Per task: rates over its repeats and mean ± standard deviation of
+iterations, tokens, cost and latency. Overall: each metric is computed per
+repeat across all tasks, then reported as mean ± standard deviation over
+repeats; `resolved_ci95` is a Wilson interval over all runs pooled (repeats
+of one task are correlated, so it is too narrow when they agree).
+
+Reviewer: `false_approval_rate` = defective changes approved / defective
+changes, `false_rejection_rate` = correct changes rejected / correct changes,
+per repeat then mean ± standard deviation, plus approvals per defect class.
+
+**Prices.** `evals/e2e/pricing.py` has a built-in table (USD per million
+tokens: `llama-3.3-70b-versatile` 0.59 in / 0.79 out, `llama-3.1-8b-instant`
+0.05 / 0.08). These are Groq's earlier public list prices and **could not be
+confirmed** when the table was written (Groq's model page showed "Contact
+sales"). The report records the price source; pass `--prices FILE` with the
+current prices before quoting a cost.
+
+### Cassettes and replay fixtures
+
+A cassette (`cassettes/<set>/<pipeline|reviewer>/<id>.json`) stores, per
+repeat, every model call: role, answer, usage, latency and the hash of the
+**normalised** prompt. Normalisation drops the verification output block
+(host test output), timings, host paths and SHAs, so a replay on another
+machine is not stale, while any change to what the agents are asked is.
+
+The committed set `cassettes/fixtures/` is **synthetic**: recorded from the
+scripted oracle and no-op agents and mixed by a fixed rule (every third task
+replays the no-op, every fourth defective change the rubber-stamp Reviewer),
+so a full replay must score exactly 16/24 resolved and 3/14 false approvals
+with no stale call. It tests the harness and the engine plumbing, never a
+model. After a prompt change, regenerate it with
+`python -m evals.e2e.make_fixtures` and check that only hashes changed.
+
+**Recording real cassettes.** No API key was available when this harness was
+written, so no real-model cassette is committed. To record one:
+`python -m evals.e2e.run --mode live --record evals/e2e/cassettes/<name>`
+(or download the `e2e-results-live` artifact of the manual workflow), then
+replay it with `--mode replay --cassettes evals/e2e/cassettes/<name>
+--fail-on-stale`.
+
+### Live mode
+
+- Manual only: `workflow_dispatch` of `.github/workflows/evals.yml` with
+  `suite` set to `e2e` (or `both`; the default `implementer` runs only the
+  Implementer live job) and inputs `e2e_tasks`, `e2e_cases`, `e2e_repeats`,
+  `model`, or locally.
+- It uses plain completions through the injected transport, at a fixed
+  temperature (0) and seed: production's GitNexus tool loop and its silent
+  8B fallback are not exercised, because they cannot report per-call usage.
+- **It runs model-written code in the process that holds the key**:
+  verification and the hidden tests execute the PR head. The child processes
+  get a scrubbed environment, but on Linux they can read the parent's
+  environment (`/proc/<ppid>/environ`). Use a dedicated, low-limit evaluation
+  key, run only where that exposure is acceptable, and rotate the key after a
+  run. Unlike the Implementer harness, generation and scoring cannot be split
+  into two processes, because the pipeline interleaves model calls with test
+  runs. Every key in `GROQ_API_KEY*` is replaced with `[REDACTED]` in the
+  JSON and Markdown reports, the printed summary and recorded cassettes, so
+  a key printed by model code does not reach the uploaded artifact; a key
+  that model code encodes or splits first is not caught.
+- **The answers are on the same host.** The leak guards keep the hidden
+  tests and the fix out of the fake GitHub API and the clone the agents see,
+  but model-written code runs on the host and could read
+  `evals/e2e/tasks/*/solution/`, `hidden_tests/` or the committed cassettes
+  (whose Implementer answers hold the oracle fix) by absolute path. That
+  takes deliberately adversarial code, so the risk is low, but a resolved
+  task in live mode is not proof the model never saw the answer. The harness
+  does not isolate these files (scoring needs the hidden tests); check
+  resolved diffs by hand before quoting a live number.
+- 24 tasks plus 27 Reviewer cases at 3 repeats is about 150 runs and up to
+  ~700 model calls; use `--tasks`/`--cases` subsets to bound cost.
+
+### CI
+
+Pull requests that touch `backend/evals/**` (and the other paths of the
+workflow) run the `e2e-offline` job: the e2e tests (data validation
+included), the oracle (100% resolved and merged without help, 0% false
+approvals and rejections), the no-op (0% resolved, 100% false approvals) and
+the fixture replay with exact gates and `--fail-on-stale`. Live runs only on
+manual dispatch.
+
+### Limitations of the end-to-end evaluation
+
+- **Synthetic regressions in real code**, possibly seen in pre-training (see
+  above); single-file fixes; small libraries; Python only.
+- **n = 24 tasks and 27 Reviewer cases**: intervals are wide; compare
+  versions task by task, as described for the Implementer set.
+- **Offline GitHub**: no other CI checks, permissions or webhooks; only
+  targeted runs and `MERGE_POLICY=human` are covered. Changes to engine files
+  outside the workflow's paths do not trigger the job.
+- **Not a sandbox**: verification runs the snapshot's tests with the local
+  runner on the host, like the Implementer harness.
+- The **Reviewer measurement** starts from a PR the harness opens, so it
+  measures the Maintainer step in isolation; the pipeline measurement
+  includes it in context.

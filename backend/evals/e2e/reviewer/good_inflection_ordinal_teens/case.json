@@ -1,0 +1,10 @@
+{
+  "id": "good_inflection_ordinal_teens",
+  "task_id": "inflection_ordinal_teens",
+  "expected_verdict": "approve",
+  "defect_class": null,
+  "description": "The task's oracle fix (the unmodified upstream file).",
+  "changed_files": [],
+  "deleted_files": [],
+  "use_solution": true
+}

@@ -1,0 +1,21 @@
+{
+ "id": "bad_lru_renamed_popitem",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "07957369ac7b92eb0d35bffb697fd3bd8d0a75e08a7f51c6a92d273acb684763",
+    "response": "{\"verdict\": \"reject\", \"reasons\": [\"The change does not resolve the issue.\"], \"blocking_issues\": [\"The behaviour described in the issue is still wrong.\"]}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

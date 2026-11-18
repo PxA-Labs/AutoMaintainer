@@ -1,0 +1,23 @@
+{
+  "id": "cachetools_ttl_boundary",
+  "title": "TTLCache returns an item at exactly its expiry time",
+  "body": "`TTLCache` in `cachetools/__init__.py` treats an item as expired once\n`timer() >= expires` (that is what `key in cache` reports), but\n`cache[key]` still returns it at exactly the expiry time:\n\n```python\n>>> now = [0]\n>>> cache = TTLCache(maxsize=4, ttl=10, timer=lambda: now[0])\n>>> cache[\"k\"] = \"v\"\n>>> now[0] = 10\n>>> \"k\" in cache\nFalse\n>>> cache[\"k\"]\n'v'     # expected KeyError\n```\n\nExpected: at and after `insert time + ttl` the item is gone for\n`cache[key]` and `cache.get(key)` as well; before that it is\nreturned.\n",
+  "target_file": "cachetools/__init__.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "cachetools",
+    "repository": "https://github.com/tkem/cachetools",
+    "commit": "498bd83c1938d9dd5d9aaf4dab3043fb15fb1e42",
+    "path": "src/cachetools/__init__.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "TTLCache.__getitem__ compares with <= instead of <.",
+  "harness_files": [
+    "tests/test_cachetools_basic.py"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "bad_hashids_hex_partial_guard",
+  "task_id": "hashids_encode_hex_invalid",
+  "expected_verdict": "reject",
+  "defect_class": "missing-edge-case",
+  "description": "Returns '' for an empty string only; non-hex characters still raise.",
+  "changed_files": [
+    "hashids.py"
+  ],
+  "deleted_files": []
+}

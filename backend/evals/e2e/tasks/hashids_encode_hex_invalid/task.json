@@ -1,0 +1,23 @@
+{
+  "id": "hashids_encode_hex_invalid",
+  "title": "encode_hex() raises ValueError on non-hex input instead of returning ''",
+  "body": "In `hashids.py`, `Hashids.encode_hex` should return an empty string when\nits argument is not a hexadecimal string, like `encode` does for\ninvalid numbers. Instead it raises:\n\n```python\n>>> Hashids().encode_hex(\"zz\")\nValueError: invalid literal for int() with base 16: '1zz'\n```\n\nExpected: `encode_hex` returns `\"\"` for any string with a non-hex\ncharacter, and still round-trips valid hex through `decode_hex`.\n",
+  "target_file": "hashids.py",
+  "kind": "bugfix",
+  "category": "error-handling",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "hashids",
+    "repository": "https://github.com/davidaurelio/hashids-python",
+    "commit": "138a12e85d09e7e76eebc1d0e059b2e28ba488e6",
+    "path": "hashids.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The ValueError from parsing invalid hex is no longer caught.",
+  "harness_files": [
+    "tests/test_hashids_basic.py"
+  ]
+}

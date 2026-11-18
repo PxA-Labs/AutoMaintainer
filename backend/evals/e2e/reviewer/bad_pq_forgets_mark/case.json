@@ -1,0 +1,11 @@
+{
+  "id": "bad_pq_forgets_mark",
+  "task_id": "boltons_pq_readd",
+  "expected_verdict": "reject",
+  "defect_class": "wrong-logic",
+  "description": "Drops the task from the entry map but leaves its old heap entry live.",
+  "changed_files": [
+    "boltons/queueutils.py"
+  ],
+  "deleted_files": []
+}

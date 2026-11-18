@@ -1,0 +1,23 @@
+{
+  "id": "cachetools_lru_read",
+  "title": "LRUCache evicts entries that were just read",
+  "body": "`LRUCache` in `cachetools/__init__.py` should evict the least\nrecently *used* entry, where reading an entry counts as a use. Reads\ndo not update the order, so a hot entry is evicted as if it were\ncold:\n\n```python\n>>> cache = LRUCache(maxsize=2)\n>>> cache[\"a\"] = 1; cache[\"b\"] = 2\n>>> cache[\"a\"]\n1\n>>> cache[\"c\"] = 3\n>>> \"a\" in cache\nFalse   # expected True (\"b\" is the least recently used)\n```\n\nExpected: `cache[key]` and `cache.get(key)` on a present key make it\nthe most recently used; reading a missing key changes nothing.\n",
+  "target_file": "cachetools/__init__.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "cachetools",
+    "repository": "https://github.com/tkem/cachetools",
+    "commit": "498bd83c1938d9dd5d9aaf4dab3043fb15fb1e42",
+    "path": "src/cachetools/__init__.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "LRUCache.__getitem__ no longer moves the key to the end of the order.",
+  "harness_files": [
+    "tests/test_cachetools_basic.py"
+  ]
+}

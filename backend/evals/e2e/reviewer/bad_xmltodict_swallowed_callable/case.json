@@ -1,0 +1,11 @@
+{
+  "id": "bad_xmltodict_swallowed_callable",
+  "task_id": "xmltodict_force_list_callable",
+  "expected_verdict": "reject",
+  "defect_class": "swallowed-exception",
+  "description": "Catches the TypeError but returns False instead of calling force_list.",
+  "changed_files": [
+    "xmltodict.py"
+  ],
+  "deleted_files": []
+}
