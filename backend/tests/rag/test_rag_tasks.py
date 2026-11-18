@@ -3,6 +3,7 @@
 import subprocess
 
 import pytest
+from fake_redis import FakeRedis
 from fake_supabase import FakeSupabase
 
 import rag_tasks
@@ -22,6 +23,14 @@ class CountingEmbedder(HashingEmbedder):
     def embed_documents(self, texts):
         self.embedded.extend(texts)
         return super().embed_documents(texts)
+
+
+@pytest.fixture(autouse=True)
+def redis(monkeypatch):
+    """No test reaches a real Redis: the indexing lock uses this fake."""
+    fake = FakeRedis()
+    monkeypatch.setattr(rag_tasks, "_redis", lambda: fake)
+    return fake
 
 
 @pytest.fixture
@@ -270,6 +279,110 @@ def test_task_refuses_a_checkout_at_another_commit(monkeypatch, sb, clone):
     with pytest.raises(ValueError, match="HEAD"):
         rag_tasks.index_repository_task.run(REPO_ID, "f" * 40, str(path))
     assert "code_chunks" not in sb.tables
+
+
+def _enable(monkeypatch, sb):
+    monkeypatch.setenv("RAG_INDEXING_ENABLED", "true")
+    monkeypatch.setattr(rag_tasks, "_supabase", lambda: sb)
+    monkeypatch.setattr(rag_tasks, "_embedder", HashingEmbedder)
+
+
+def test_task_waits_while_another_index_of_the_repository_holds_the_lock(
+    monkeypatch, sb, clone, redis
+):
+    """Two index runs for different commits of one repository must not run
+    together: each deletes the rows of every other commit, so interleaved
+    they can leave the repository with no chunks at all."""
+    path, sha = clone
+    _enable(monkeypatch, sb)
+    key = rag_tasks._index_lock_key(REPO_ID)
+    redis.set(key, "another-run")
+    with pytest.raises(rag_tasks.RepositoryIndexBusy):
+        rag_tasks.index_repository_task.run(REPO_ID, sha, str(path))
+    assert "code_chunks" not in sb.tables
+    assert redis.get(key) == "another-run"  # not released by the loser
+
+
+def test_task_holds_the_lock_while_indexing_and_releases_it(
+    monkeypatch, sb, clone, redis
+):
+    path, sha = clone
+    _enable(monkeypatch, sb)
+    key = rag_tasks._index_lock_key(REPO_ID)
+    seen = []
+    real = rag_tasks.index_repository
+
+    def spy(*args, **kwargs):
+        seen.append(redis.get(key))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rag_tasks, "index_repository", spy)
+    assert rag_tasks.index_repository_task.run(REPO_ID, sha, str(path))["status"] == (
+        "indexed"
+    )
+    assert seen and seen[0] is not None
+    assert redis.ttls[key] == rag_tasks.INDEX_LOCK_TTL_SECONDS
+    assert redis.get(key) is None
+
+
+def test_task_releases_the_lock_when_indexing_fails(monkeypatch, sb, clone, redis):
+    path, sha = clone
+    _enable(monkeypatch, sb)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("embedder down")
+
+    monkeypatch.setattr(rag_tasks, "index_repository", boom)
+    with pytest.raises(RuntimeError):
+        rag_tasks.index_repository_task.run(REPO_ID, sha, str(path))
+    assert redis.get(rag_tasks._index_lock_key(REPO_ID)) is None
+
+
+def test_the_index_lock_is_not_the_agent_run_lock():
+    """Indexing must not block (or be blocked by) agent runs on the repo."""
+    from redis_locks import _lock_key
+
+    assert rag_tasks._index_lock_key(REPO_ID) != _lock_key(REPO_ID)
+
+
+@pytest.mark.parametrize("value", ["abc", "", "-5", "0"])
+def test_a_malformed_rag_max_chunks_falls_back_to_the_default(monkeypatch, value):
+    """Parsed when indexing, not at import: celery_app imports this module in
+    every worker, so a bad value must not stop workers from booting."""
+    monkeypatch.setenv("RAG_MAX_CHUNKS", value)
+    assert rag_tasks.max_chunks_per_repository() == rag_tasks.MAX_CHUNKS_PER_REPOSITORY
+
+
+def test_rag_max_chunks_is_read_when_indexing(monkeypatch, sb, tmp_path):
+    monkeypatch.setenv("RAG_MAX_CHUNKS", "2")
+    assert rag_tasks.max_chunks_per_repository() == 2
+    _write(tmp_path, FILES)
+    result = rag_tasks.index_repository(
+        sb,
+        HashingEmbedder(),
+        repository_id=REPO_ID,
+        commit_sha=SHA1,
+        clone_path=tmp_path,
+    )
+    assert result["status"] == "skipped"
+
+
+def test_importing_rag_tasks_survives_a_malformed_rag_max_chunks():
+    import os
+    import sys
+    from pathlib import Path
+
+    backend = Path(rag_tasks.__file__).resolve().parent
+    env = {**os.environ, "RAG_MAX_CHUNKS": "not-a-number"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import rag_tasks"],
+        cwd=backend,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_task_is_registered_with_the_worker_and_goes_to_the_maintenance_queue():

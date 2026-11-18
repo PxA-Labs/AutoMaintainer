@@ -19,6 +19,11 @@ Trade-offs:
 
 * New rows are written before the old commit's rows are deleted, so a
   query in between can see both commits (duplicates, never nothing).
+* One index run per repository at a time: each run deletes every other
+  commit's rows, so two runs for different commits interleaved could leave
+  the repository with no chunks. The task takes a Redis lock of its own
+  (not redis_locks' agent-run lock, so indexing never blocks a run) and
+  retries later while another run holds it.
 * Commit order is not checked: if an older commit is indexed after a newer
   one, the index holds the older one until the next indexing run.
 * Nothing enqueues this task yet; the caller (round 18) passes a checkout
@@ -35,6 +40,7 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 from automaintainer._runtime.retrieval import (
@@ -70,13 +76,65 @@ TABLE = "code_chunks"
 ON_CONFLICT = "repository_id,commit_sha,path,start_line,content_sha"
 # Above this the repository is skipped, not partly indexed: a cost guard
 # (each chunk is one embedding input). ~20k chunks is a large monorepo.
-MAX_CHUNKS_PER_REPOSITORY = int(os.getenv("RAG_MAX_CHUNKS", "20000"))
+# RAG_MAX_CHUNKS overrides it, read when indexing (max_chunks_per_repository).
+MAX_CHUNKS_PER_REPOSITORY = 20000
 WRITE_BATCH_SIZE = 200  # rows per upsert request (768 floats each)
 LOOKUP_BATCH_SIZE = 100  # content_sha values per "in" filter (URL length)
 
 
+# The per-repository indexing lock outlives a slow run rather than expire
+# under it; a crashed worker's lock frees itself after this.
+INDEX_LOCK_TTL_SECONDS = 3600
+LOCK_RETRY_COUNTDOWN_SECONDS = 60
+LOCK_MAX_RETRIES = 30
+
+_RELEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+
+class RepositoryIndexBusy(RuntimeError):
+    """Another index run of the same repository holds the lock."""
+
+
 def rag_indexing_enabled() -> bool:
     return os.getenv(RAG_INDEXING_ENV, "").strip().lower() in _TRUTHY
+
+
+def max_chunks_per_repository() -> int:
+    """RAG_MAX_CHUNKS if it is a positive integer, else the default.
+
+    Read lazily: celery_app imports this module in every worker, so a
+    malformed value must not stop workers from booting.
+    """
+    raw = os.getenv("RAG_MAX_CHUNKS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        if raw:
+            logger.warning(
+                "RAG_MAX_CHUNKS=%r is not a positive integer; using %d",
+                raw,
+                MAX_CHUNKS_PER_REPOSITORY,
+            )
+        return MAX_CHUNKS_PER_REPOSITORY
+    return value
+
+
+def _redis():
+    from redis_locks import get_redis_client
+
+    return get_redis_client()
+
+
+def _index_lock_key(repository_id) -> str:
+    return f"automaintainer:rag-index-lock:{repository_id}"
 
 
 def _supabase():
@@ -147,11 +205,9 @@ def index_repository(
     chunks: dict[tuple, CodeChunk] = {}
     for chunk in chunk_repository(root):
         chunks.setdefault((chunk.path, chunk.start_line, chunk.content_sha), chunk)
-    if len(chunks) > MAX_CHUNKS_PER_REPOSITORY:
-        reason = (
-            f"{len(chunks)} chunks exceeds RAG_MAX_CHUNKS "
-            f"({MAX_CHUNKS_PER_REPOSITORY})"
-        )
+    limit = max_chunks_per_repository()
+    if len(chunks) > limit:
+        reason = f"{len(chunks)} chunks exceeds RAG_MAX_CHUNKS ({limit})"
         logger.warning("rag index of repository %s skipped: %s", repository_id, reason)
         return {"status": "skipped", "repository_id": repository_id, "reason": reason}
 
@@ -247,10 +303,28 @@ def index_repository_task(repository_id: int, commit_sha: str, clone_path: str) 
     head = _checkout_head(root)
     if head != commit_sha:
         raise ValueError(f"checkout HEAD is {head}, not {commit_sha}")
-    return index_repository(
-        _supabase(),
-        _embedder(),
-        repository_id=repository_id,
-        commit_sha=commit_sha,
-        clone_path=root,
-    )
+
+    client = _redis()
+    key = _index_lock_key(repository_id)
+    token = uuid.uuid4().hex
+    if not client.set(key, token, nx=True, ex=INDEX_LOCK_TTL_SECONDS):
+        busy = RepositoryIndexBusy(f"repository {repository_id} is being indexed")
+        # Under a worker this schedules a retry (raising celery's Retry);
+        # called directly it re-raises ``busy``.
+        raise index_repository_task.retry(
+            exc=busy,
+            countdown=LOCK_RETRY_COUNTDOWN_SECONDS,
+            max_retries=LOCK_MAX_RETRIES,
+        )
+    try:
+        return index_repository(
+            _supabase(),
+            _embedder(),
+            repository_id=repository_id,
+            commit_sha=commit_sha,
+            clone_path=root,
+        )
+    finally:
+        # Compare-and-delete: never free a lock that expired and was taken
+        # by another run meanwhile.
+        client.eval(_RELEASE_SCRIPT, 1, key, token)
