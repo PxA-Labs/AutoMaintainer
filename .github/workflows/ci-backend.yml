@@ -61,24 +61,25 @@ jobs:
       run: |
         uv lock --check
 
-    - name: Install the pinned lint tools from uv.lock
-      # black and flake8 are exact pins in the dev group (#532); only that
-      # group is installed, the linters need none of the app dependencies.
-      # The venv goes outside backend/ so flake8 (which has no default .venv
-      # exclude) lints only the source tree. The runner context is not
-      # available in job-level env, hence GITHUB_ENV.
+    - name: Put the lint venv outside the source tree
+      # flake8 has no default .venv exclude, so a venv under backend/ would be
+      # linted. The runner context is not available in job-level env, hence
+      # GITHUB_ENV.
       run: |
         echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/lint-venv" >> "$GITHUB_ENV"
-        UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/lint-venv" uv sync --frozen --only-group dev
 
+    # black and flake8 are exact pins in the dev group (#532). `uv run
+    # --only-group dev` installs that group from the lock and none of the
+    # project dependencies (the linters import no app code), so this is not
+    # an app install and needs no --extra server.
     - name: Check code formatting with Black
       run: |
-        uv run --frozen --no-sync black --check .
+        uv run --frozen --only-group dev black --check .
 
     - name: Lint with flake8
       run: |
-        uv run --frozen --no-sync flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        uv run --frozen --no-sync flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        uv run --frozen --only-group dev flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        uv run --frozen --only-group dev flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   security-scan:
     name: Security & Vulnerability Scan

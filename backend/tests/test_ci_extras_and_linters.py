@@ -75,16 +75,19 @@ def test_lint_job_runs_the_locked_linters_through_uv():
     commands = _commands(_jobs()["lint-and-check"])
     # No unpinned pip install of either linter.
     assert not re.search(r"pip install[^\n]*\b(flake8|black)\b", commands)
-    assert "uv sync --frozen --only-group dev" in commands
-    assert "uv run --frozen --no-sync black --check ." in commands
+    # Only the dev group from the lock: no project dependencies, so this is
+    # not an app install (test_sdk_package requires --extra server on every
+    # `uv sync`, which an app install needs and the linters do not).
+    assert "uv sync" not in commands
+    assert "uv run --frozen --only-group dev black --check ." in commands
     # The flake8 gate selection is unchanged.
     assert (
-        "uv run --frozen --no-sync flake8 . --count --select=E9,F63,F7,F82 "
+        "uv run --frozen --only-group dev flake8 . --count --select=E9,F63,F7,F82 "
         "--show-source --statistics"
     ) in commands
     assert (
-        "uv run --frozen --no-sync flake8 . --count --exit-zero --max-complexity=10 "
-        "--max-line-length=127 --statistics"
+        "uv run --frozen --only-group dev flake8 . --count --exit-zero "
+        "--max-complexity=10 --max-line-length=127 --statistics"
     ) in commands
 
 
@@ -92,11 +95,11 @@ def test_lint_job_keeps_the_venv_out_of_the_linted_tree():
     # flake8 has no default exclude for .venv; a venv under backend/ would be
     # linted (and black would have to rely on its own default excludes).
     # The runner context is not allowed in job-level env (actionlint), so the
-    # path is exported through GITHUB_ENV before the sync.
+    # path is exported through GITHUB_ENV before the first uv run.
     commands = _commands(_jobs()["lint-and-check"])
     export = 'echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/lint-venv" >> "$GITHUB_ENV"'
     assert export in commands
-    assert commands.index(export) < commands.index("uv sync --frozen")
+    assert commands.index(export) < commands.index("uv run --frozen")
 
 
 EXTRA_TEST_PATHS = (
