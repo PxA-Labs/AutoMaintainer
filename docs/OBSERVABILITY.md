@@ -97,12 +97,21 @@ Notes:
 | Raw request path, `Host` | Spans from the FastAPI instrumentation |
 | Error messages | Logs and span events (`record_exception`) |
 
-## Current limitation
+## Where the metrics are recorded
 
-`observability.py` enables OpenTelemetry only when every module it imports is
-installed, including `opentelemetry.instrumentation.logging`, which is not a
-dependency in `backend/pyproject.toml`. In an environment installed from the
-lock file the backend therefore runs in no-op telemetry mode and exports no
-metrics; the custom helpers are also not called anywhere yet (see
-ARCHITECTURE.md). The catalogue and Views above apply as soon as telemetry is
-enabled.
+- `agent_runs_total` and `agent_run_duration_seconds`: `backend/tasks.py`,
+  once per run that held the repository lock, when it ends.
+- `llm_tokens_total`, `llm_phase_tokens_total` and
+  `llm_estimated_cost_usd_total`: `backend/telemetry_metrics.py`, from the
+  engine's `TelemetryEvent`s (phase from the event, kind `total` because the
+  engine does not split prompt and completion tokens; the cost of an unsplit
+  count is priced at the model's higher rate, an upper bound). The SDK
+  package (`backend/automaintainer`) never imports `observability`.
+- `celery_worker_heartbeat`: every Celery worker process, through the hooks
+  `celery_app.py` installs.
+
+`agent_runs_active`, `llm_request_duration_seconds`,
+`github_api_calls_total`, `celery_queue_depth` and
+`celery_task_duration_seconds` are catalogued but not recorded by any caller
+yet. `observability.py` enables OpenTelemetry only when every module it
+imports is installed (the `server` extra); otherwise it runs in no-op mode.

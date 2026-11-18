@@ -181,6 +181,12 @@ variable "cloud_trace_enabled" {
   default     = false
 }
 
+variable "cloud_monitoring_enabled" {
+  description = "Export the API's and the worker's OpenTelemetry metrics to Cloud Monitoring (OTEL_CLOUD_MONITORING_ENABLED). Both accounts already hold roles/monitoring.metricWriter (monitoring.tf, iam.tf). The application alerts (monitoring_app_alerts_enabled) need it on."
+  type        = bool
+  default     = false
+}
+
 # --- Worker (Compute Engine) --------------------------------------------------
 
 variable "worker_machine_type" {
@@ -248,8 +254,9 @@ variable "app_env" {
     Non-secret environment for the API and the worker, e.g. SUPABASE_URL,
     GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_APP_CLIENT_ID, ALLOWED_ORIGINS,
     DASHBOARD_URL, MERGE_POLICY (docs/DEPLOYMENT.md lists them). Both get the
-    same values, so MERGE_POLICY matches as DEPLOYMENT.md requires. ENVIRONMENT
-    and REDIS_URL are set by this configuration. Secrets go in var.secrets.
+    same values, so MERGE_POLICY matches as DEPLOYMENT.md requires. ENVIRONMENT,
+    REDIS_URL and OTEL_CLOUD_MONITORING_ENABLED (cloud_monitoring_enabled) are
+    set by this configuration. Secrets go in var.secrets.
     Refused: AUTH_DEV_BYPASS (never in a deployment), ENABLE_TERMINAL (the
     API is public) and VERIFY_ALLOW_LOCAL (runs untrusted repository code on
     the worker; stays off until sandboxed verification lands, #527).
@@ -263,6 +270,12 @@ variable "app_env" {
       !contains(keys(var.app_env), k)
     ])
     error_message = "app_env must not set AUTH_DEV_BYPASS, ENABLE_TERMINAL, VERIFY_ALLOW_LOCAL, ENVIRONMENT, REDIS_URL or PORT."
+  }
+
+  validation {
+    # Set from cloud_monitoring_enabled, which would silently replace it.
+    condition     = !contains(keys(var.app_env), "OTEL_CLOUD_MONITORING_ENABLED")
+    error_message = "Set cloud_monitoring_enabled instead of OTEL_CLOUD_MONITORING_ENABLED in app_env."
   }
 
   validation {

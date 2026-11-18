@@ -19,6 +19,16 @@ mount_secrets = false
 
 cloud_trace_enabled = false
 
+# Metrics to Cloud Monitoring from the API and the worker (monitoring.tf).
+cloud_monitoring_enabled = false
+# Turn on after the metrics have been written once (docs/DEPLOYMENT.md,
+# "Metrics and alerts").
+monitoring_app_alerts_enabled = false
+# Who receives the alerts. No default on purpose: put your address in the
+# commented line and uncomment it, or keep null for no e-mail channel.
+# monitoring_alert_email = "<alerts e-mail address>"
+monitoring_alert_email = null
+
 api_max_instances  = 3
 worker_concurrency = 2
 

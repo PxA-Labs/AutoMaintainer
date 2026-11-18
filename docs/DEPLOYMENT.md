@@ -744,7 +744,7 @@ management fee plus at least one always-on node). It needs a new
 | `GOOGLE_CLOUD_PROJECT` | unset | Project the traces go to. Unset: the project of the credentials. Terraform sets it. |
 
 A failure to set up the exporter (no credentials, package missing) is logged
-and does not stop the API. Metrics are not sent to Google.
+and does not stop the API. Metrics have their own switch, below.
 
 ### Metrics and alerts
 
@@ -753,24 +753,42 @@ and does not stop the API. Metrics are not sent to Google.
 | `OTEL_CLOUD_MONITORING_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a reader that exports the backend's OpenTelemetry metrics to Cloud Monitoring every 60 seconds, next to Prometheus and OTLP (`backend/observability.py`). Credentials and project as for Cloud Trace; the account needs `roles/monitoring.metricWriter` (Terraform grants it to the API and the worker). A missing package or missing credentials is logged once and the process keeps running. |
 | `LLM_PRICES_JSON` | unset | Overrides or extends the built-in LLM price table, e.g. `{"llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79}}` (USD per million tokens). An invalid value is logged once and ignored. |
 
-Set the switch for both services through `app_env` in `terraform.tfvars`
-(`app_env = { OTEL_CLOUD_MONITORING_ENABLED = "true", ... }`): Terraform
-passes `app_env` to Cloud Run and the worker VM. Each metric becomes the
+Turn it on for both services with `cloud_monitoring_enabled = true` in
+`terraform.tfvars`: Terraform sets `OTEL_CLOUD_MONITORING_ENABLED` on Cloud
+Run and on the worker VM (reset the VM after changing it). `app_env` may not
+set the variable itself. Each metric becomes the
 metric type `workload.googleapis.com/<name>` on the `generic_task` resource
 (`job` is `automaintainer-backend` or `automaintainer-worker`, one `task_id`
 per process).
 
 What is exported, all with the bounded labels of the catalogue in
-`observability.py`: runs finished by mode and final status
-(`agent_runs_total`), run duration by final status
-(`agent_run_duration_seconds`, buckets up to an hour), LLM tokens by model,
-phase and kind (`llm_phase_tokens_total`), the **estimated** LLM cost by
-model and phase (`llm_estimated_cost_usd_total`), and one
-`celery_worker_heartbeat` series per live worker process. The cost is an
-estimate: Groq's earlier public list prices, which could not be confirmed
-(the model page shows "Contact sales"); models missing from the table add
-tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices before
-quoting it.
+`observability.py`:
+
+- runs finished, by mode and outcome (`agent_runs_total`), and their
+  duration (`agent_run_duration_seconds`, buckets up to an hour). The worker
+  records both when a run ends (`backend/tasks.py`). The outcome is
+  `completed`, `cancelled`, `failed` or `timeout`: a run stopped by the
+  30-minute limit is stored as `failed` but measured as `timeout`, and the
+  failure-rate alert counts both. A redelivered run that is already finished
+  and a run that gave up waiting for the repository lock are not counted.
+  The duration starts once the run holds the lock;
+- LLM tokens by model, phase and kind (`llm_phase_tokens_total`) and the
+  **estimated** LLM cost by model and phase
+  (`llm_estimated_cost_usd_total`). The worker reads them from the engine's
+  `TelemetryEvent`s (`backend/telemetry_metrics.py`; the SDK package never
+  imports `observability`). The engine reports one token count per LLM call,
+  not split into prompt and completion, so the kind is `total` and the cost
+  is priced at the model's higher (output) rate: an upper bound, at most
+  about a third above the real figure for `llama-3.3-70b-versatile`, so the
+  cost alert fires early rather than late;
+- one `celery_worker_heartbeat` series per live worker process
+  (`celery_app.py` calls `observability.install_celery_worker_hooks()`, so
+  each prefork process sets up its exporter after the fork).
+
+The cost is an estimate: Groq's earlier public list prices, which could not
+be confirmed (the model page shows "Contact sales"); models missing from the
+table add tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices
+before quoting it.
 
 `terraform apply` creates (`infra/terraform/monitoring.tf`):
 
@@ -783,18 +801,14 @@ quoting it.
   estimated LLM cost over the last 24 hours, and the absence of any worker
   heartbeat (thresholds: the `alert_*` variables). Cloud Monitoring refuses a
   policy on a metric type that has never been written, so turn this on only
-  after the switch has been on for a run or two (Metrics Explorer lists the
-  `workload.googleapis.com` types);
+  after `cloud_monitoring_enabled` has been on for a run or two, one of which
+  used the LLM (Metrics Explorer lists the `workload.googleapis.com` types);
 - a dashboard with the same charts (`terraform output monitoring_dashboard_url`).
 
-Not yet wired in this change: the worker exports metrics only once
-`celery_app.py` calls `observability.install_celery_worker_hooks()` at
-import, and the run and token metrics stay empty until the engine calls
-`record_agent_run_complete` and `record_llm_tokens(model, tokens,
-phase=..., kind="input" | "output")`. Until then only the API's HTTP
-metrics and the 5xx alert carry data. With few runs a single failure can
-cross the failure-rate threshold, and at low traffic a few 5xx answers can
-cross the 5xx ratio.
+With few runs a single failure can cross the failure-rate threshold, and at
+low traffic a few 5xx answers can cross the 5xx ratio. The worker exports
+only from the prefork pool (the default); a worker started with `--pool solo`
+or `threads` exports no metrics.
 
 ### Estimated monthly cost
 

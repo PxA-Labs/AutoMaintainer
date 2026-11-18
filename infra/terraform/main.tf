@@ -42,6 +42,9 @@ locals {
   app_env = merge(var.app_env, {
     ENVIRONMENT          = "production"
     GOOGLE_CLOUD_PROJECT = var.project_id
+    # Metrics come from both services: runs and LLM tokens from the worker,
+    # HTTP metrics from the API (backend/observability.py).
+    OTEL_CLOUD_MONITORING_ENABLED = var.cloud_monitoring_enabled ? "true" : "false"
   })
 }
 

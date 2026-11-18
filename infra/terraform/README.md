@@ -14,6 +14,8 @@ This file describes the configuration itself.
 | `run.tf` | Cloud Run service for the API and its public invoker binding |
 | `iam.tf` | The `api`, `worker` and `deployer` service accounts and their roles |
 | `secrets.tf` | Secret Manager containers (no versions) and per-secret access |
+| `sandbox.tf` | The Cloud Run job verification runs in, its isolated network and bucket, and the worker's role on them (docs/DEPLOYMENT.md, "Sandboxed verification") |
+| `monitoring.tf` | Metric writer role for the API, the alert e-mail channel, the alert policies and the operations dashboard ([Monitoring](#monitoring)) |
 | `budget.tf` | Billing budget and optional e-mail channels |
 | `outputs.tf` | `api_url`, `image_repository`, `wif_provider`, `deployer_service_account`, and every repository variable the deploy workflow needs |
 | `modules/network` | VPC, subnet with Private Google Access, Cloud Router and Cloud NAT |
@@ -110,7 +112,8 @@ with deployer credentials, as any deploy pipeline does.
 
 **Dangerous settings are refused.** `app_env` may not set
 `AUTH_DEV_BYPASS`, `ENABLE_TERMINAL` or `VERIFY_ALLOW_LOCAL`, nor the values
-Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`).
+Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`,
+`OTEL_CLOUD_MONITORING_ENABLED`).
 
 ## Monitoring
 
@@ -119,9 +122,11 @@ Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`).
 for the API account (the worker has it in `iam.tf`; the Monitoring API is
 enabled in `main.tf`), an e-mail notification channel from
 `monitoring_alert_email` (no default; `null` for none), five alert policies
-and an operations dashboard. The backend exports only with
-`OTEL_CLOUD_MONITORING_ENABLED=true` in `app_env`; nothing in `run.tf` or the
-worker module changes.
+and an operations dashboard. The backend exports only when
+`cloud_monitoring_enabled = true`, which sets `OTEL_CLOUD_MONITORING_ENABLED`
+for the API and the worker (`local.app_env` in `main.tf`; `app_env` may not
+set it itself). The worker writes the run, token, cost and heartbeat
+metrics, the API its HTTP metrics.
 
 - The API 5xx ratio alert uses Cloud Run's built-in `request_count` and
   exists from the first apply.
