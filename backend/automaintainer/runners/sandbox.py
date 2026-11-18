@@ -106,6 +106,13 @@ SANDBOX_BACKEND_ENV = "SANDBOX_BACKEND"
 
 SandboxBackendFactory = Callable[[Path], SandboxBackend]
 
+# Short names for backends that ship with the package. Only the worker's
+# environment path (below) knows them: AutoMaintainerConfig.sandbox_backend
+# still takes the full "package.module:factory" form.
+SANDBOX_BACKEND_ALIASES = {
+    "cloud_run_job": "automaintainer.runners.cloud_run_job_sandbox:create",
+}
+
 
 def load_sandbox_backend_factory() -> Optional[SandboxBackendFactory]:
     """Return the factory named by ``SANDBOX_BACKEND``, or None when unset.
@@ -117,6 +124,7 @@ def load_sandbox_backend_factory() -> Optional[SandboxBackendFactory]:
     spec = (os.getenv(SANDBOX_BACKEND_ENV) or "").strip()
     if not spec:
         return None
+    spec = SANDBOX_BACKEND_ALIASES.get(spec, spec)
     module_name, sep, attr = spec.partition(":")
     if not sep or not module_name or not attr:
         raise RunnerError(
