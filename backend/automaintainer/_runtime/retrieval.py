@@ -23,7 +23,11 @@ agents' prompts without touching how it is computed:
   wrapped with ``agents.untrusted_block`` under the existing
   ``UNTRUSTED_DATA_NOTICE``.
 
-Nothing here is called by the agents yet. See docs/RAG.md.
+Wired in behind ``rag_retrieval_enabled`` (RAG_RETRIEVAL_ENABLED): the PM
+prompt gets the top-k chunks for the issue (agents.retrieved_context), and
+the ADK Reviewer's search_code asks the index when it holds the PR head.
+Both resolve their retriever through agents.resolve_retriever with a
+:class:`RetrievalScope`. See docs/RAG.md.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ from typing import Callable, Iterable, Protocol, Sequence, runtime_checkable
 from .ast_indexer import CodebaseMapper, TreeSitterParser
 from .change_limits import DEFAULT_DENYLIST, path_matches
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("retrieval")  # legacy name, as the other runtime modules
 
 EMBEDDING_DIMENSIONS = 768  # text-embedding-005; the code_chunks column width
 DEFAULT_EMBEDDING_MODEL = "text-embedding-005"
