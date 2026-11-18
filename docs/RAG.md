@@ -19,13 +19,18 @@ agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
    minified files, binary and non-UTF-8 files, and files over 256 kB). Python,
    JavaScript and TypeScript files are split with the existing tree-sitter
    indexer (`ast_indexer`, read-only): one chunk per top-level function or
-   method (`Class.method`, decorators included, nested functions kept in their
-   parent) and one per class *header* (docstring and attributes, without the
-   methods, so nothing is embedded twice). Other text files, and source files
-   with no definitions, become file-level chunks. Chunks over 150 lines are
-   split into windows; each window is cut at 6000 characters. Module-level
-   code between definitions (imports, constants) is not indexed in a Python
-   file that has definitions.
+   method (`Class.method`, `Outer.Inner.method` for nested classes; nested
+   functions and classes defined inside a function stay in their parent) and
+   one per class *header* (docstring and attributes, without the methods, so
+   nothing is embedded twice). Python decorators belong to what they decorate,
+   including multi-line ones and comments between a decorator and its `def`:
+   the span is tree-sitter's `decorated_definition`. Code outside every
+   definition (imports, module constants and docstrings, `if __name__` blocks,
+   class attributes between methods) becomes *gap* chunks: symbol `None` at
+   module level, the class's name inside a class; runs with no word character
+   (a lone `}`) are skipped. Other text files, and source files with no
+   definitions, become file-level chunks. Chunks over 150 lines are split
+   into windows; each window is cut at 6000 characters.
 2. **Embedding.** `VertexEmbedder` calls Vertex AI `text-embedding-005`
    (768 dimensions) through `google-genai`, the optional `rag` extra
    (`uv sync --extra rag`). Documents use task type `RETRIEVAL_DOCUMENT`,
@@ -86,12 +91,28 @@ indexes one checkout that is already at `commit_sha` (it checks with
 - **One commit per repository.** After writing, the repository's rows of
   every other commit are deleted. New rows are written first, so a query in
   between can see both commits, never neither.
+- **One run per repository at a time.** Because each run deletes the other
+  commits' rows, two concurrent runs could empty the index. The task holds a
+  Redis lock (`automaintainer:rag-index-lock:<repository_id>`, 1 h TTL,
+  released by compare-and-delete) and retries every 60 s (up to 30 times)
+  while another run holds it. It is separate from the agent-run lock, so
+  indexing and agent runs never block each other.
 - **Cost guard.** A repository with more than `RAG_MAX_CHUNKS` (default
-  20000) chunks is skipped, not partly indexed.
+  20000) chunks is skipped, not partly indexed. The variable is read when
+  indexing; a value that is not a positive integer falls back to the default
+  with a warning (workers import the module, so it must not fail at import).
 - Nothing enqueues the task yet; round 18 does (e.g. when a PR merges).
 
 Known limits: commit order is not checked (indexing an older commit after a
-newer one leaves the older one until the next run). HNSW is searched before
+newer one leaves the older one until the next run). A chunk's `org_id` is
+copied from the repository when it is indexed: if a repository row moves to
+another organization, its chunks stay readable by the **old** organization's
+members until its chunks are deleted. Indexing a *new* commit fixes it (new
+rows take the new org, the old commit's rows are deleted); re-indexing the
+*same* commit does not, because existing rows are kept as they are. Whoever
+transfers a repository between organizations should delete its
+`code_chunks` rows (service role) in the same change; round 18 can enforce
+this with a trigger on `repositories.org_id`. HNSW is searched before
 the org/repository filter is applied, so with many repositories in one table
 fewer than k rows can come back (pgvector's `hnsw.ef_search`, 40 by default,
 bounds the candidates; raising it, or pgvector 0.8's iterative scans, are the
@@ -145,23 +166,30 @@ oracle fix: the gold file is `target_file`, the gold chunks are its chunks
 overlapping the lines `solution/` changes. It also prints what drawing k
 chunks at random would score on the same snapshot.
 
-Results with the `HashingEmbedder` (deterministic, offline; this round):
+Results with the `HashingEmbedder` (deterministic, offline; this round, with
+gap chunks for module-level code):
 
 | k | file recall@k | random | function recall@k | random |
 | --- | --- | --- | --- | --- |
-| 1 | 0.83 | 0.82 | 0.42 | 0.05 |
-| 3 | 1.00 | 0.99 | 0.75 | 0.16 |
-| 5 | 1.00 | 1.00 | 0.79 | 0.27 |
-| 10 | 1.00 | 1.00 | 0.96 | 0.45 |
+| 1 | 0.75 | 0.81 | 0.42 | 0.04 |
+| 3 | 0.96 | 0.99 | 0.62 | 0.13 |
+| 5 | 1.00 | 1.00 | 0.79 | 0.22 |
+| 10 | 1.00 | 1.00 | 0.92 | 0.40 |
+
+Before gap chunks (definitions only), function recall was 0.42 / 0.75 / 0.79
+/ 0.96 and file recall@1 0.83. The gold here is always a function, so the
+benchmark only sees the cost of the extra chunks (import blocks share many
+identifiers with issue texts), not the gain on questions about module-level
+code, which none of the 24 tasks asks.
 
 How to read them:
 
 - **File recall says nothing here.** Each snapshot is the target file plus a
   visible test file, a package marker and a license, so random chunks hit the
   gold file almost always.
-- **Function recall@5 = 0.79 (19 of 24)** against 0.27 by chance. Many issue
+- **Function recall@5 = 0.79 (19 of 24)** against 0.22 by chance. Many issue
   texts name the function or its file, which a bag-of-identifiers embedder
-  matches easily; this is an easy, small benchmark (5 to 122 chunks per
+  matches easily; this is an easy, small benchmark (7 to 128 chunks per
   snapshot), not evidence about real repositories. Misses at k=5:
   `cachetools_ttl_boundary`, `isoweek_day_jan4`, `jsonpointer_leading_zero`,
   `jsonpointer_unescape_order`, `xmltodict_repeated_elements`.
@@ -187,6 +215,14 @@ How to read them:
 - CI: the `ci-db` job runs `postgres:16`, which has no pgvector; the
   migration needs an image with it (`pgvector/pgvector:pg16`). Supabase has
   pgvector available.
+  **This must land before or with this migration**: without it every RLS
+  and db-migrate test in that job fails at `CREATE EXTENSION vector`.
 - Apply the migration (`supabase db push` or `python scripts/db-migrate up`).
+- Build the worker image with the `rag` extra as well
+  (`uv sync --frozen --extra server --extra rag`). The images install
+  `--extra server` only, so `google-genai` is missing there and the first
+  embedding call would fail with `ImportError` once indexing is enabled.
 - Grant the runtime service account `roles/aiplatform.user`, set
   `GOOGLE_CLOUD_PROJECT`, then `RAG_INDEXING_ENABLED=true`.
+- Confirm the Vertex embedding price on Google's pricing page; the figure in
+  [Cost](#cost) is from memory.
