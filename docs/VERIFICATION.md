@@ -267,7 +267,7 @@ Without the file, the command is detected, first match wins:
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `VERIFY_CHANGES` | on | `false` turns verification off. The result is then `skipped`, which still blocks `MERGE_POLICY=ci`. |
-| `SANDBOX_BACKEND` | unset | `package.module:factory`. The factory is called with the host path of the working copy and returns a `runners.sandbox.SandboxBackend`. A set but unloadable value is an `error`; it never falls back to local execution. |
+| `SANDBOX_BACKEND` | unset | `package.module:factory`, or `cloud_run_job` (short for `automaintainer.runners.cloud_run_job_sandbox:create`; the engine's `AutoMaintainerConfig.sandbox_backend` takes only the long form). The factory is called with the host path of the working copy and returns a `runners.sandbox.SandboxBackend`. A set but unloadable value is an `error`; it never falls back to local execution. |
 | `VERIFY_ALLOW_LOCAL` | unset | `true` allows running repository tests on the API/worker host without a sandbox, in any environment. Only for a developer machine running repositories you trust. |
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
 | `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
@@ -306,9 +306,11 @@ agent just wrote from an untrusted issue. Treat it as hostile.
 - **A sandbox backend** should run the command in an ephemeral container or
   micro-VM with no secrets, network egress denied (or limited to package
   mirrors) and CPU, memory and time limits. Those properties are the backend's
-  responsibility; `runners/sandbox.py` defines the interface and
-  `runners/docker_sandbox.py` ships one implementation (see
-  [Docker sandbox backend](#docker-sandbox-backend)). The host waits at
+  responsibility; `runners/sandbox.py` defines the interface and two
+  implementations ship: `runners/docker_sandbox.py` (see
+  [Docker sandbox backend](#docker-sandbox-backend)) and
+  `runners/cloud_run_job_sandbox.py` (see
+  [Cloud Run Jobs sandbox backend](#cloud-run-jobs-sandbox-backend)). The host waits at
   most `timeout_seconds` + 30 s for the backend, then reports `error`. The
   host does not bound memory for the backend's reply: `exec_command` returns
   stdout and stderr as whole strings, which are only then cut to
@@ -507,6 +509,135 @@ host environment variable. It runs them twice: against the runner's daemon,
 and against a separate Docker-in-Docker daemon reached through
 `DOCKER_HOST=tcp://...`, which shares no filesystem with the worker (the
 remote sandbox host setup).
+
+## Cloud Run Jobs sandbox backend
+
+`runners/cloud_run_job_sandbox.py` (#158, #527) runs each test command as one
+execution of a Cloud Run job, so untrusted code never runs on the worker VM
+or its network. `infra/terraform/sandbox.tf` creates the job, its network
+and its bucket, and the worker module selects the backend; the owner's steps
+and the live smoke test are in
+[DEPLOYMENT.md, Option D, Sandboxed verification](DEPLOYMENT.md#sandboxed-verification).
+
+### Configuration
+
+```
+SANDBOX_BACKEND=cloud_run_job
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CLOUD_RUN_SANDBOX_PROJECT` | `GOOGLE_CLOUD_PROJECT` | Project of the job and bucket. One of the two is required. |
+| `CLOUD_RUN_SANDBOX_REGION` | required | Region of the job, e.g. `us-central1`. |
+| `CLOUD_RUN_SANDBOX_JOB` | required | Job name (not the full resource path). |
+| `CLOUD_RUN_SANDBOX_BUCKET` | required | Bucket for the copies and results. |
+| `CLOUD_RUN_SANDBOX_SIGNER` | the credentials' account | Service account that signs the URLs (`signBlob` on itself). Terraform sets it to the worker's account. |
+| `CLOUD_RUN_SANDBOX_START_SECONDS` | `20` | Extra seconds the worker waits for the job to start, on top of the command's timeout. At most 25: verification stops waiting 30 seconds after the timeout. |
+| `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Also caps the output the job uploads and the worker reads. |
+
+Every name is validated before it is put in an API URL. Terraform sets all
+of these on the worker container (`modules/worker`).
+
+### What one run does
+
+```
+worker: pack the working copy (symlinks as links), as the Docker backend does
+worker: sign two V4 URLs for executions/<128 random bits>/ in the bucket,
+        valid for timeout + start_seconds + 300 s:
+          GET  workspace.tar
+          PUT  output   (signed x-goog-content-length-range: 0,<cap + 1024>)
+worker: upload workspace.tar
+worker: POST jobs/<job>:run with overrides
+          args    -I -c <entrypoint script> <test command...>
+          env     AM_SANDBOX_INPUT_URL, AM_SANDBOX_OUTPUT_URL, AM_SANDBOX_TIMEOUT,
+                  AM_SANDBOX_MAX_OUTPUT, AM_SANDBOX_OUTPUT_RANGE
+          timeout timeout + start_seconds + 60 s (the platform's own kill)
+job:    python3 runs the entrypoint (standard library only):
+          download and unpack into a temp dir (tarfile "tar" filter: nothing
+            outside the workspace) or report a setup error (exit 125)
+          run the command, no shell, stdin closed, minimal environment
+            (HOME/TMPDIR, CI=true, NO_COLOR, PYTHON*, GIT_TERMINAL_PROMPT,
+            safe.directory; PATH from the image), in its own process group
+          keep the last <cap> bytes of stdout+stderr; on timeout kill the
+            group and report it (exit 124)
+          PUT <json header>\n<output tail>; exit with the command's code
+worker: poll the execution every 2 s; read at most <cap + 1024> bytes of the
+        result; require exit 0 if and only if Cloud Run says the task succeeded
+worker: on timeout, error or cancellation cancel the execution; always delete
+        both objects (the bucket's 1-day lifecycle rule is the backstop)
+```
+
+- **The entrypoint travels with each execution**, so the job image only
+  needs `python3` (3.11.4 or later, for tarfile filters) and the tests'
+  toolchain, and it never drifts from the worker's code. A missing program
+  exits 127 (126 if not executable) with a message, like `sh` in the Docker
+  backend: a failing test, not an error.
+- **Results:** an execution without a result object, a setup error, a
+  malformed header or a header that contradicts the task's own outcome is
+  `error`, never a test result. Timeouts (the job's or the worker's) are
+  `error` (timed out), as with Docker.
+- **Timing:** the command gets `timeout_seconds` inside the job. The worker
+  waits `timeout_seconds + CLOUD_RUN_SANDBOX_START_SECONDS`, counted from the
+  start of packing, so a cold start does not eat the test's own budget but
+  a start slower than that allowance is reported as a timeout.
+- File operations, `get_git_diff` and the refusal of `commit_and_push` are
+  the Docker backend's (host working copy, same path-escape rules).
+- No Google client library is needed: the worker calls the Cloud Run Admin
+  v2, Cloud Storage JSON and IAM Credentials REST APIs with `httpx` and
+  application default credentials from `google-auth` (server extra).
+
+### Threat model
+
+Isolated from the tests:
+
+- **The worker and its secrets.** The command runs in Google's gen2 Cloud Run
+  sandbox, as a service account that holds **no role** (no project role, no
+  bucket role, no actAs). Its metadata server is the job's own: a test can
+  get a token for the sandbox account, never for the worker's.
+- **Other runs.** The bucket is reached only through the two signed URLs of
+  this run; object names carry 128 random bits and the job's account cannot
+  list or read the bucket.
+- **The network.** The job's egress (`ALL_TRAFFIC`) goes into a dedicated VPC
+  with no default route, no NAT and no peering, and a deny-all egress
+  firewall. The worker VM, Redis, Memorystore and the internet are
+  unreachable. The single exception is TCP 443 to `private.googleapis.com`
+  (199.36.153.8/30), where a private DNS zone points `storage.googleapis.com`.
+- **The host clone and later steps:** copy-in, as with Docker.
+- **Runaway runs:** the task timeout, CPU and memory limits (`sandbox_cpu`,
+  `sandbox_memory`; the unpacked copy lives in memory) and `max_retries = 0`.
+
+Not isolated:
+
+- **Google APIs through the private VIP.** 199.36.153.8/30 serves every
+  Google API, whatever the hostname. A test can therefore call Google APIs
+  with the sandbox account's token (useful only for resources open to any
+  authenticated principal) or upload the repository to a bucket its author
+  controls. The repository is what it already had; nothing else is in the
+  sandbox. Closing this needs VPC Service Controls (`restricted.googleapis.com`
+  and a perimeter), which requires an organization.
+- **The signed URLs themselves.** They are in the task's environment, so the
+  command can read them. They let it reread its own copy and rewrite its own
+  result; the rewritten result must still agree with the task's exit
+  status, and a test can always choose its own exit code anyway.
+- **Metadata.** Project id, region and the sandbox account's email are
+  visible from the metadata server.
+- **The change influencing its own tests** (see Limitations), as with every
+  backend.
+
+### Testing
+
+`backend/tests/test_cloud_run_job_sandbox.py` runs the Docker backend's cases
+(copy-in, exit codes, output cap, path escapes, timeouts, cancellation) against
+a fake client, checks object cleanup on every failure path and the
+result-versus-execution check, runs the real entrypoint in a subprocess
+against a local HTTP server standing in for Cloud Storage, and checks the REST
+client's requests (including the V4 canonical request) with
+`httpx.MockTransport`. `backend/tests/test_gcp_sandbox_config.py` pins the
+Terraform: the job account in no IAM binding, the egress firewall and routes,
+the bucket's access and lifecycle, the worker's permissions and settings.
+Nothing calls Google; that GCS accepts the signatures, that Direct VPC egress
+honours the private DNS zone and the start latency are checked by the
+owner's smoke test after `terraform apply`.
 
 ## Limitations
 
