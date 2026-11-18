@@ -104,7 +104,7 @@ celery_app = Celery(
     "automaintainer",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks", "webhook_processor"],
+    include=["tasks", "webhook_processor", "rag_tasks"],
 )
 
 # Celery configuration
