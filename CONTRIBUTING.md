@@ -21,7 +21,8 @@ Report security vulnerabilities privately, as described in
 - **Python** 3.11 or 3.12 (the versions the backend CI tests).
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for the
   backend. CI uses uv 0.13.8, the same version as the Dockerfile.
-- **Node.js** 22.18 or later for the dashboard and the gitnexus CLI (CI uses
+- **Node.js** 22.18 or later in the 22 line, or 24.11 or later, for the
+  dashboard and the gitnexus CLI (gitnexus needs `^22.18 || >=24.11`; CI uses
   Node.js 22.x).
 - **Git**.
 - **[ripgrep](https://github.com/BurntSushi/ripgrep)** (`rg`), only for the
@@ -44,7 +45,7 @@ Report security vulnerabilities privately, as described in
    ```
    `uv sync` installs the `dev` dependency group by default: pytest and its
    plugins, and the exact `black` and `flake8` versions CI runs. The `server`
-   extra adds FastAPI, Celery and OpenTelemetry, which the server and most
+   extra adds uvicorn, Celery and OpenTelemetry, which the server and most
    tests need. Two more extras are optional:
 
    | Extra | Adds | Needed for |

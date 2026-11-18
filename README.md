@@ -70,10 +70,10 @@ unless you turn them on.
 - **Code context**: an AST map of the clone (tree-sitter) and GitNexus tools over MCP. GitNexus runs locally. Prompts, including repository content, are sent to Groq.
 
 **Engine and extensions**
-- **Python SDK** (`backend/automaintainer/`): `AutoMaintainerEngine` runs the pipeline in-process with per-engine configuration, isolated concurrent runs and cancellation. The distribution name is `automaintainer`; the extras are `server` (FastAPI, Celery, OpenTelemetry), `adk` and `rag`. See [Python SDK](#python-sdk).
+- **Python SDK** (`backend/automaintainer/`): `AutoMaintainerEngine` runs the pipeline in-process with per-engine configuration, isolated concurrent runs and cancellation. The distribution name is `automaintainer`; the extras are `server` (the API server, Celery and OpenTelemetry), `adk` and `rag`. See [Python SDK](#python-sdk).
 - **ADK Reviewer** (*opt-in*, `backend/automaintainer/_specialists/`): a read-only, tool-using reviewer built with Google's Agent Development Kit, selected with `REVIEWER_BACKEND=adk` and the `adk` extra. The default is `langgraph`, the single-prompt review. Design: [docs/design/adk-specialist-agents.md](./docs/design/adk-specialist-agents.md).
 - **Code retrieval** (*opt-in*, [docs/RAG.md](./docs/RAG.md)): function-level chunks of the target repository in `code_chunks` on pgvector, with org-scoped RLS. With `RAG_RETRIEVAL_ENABLED`, the PM prompt gets the nearest chunks and the ADK Reviewer's `search_code` can use the index. Indexing (`RAG_INDEXING_ENABLED`) embeds the code with Vertex AI (the `rag` extra), so repository code is sent to Google Cloud.
-- **Sandboxed verification** (*opt-in*, [docs/VERIFICATION.md](./docs/VERIFICATION.md)): the target repository's tests run through a sandbox backend selected with `SANDBOX_BACKEND`. Two backends ship: Docker (`runners/docker_sandbox.py`) and Cloud Run Jobs (`runners/cloud_run_job_sandbox.py`). Without a backend, verification refuses to run on the host unless `VERIFY_ALLOW_LOCAL=true`, so `ci` does not merge.
+- **Sandboxed verification** (*opt-in*, [docs/VERIFICATION.md](./docs/VERIFICATION.md)): the target repository's tests run through a sandbox backend selected with `SANDBOX_BACKEND`. Two backends ship: Docker (`backend/automaintainer/runners/docker_sandbox.py`) and Cloud Run Jobs (`backend/automaintainer/runners/cloud_run_job_sandbox.py`). Without a backend, verification refuses to run on the host unless `VERIFY_ALLOW_LOCAL=true`, so `ci` does not merge.
 
 **Operations**
 - **Dashboard** (`dashboard/`): start and stop runs, live logs through Supabase Realtime, run history and an org admin page.
@@ -165,7 +165,7 @@ docker compose up --build   # http://localhost:8000
 ```
 
 ### Python SDK
-The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`). The base install covers `AutoMaintainerEngine`. The extras add optional parts: `server` (FastAPI, Celery and OpenTelemetry, for example `pip install "./backend[server]"`), `adk` (the ADK Reviewer) and `rag` (Vertex AI embeddings for code retrieval). Publishing to PyPI is off until the owner enables it (`.github/workflows/publish-sdk.yml`), so build the wheel from the repository:
+The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`). The base install covers `AutoMaintainerEngine`. The extras add optional parts: `server` (the API server, Celery and OpenTelemetry, for example `pip install "./backend[server]"`), `adk` (the ADK Reviewer) and `rag` (Vertex AI embeddings for code retrieval). Publishing to PyPI is off until the owner enables it (`.github/workflows/publish-sdk.yml`), so build the wheel from the repository:
 ```bash
 cd backend && uv build        # dist/automaintainer-<version>-py3-none-any.whl (+ the sdist)
 ```
@@ -212,7 +212,7 @@ Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unles
 
 ## Security
 
-- **Merging:** keep `MERGE_POLICY` unset or set to `human`. The agents then open and review PRs but never merge them. `auto` merges on the Maintainer's approval and a trusted trigger alone, without running any tests; do not use it on repositories you care about. Enable branch protection with required checks in any case.
+- **Merging:** keep `MERGE_POLICY` unset or set to `human`. The agents then open and review PRs but never merge them. `auto` merges on the Maintainer's approval and a trusted trigger without running any tests; do not use it on repositories you care about. Enable branch protection with required checks in any case.
 - **Verification:** the target repository's tests are untrusted code. Run them through a sandbox backend, and do not set `VERIFY_ALLOW_LOCAL=true` on a shared host.
 - **Terminal:** `/api/terminal/ws` gives a shell on the API host. It is off unless `ENABLE_TERMINAL=true`, and then only for the user ids in `TERMINAL_ADMIN_USER_IDS`. The shell runs as the server's OS user, so it can read every tenant's clone and the server's files. Leave it off on any shared or hosted deployment.
 - **Development bypass:** never set `AUTH_DEV_BYPASS` in a deployment. It is refused when `ENVIRONMENT=production`.
@@ -247,12 +247,16 @@ by default or needs an owner to deploy it:
 | End-to-end evaluation | Offline modes run in CI. Live runs: manual dispatch of `evals.yml` with the suite `e2e` (needs the `GROQ_API_KEY` secret). |
 | Google Cloud deployment | `terraform apply` in `infra/terraform`, then `deploy-gcp.yml`. |
 | ADK Reviewer | `REVIEWER_BACKEND=adk` with the `adk` extra installed. The default is `langgraph`. |
-| Code retrieval | `RAG_INDEXING_ENABLED` and `RAG_RETRIEVAL_ENABLED`, or `rag_enabled` in Terraform. |
+| Code retrieval | `RAG_INDEXING_ENABLED` and `RAG_RETRIEVAL_ENABLED` with the `rag` extra installed, or `rag_enabled` in Terraform with the image built with `IMAGE_EXTRAS="server,rag"`. |
 | Sandboxed verification | `SANDBOX_BACKEND`. Terraform sets it to `cloud_run_job` on the Google Cloud worker only. |
 | Cloud Trace and Cloud Monitoring | `OTEL_CLOUD_TRACE_ENABLED` and `OTEL_CLOUD_MONITORING_ENABLED`, or `cloud_trace_enabled`, `cloud_monitoring_enabled` and `monitoring_app_alerts_enabled` in Terraform. |
 
-What remains is validation that needs credentials or costs money. The owner
-checklist is in [#532](https://github.com/PxA-Labs/AutoMaintainer/issues/532):
+What remains are owner steps that need credentials or cost money. The full
+ordered checklist is in [#532](https://github.com/PxA-Labs/AutoMaintainer/issues/532).
+It starts with rotating the keys leaked in #60, which must happen before any
+deployment, and also covers restoring Supabase and applying the migrations,
+PyPI trusted publishing and publishing the security advisory drafts. The main
+validation steps are:
 
 1. **First deployment** ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)): apply Terraform, add the secret values (including `redis-url`), run the sandbox smoke test, then turn on Cloud Monitoring and the application alerts.
 2. **Live evaluation baseline**: the first live end-to-end run against Groq.

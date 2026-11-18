@@ -53,7 +53,7 @@ Reports that show they can be reached or bypassed in ways the documentation
 does not describe are welcome.
 
 - `MERGE_POLICY=auto` merges a pull request on the LLM Maintainer's approval
-  and a trusted trigger alone, without running tests.
+  and a trusted trigger without running any tests.
 - With `ENABLE_TERMINAL=true`, the listed admins get a shell that runs as the
   API's OS user and can read the server's files and every clone.
 - `AUTH_DEV_BYPASS=true` disables authentication outside
@@ -63,7 +63,9 @@ does not describe are welcome.
 - `VERIFY_ALLOW_LOCAL=true` runs the target repository's tests on the worker
   host, where they can read the worker's secrets.
 - With code retrieval indexing on (`RAG_INDEXING_ENABLED`), the target
-  repository's code is sent to Vertex AI (see
+  repository's code is sent to Vertex AI. With retrieval on
+  (`RAG_RETRIEVAL_ENABLED`), the query, which is the issue text, is sent to
+  the same embedder (see
   [docs/RAG.md](./docs/RAG.md#data-egress)).
 - The evaluation harnesses run model-written code in a local `pytest` process
   without a sandbox (see [docs/EVALS.md](./docs/EVALS.md#limitations)).
@@ -149,8 +151,8 @@ the details.
 **Verification of untrusted code**
 - The target repository's tests are untrusted code. They run through a
   sandbox backend named by `SANDBOX_BACKEND`. Two backends ship: Docker
-  (`runners/docker_sandbox.py`) and Cloud Run Jobs
-  (`runners/cloud_run_job_sandbox.py`).
+  (`backend/automaintainer/runners/docker_sandbox.py`) and Cloud Run Jobs
+  (`backend/automaintainer/runners/cloud_run_job_sandbox.py`).
 - Without a sandbox backend, verification refuses to run the tests on the
   API or worker host in every environment, production included, unless
   `VERIFY_ALLOW_LOCAL=true`. It reports an error instead, so `ci` does not
@@ -177,7 +179,10 @@ the details.
   with no stored key. Google accepts the GitHub token only for this
   repository (its name, numeric repository id and owner id), the `production`
   environment, and the ref `refs/heads/main` or a `v*` tag. The deployer
-  service account cannot read secrets or change IAM.
+  service account has no direct access to secrets and cannot change IAM.
+  It can act as the API and worker service accounts and set the worker VM's
+  metadata, so it can deploy code that runs as accounts that read secrets
+  (`infra/terraform/iam.tf`).
 - Secrets live in Secret Manager. Terraform creates the secret containers
   only, never a version, so no secret value is stored in the Terraform state.
   Each service account can read only the secrets it uses.
