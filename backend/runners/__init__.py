@@ -11,11 +11,17 @@ runs. New code imports ``automaintainer.runners``.
 import sys
 
 import automaintainer.runners as _package
-from automaintainer.runners import base, docker_sandbox, local, sandbox
+from automaintainer.runners import (
+    base,
+    cloud_run_job_sandbox,
+    docker_sandbox,
+    local,
+    sandbox,
+)
 
 # Every submodule of automaintainer.runners; test_sdk_package checks that this
 # list is complete, since an unaliased one would load a second copy.
-for _module in (base, docker_sandbox, local, sandbox):
+for _module in (base, cloud_run_job_sandbox, docker_sandbox, local, sandbox):
     sys.modules[f"{__name__}.{_module.__name__.rsplit('.', 1)[1]}"] = _module
 
 sys.modules[__name__] = _package

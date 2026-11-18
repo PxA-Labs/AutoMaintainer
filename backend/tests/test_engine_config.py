@@ -765,6 +765,24 @@ NOT_COVERED = {
     "SANDBOX_WORKSPACE_SIZE": "docker sandbox backend setting (DockerSandboxConfig.from_env)",
     "SANDBOX_USER": "docker sandbox backend setting (DockerSandboxConfig.from_env)",
     "SANDBOX_DOCKER": "docker sandbox backend setting (DockerSandboxConfig.from_env)",
+    "CLOUD_RUN_SANDBOX_PROJECT": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
+    "CLOUD_RUN_SANDBOX_REGION": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
+    "CLOUD_RUN_SANDBOX_JOB": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
+    "CLOUD_RUN_SANDBOX_BUCKET": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
+    "CLOUD_RUN_SANDBOX_SIGNER": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
+    "CLOUD_RUN_SANDBOX_START_SECONDS": (
+        "Cloud Run sandbox backend setting (CloudRunJobSandboxConfig.from_env)"
+    ),
 }
 
 # A literal variable name passed to the ways the runtime reads its settings:
