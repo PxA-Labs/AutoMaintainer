@@ -30,6 +30,7 @@ computed with ``tempfile.gettempdir()``, which probes the disk.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 from pathlib import Path
@@ -73,6 +74,11 @@ DEFAULT_MAX_ITERATIONS = 3
 MERGE_POLICIES = ("human", "ci", "auto")
 # runners: LocalRunner and SandboxRunner.
 RUNNER_TYPES = ("local", "sandbox")
+# The Maintainer's review (#525): the single-shot LangGraph prompt, or the
+# ADK Reviewer specialist (automaintainer/_runtime/specialists).
+REVIEWER_BACKENDS = ("langgraph", "adk")
+# What the ``adk`` extra installs and the ADK Reviewer imports.
+_ADK_MODULES = ("google.adk", "litellm")
 
 # rate_limiter.RateLimitManager.initialize: GROQ_API_KEY, then GROQ_API_KEY_1
 # to GROQ_API_KEY_19, in this order. (agents.get_all_groq_keys stops at _9, but
@@ -105,6 +111,7 @@ ENV_VARS: Mapping[str, str] = {
     "implementer_max_file_chars": "IMPLEMENTER_MAX_FILE_CHARS",
     "implementer_min_size_ratio": "IMPLEMENTER_MIN_SIZE_RATIO",
     "implementer_shrink_guard_min_bytes": "IMPLEMENTER_SHRINK_GUARD_MIN_BYTES",
+    "reviewer_backend": "REVIEWER_BACKEND",
 }
 _ALLOW_LOCAL_ENV = "VERIFY_ALLOW_LOCAL"
 
@@ -168,6 +175,21 @@ class ModelRouting(BaseModel):
         if role == "fallback" or role not in type(self).model_fields:
             raise ValueError(f"Unknown agent role {role!r}")
         return getattr(self, role)
+
+
+def _adk_missing() -> Optional[str]:
+    """The first module of the ``adk`` extra that is not installed, or None.
+
+    ``find_spec`` locates a module without importing it (it imports only the
+    parent package), so validation stays cheap and runs no ADK code.
+    """
+    for name in _ADK_MODULES:
+        try:
+            if importlib.util.find_spec(name) is None:
+                return name
+        except (ImportError, ValueError):
+            return name
+    return None
 
 
 def _redacted(
@@ -259,6 +281,11 @@ class AutoMaintainerConfig(BaseModel):
     # The only provider the runtime can call today.
     llm_provider: Literal["groq"] = "groq"
     model_routing: ModelRouting = ModelRouting()
+    # Who reviews a pull request in the maintainer node: ``langgraph`` (one
+    # prompt, the behaviour before #525) or ``adk``, the read-only ADK
+    # Reviewer specialist, which needs the ``adk`` extra. Selecting ``adk``
+    # without it is a validation error, never a silent fallback.
+    reviewer_backend: Literal["langgraph", "adk"] = "langgraph"
     groq_requests_per_minute: PositiveInt = 30
     groq_tokens_per_minute: PositiveInt = 6000
 
@@ -357,7 +384,13 @@ class AutoMaintainerConfig(BaseModel):
             f"{_FLAG_SPELLINGS}",
         )
 
-    @field_validator("merge_policy", "github_auth_mode", "runner_type", mode="before")
+    @field_validator(
+        "merge_policy",
+        "github_auth_mode",
+        "runner_type",
+        "reviewer_backend",
+        mode="before",
+    )
     @classmethod
     def _lowercase(cls, value: Any) -> Any:
         return value.strip().lower() if isinstance(value, str) else value
@@ -456,6 +489,17 @@ class AutoMaintainerConfig(BaseModel):
                     "runtime always prefers a configured sandbox",
                 )
             )
+        if self.reviewer_backend == "adk":
+            missing = _adk_missing()
+            if missing is not None:
+                problems.append(
+                    _config_error(
+                        "reviewer_backend",
+                        "reviewer_backend='adk' (REVIEWER_BACKEND) needs the adk "
+                        f"extra, but {missing} is not installed; run "
+                        "pip install 'automaintainer[adk]' or select 'langgraph'",
+                    )
+                )
         if self.timeout_seconds > self.max_timeout_seconds:
             problems.append(
                 _config_error(
