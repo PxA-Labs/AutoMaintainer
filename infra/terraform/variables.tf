@@ -235,6 +235,22 @@ variable "redis_mode" {
   }
 }
 
+variable "redis_auth_enabled" {
+  description = <<-EOT
+    Require a password on Redis (#532). Terraform creates the empty secret
+    "redis-url"; the owner adds the broker URL with the password as its
+    version (docs/DEPLOYMENT.md, Option D), so the password is never in the
+    Terraform state. The API (once mount_secrets is true) and the worker read
+    REDIS_URL from it, and the self-hosted Redis starts with requirepass.
+    With "memorystore", the instance gets AUTH and Google generates the
+    password (its AUTH string), which the owner puts into the same URL.
+    Until the version exists, the worker and the self-hosted Redis do not
+    start.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "redis_vm_maxmemory" {
   description = "maxmemory of the Redis container (redis_mode = \"vm\"). With noeviction, writes fail beyond it instead of the VM running out of memory."
   type        = string
@@ -316,5 +332,11 @@ variable "secrets" {
   validation {
     condition     = alltrue([for k in keys(var.secrets) : can(regex("^[A-Z][A-Z0-9_]*$", k))])
     error_message = "secret keys must be environment variable names (A-Z, 0-9, _)."
+  }
+
+  validation {
+    # REDIS_URL has its own secret, "redis-url" (redis_auth_enabled).
+    condition     = !contains(keys(var.secrets), "REDIS_URL")
+    error_message = "REDIS_URL cannot be in var.secrets; redis_auth_enabled manages its secret."
   }
 }

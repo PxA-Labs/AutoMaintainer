@@ -27,3 +27,34 @@ resource "google_secret_manager_secret_iam_member" "worker" {
   role      = "roles/secretmanager.secretAccessor"
   member    = google_service_account.worker.member
 }
+
+# Redis AUTH (#532): the broker URL with its password,
+# redis://:<password>@<host>:<port>/0, read by the API, the worker and (to
+# start the self-hosted Redis with requirepass) the worker VM. A container
+# only, like the secrets above: a password generated here (random_password
+# plus a version) would be stored in the state in clear text. The owner
+# adds the version (docs/DEPLOYMENT.md, Option D).
+resource "google_secret_manager_secret" "redis_url" {
+  count     = var.redis_auth_enabled ? 1 : 0
+  secret_id = "redis-url"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.services]
+}
+
+resource "google_secret_manager_secret_iam_member" "redis_url_api" {
+  count     = var.redis_auth_enabled ? 1 : 0
+  secret_id = google_secret_manager_secret.redis_url[0].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.api.member
+}
+
+resource "google_secret_manager_secret_iam_member" "redis_url_worker" {
+  count     = var.redis_auth_enabled ? 1 : 0
+  secret_id = google_secret_manager_secret.redis_url[0].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.worker.member
+}

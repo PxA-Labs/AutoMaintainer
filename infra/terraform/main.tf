@@ -32,11 +32,15 @@ locals {
   registry_host    = "${var.region}-docker.pkg.dev"
   image_repository = "${local.registry_host}/${var.project_id}/${google_artifact_registry_repository.images.repository_id}/automaintainer"
 
-  redis_url = (
+  redis_host_port = (
     var.redis_mode == "memorystore"
-    ? "redis://${google_redis_instance.broker[0].host}:${google_redis_instance.broker[0].port}/0"
-    : "redis://${module.worker.internal_ip}:6379/0"
+    ? "${google_redis_instance.broker[0].host}:${google_redis_instance.broker[0].port}"
+    : "${module.worker.internal_ip}:6379"
   )
+  # Without the password. With redis_auth_enabled, the API (once
+  # mount_secrets is true) and the worker use the "redis-url" secret instead,
+  # redis://:<password>@<redis_host_port>/0 (secrets.tf).
+  redis_url = "redis://${local.redis_host_port}/0"
 
   # Shared by the API and the worker, so MERGE_POLICY and the rest match.
   app_env = merge(var.app_env, {
@@ -90,9 +94,16 @@ module "network" {
   depends_on = [google_project_service.services]
 }
 
-# Optional managed broker. Basic tier: one node, no replica, no AUTH (the
-# instance is reachable only from the peered VPC). noeviction as everywhere
-# else: evicting broker keys would silently drop queued tasks and locks.
+# Optional managed broker. Basic tier: one node, no replica, reachable only
+# from the peered VPC. noeviction as everywhere else: evicting broker keys
+# would silently drop queued tasks and locks.
+#
+# AUTH (#532): Google generates the AUTH string; the owner reads it with
+# `gcloud redis instances get-auth-string` and puts it into the "redis-url"
+# secret. Caveat: the provider records the generated string in the state as
+# the sensitive attribute auth_string; no configuration avoids that, so the
+# state bucket must stay owner-only. No TLS (transit encryption) either: the
+# password crosses the VPC in clear, as with the self-hosted Redis.
 resource "google_redis_instance" "broker" {
   count              = var.redis_mode == "memorystore" ? 1 : 0
   name               = "${var.name_prefix}-redis"
@@ -102,6 +113,7 @@ resource "google_redis_instance" "broker" {
   authorized_network = module.network.network_id
   connect_mode       = "DIRECT_PEERING"
   redis_version      = "REDIS_7_2"
+  auth_enabled       = var.redis_auth_enabled
   redis_configs = {
     maxmemory-policy = "noeviction"
   }
@@ -133,11 +145,17 @@ module "worker" {
     : null
   )
   app_env = local.app_env
-  secrets = { for k, v in var.secrets : k => google_secret_manager_secret.app[k].id if v.worker }
+  # With Redis AUTH, REDIS_URL comes from its secret (secrets_exec.py), and
+  # the module hands the secret to run-redis.sh for requirepass.
+  secrets = merge(
+    { for k, v in var.secrets : k => google_secret_manager_secret.app[k].id if v.worker },
+    var.redis_auth_enabled ? { REDIS_URL = google_secret_manager_secret.redis_url[0].id } : {},
+  )
 
   depends_on = [
     google_project_service.services,
     google_secret_manager_secret_iam_member.worker,
+    google_secret_manager_secret_iam_member.redis_url_worker,
     google_artifact_registry_repository_iam_member.worker_pull,
   ]
 }

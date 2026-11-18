@@ -13,6 +13,8 @@ budget_notification_emails = ["owner@example.com"]
 
 # "vm" (default, cheapest) or "memorystore"; see variables.tf.
 redis_mode = "vm"
+# Redis password from the "redis-url" secret (docs/DEPLOYMENT.md, step 3).
+redis_auth_enabled = true
 
 # false for the first apply; true once every mounted secret has a version.
 mount_secrets = false

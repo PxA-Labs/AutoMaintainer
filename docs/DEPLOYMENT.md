@@ -379,7 +379,7 @@ choices. Supabase stays the database.
 |---|---|
 | API | Cloud Run service `automaintainer-api`: always 1 instance or more (GitHub allows a webhook 10 seconds), at most `api_max_instances`, public ingress with unauthenticated invocation (GitHub webhooks and the dashboard call it; the app checks Supabase JWTs and webhook signatures itself), startup and liveness probes on `/healthz` |
 | Agent, maintenance and sync workers, beat | One Compute Engine VM (Container-Optimized OS, no public IP, egress through Cloud NAT) running the same image as `celery worker -B` on every queue. One VM, so exactly one beat |
-| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress |
+| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress. Password required (`redis_auth_enabled`, below) |
 | Secrets | Secret Manager, one secret per variable. Cloud Run mounts them as environment variables; on the VM, the container reads them at start with the VM's service account (`modules/worker/secrets_exec.py`) |
 | Images | Artifact Registry, pushed by `.github/workflows/deploy-gcp.yml` through Workload Identity Federation (no key) |
 | Traces | Cloud Trace, when `cloud_trace_enabled = true` (sets `OTEL_CLOUD_TRACE_ENABLED`, below). Only the API emits traces |
@@ -404,13 +404,39 @@ It shares the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and
 is down while the VM restarts, when the worker is down too. Queued tasks
 survive restarts (append-only file on the VM disk). Memorystore is managed
 and keeps the queue up while the worker restarts, but its basic tier has no
-replica either and it costs more than the VM (see the cost table). Neither
-uses AUTH or TLS: only the subnet can reach them (VPC firewall rules, and the
-VM's own firewall for the container), and Celery accepts only JSON messages,
-so a write to the broker cannot become a pickle payload. The subnet includes
-every Cloud Run instance, so a server-side request forgery in the API could
-still reach Redis; a password from Secret Manager (`requirepass`) would be
-cheap defence in depth and is not set up yet.
+replica either and it costs more than the VM (see the cost table). Only the
+subnet can reach them (VPC firewall rules, and the VM's own firewall for the
+container), and Celery accepts only JSON messages, so a write to the broker
+cannot become a pickle payload. The subnet includes every Cloud Run instance,
+so a server-side request forgery in the API could still reach Redis; hence
+Redis AUTH below. Neither uses TLS, so the password crosses the VPC in clear.
+
+**Redis AUTH** (`redis_auth_enabled`, default `true`, #532). Redis requires a
+password, which exists only in Secret Manager. Terraform creates the empty
+secret `redis-url` (no version, so the password is never in the Terraform
+state; a `random_password` would be). The owner adds the full broker URL,
+`redis://:<password>@<redis_address>/0`, as its version (step 3). Then:
+
+- Cloud Run mounts it as `REDIS_URL` once `mount_secrets = true` (before
+  that the API gets the URL without the password, and Redis answers
+  `NOAUTH`, but the API has no other secret yet either);
+- the worker container reads it at start through `secrets_exec.py`, which
+  refuses a value that is not a `redis://` or `rediss://` URL with a password
+  and never prints it;
+- `vm` mode: `run-redis.sh` reads the same secret with the VM's account and
+  starts Redis with `requirepass`, passed on stdin (`redis-server -`), so the
+  password is on no command line and in no `docker inspect` output. Use only
+  `A-Z a-z 0-9 . _ ~ -`, at least 32 characters (`openssl rand -hex 32`), so
+  the URL needs no escaping;
+- `memorystore` mode: the instance has AUTH enabled and Google generates the
+  password (the AUTH string; `gcloud redis instances get-auth-string`).
+  Caveat: the Google provider stores that generated string in the Terraform
+  state (sensitive attribute `auth_string`) and no setting avoids it, so keep
+  the state bucket owner-only.
+
+Until the version exists, the worker and the self-hosted Redis do not start
+(systemd retries every 10-30 seconds). Celery and kombu mask the password
+when they log the broker URL.
 
 **Limitation: the IDE has no clones.** The API on Cloud Run and the agent
 worker on the VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this
@@ -495,6 +521,23 @@ account (Billing Account Administrator, or Costs Manager on it).
    printf '%s' '<client secret>'    | gcloud secrets versions add github-app-client-secret --data-file=- --project $P
    ```
 
+   With `redis_auth_enabled` (the default), add the Redis URL with its
+   password to `redis-url`, from `infra/terraform`. In `vm` mode, generate the
+   password:
+
+   ```bash
+   PW="$(openssl rand -hex 32)"
+   printf 'redis://:%s@%s/0' "$PW" "$(terraform output -raw redis_address)" \
+     | gcloud secrets versions add redis-url --data-file=- --project $P
+   unset PW
+   ```
+
+   In `memorystore` mode, use the AUTH string Google generated instead:
+   `PW="$(gcloud redis instances get-auth-string automaintainer-redis --region us-central1 --project $P --format='value(authString)')"`,
+   then the same `printf` line. Then reset the worker VM
+   (`gcloud compute instances reset automaintainer-worker --zone us-central1-a`)
+   so Redis and the worker start with it.
+
    Do not put the values in shell history on a shared machine (`read -rs`
    into a variable first). Then set `mount_secrets = true`, set
    `ALLOWED_ORIGINS` and `DASHBOARD_URL` in `app_env` to the API URL (it also
@@ -538,7 +581,12 @@ change that touches the worker, run
 `gcloud compute instances reset automaintainer-worker --zone us-central1-a`;
 running tasks are requeued (`acks_late`). A new secret version is read when
 a Cloud Run instance or the worker container starts: redeploy (or reset the
-VM) after rotating a key.
+VM) after rotating a key. To rotate the Redis password in `vm` mode, add a
+new `redis-url` version, reset the VM (Redis and the worker restart with it)
+and deploy a new API revision; the API cannot reach Redis in between. In
+`memorystore` mode Google owns the AUTH string; how to rotate it was not
+checked for this guide (see the Memorystore AUTH documentation). Afterwards,
+update `redis-url` the same way.
 
 ### Sandboxed verification
 
@@ -827,7 +875,7 @@ before relying on them.
 | Redis, `vm` mode | on the worker VM | 0 |
 | Redis, `memorystore` mode (instead) | basic tier, 1 GB | ~35 (*uncertain*) |
 | Artifact Registry | 20 kept images of about 1-2 GB each (Node build, Node tools, Python venv), 30-day cleanup | ~2-4 (*uncertain*: image size, layers shared between versions) |
-| Secret Manager | 6 secrets, accesses at instance start | <1 |
+| Secret Manager | 7 secrets (with `redis-url`), accesses at instance start | <1 |
 | Logging, Monitoring, Trace | low volume, within the free allotments | 0 (*uncertain*: log volume) |
 | Internet egress | API responses, GitHub, Groq and Supabase traffic | *uncertain* |
 | **Total** | `vm` mode / `memorystore` mode | **~40-60 / ~75-95** |
