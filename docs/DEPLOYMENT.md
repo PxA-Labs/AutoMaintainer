@@ -1,9 +1,25 @@
 # Deploying AutoMaintainer
 
 This guide covers the supported ways to run AutoMaintainer outside a dev
-laptop: Docker Compose, Render, and a single container (for example Hugging
-Face Spaces). It lists every environment variable the backend reads and the
-security rules for production.
+laptop: Docker Compose, Render, a single container (for example Hugging Face
+Spaces) and Google Cloud with Terraform, plus hosting the dashboard on Vercel.
+It lists every environment variable the backend reads and the security rules
+for production.
+
+- [Topology](#topology)
+- [Database](#database)
+- [Option A: Docker Compose](#option-a-docker-compose-local-or-a-single-prod-like-host)
+- [Option B: Render](#option-b-render)
+- [Option C: a single container](#option-c-a-single-container-plain-docker-run-hugging-face-spaces-without-the-ide)
+- [Option D: Google Cloud (Terraform)](#option-d-google-cloud-terraform)
+- [Dashboard on Vercel](#dashboard-on-vercel)
+- [The image](#the-image)
+- [Environment variables](#environment-variables)
+- [Security checklist](#security-checklist)
+- [What was and was not verified](#what-was-and-was-not-verified)
+- [CI: Supabase keep-alive](#ci-supabase-keep-alive)
+- [CI: Publishing the Python SDK](#ci-publishing-the-python-sdk)
+- [Upgrade notes](#upgrade-notes)
 
 ## Topology
 
@@ -372,62 +388,104 @@ example as a second Space.
 
 [`infra/terraform`](../infra/terraform) describes a production deployment on
 Google Cloud, in the project `automaintainer-prod` by default (#527). Its
-[README](../infra/terraform/README.md) explains each resource and the design
-choices. Supabase stays the database.
+[README](../infra/terraform/README.md) explains each file, resource, role and
+switch. Supabase stays the database. This section is the owner's runbook:
+what the deployment contains, the steps before and after the first
+`terraform apply`, and the optional features.
 
 | Piece | Runs on |
 |---|---|
 | API | Cloud Run service `automaintainer-api`: always 1 instance or more (GitHub allows a webhook 10 seconds), at most `api_max_instances`, public ingress with unauthenticated invocation (GitHub webhooks and the dashboard call it; the app checks Supabase JWTs and webhook signatures itself), startup and liveness probes on `/healthz` |
 | Agent, maintenance and sync workers, beat | One Compute Engine VM (Container-Optimized OS, no public IP, egress through Cloud NAT) running the same image as `celery worker -B` on every queue. One VM, so exactly one beat |
-| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress. Password required (`redis_auth_enabled`, below) |
+| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress. Password required by default ([Redis](#redis)) |
 | Secrets | Secret Manager, one secret per variable. Cloud Run mounts them as environment variables; on the VM, the container reads them at start with the VM's service account (`modules/worker/secrets_exec.py`) |
 | Images | Artifact Registry, pushed by `.github/workflows/deploy-gcp.yml` through Workload Identity Federation (no key) |
-| Traces | Cloud Trace, when `cloud_trace_enabled = true` (sets `OTEL_CLOUD_TRACE_ENABLED`, below). Only the API emits traces |
+| Verification | Cloud Run job `automaintainer-sandbox` in its own VPC, one execution per test command ([Sandboxed verification](#sandboxed-verification)) |
+| Traces | Cloud Trace, API only, when `cloud_trace_enabled = true` |
+| Metrics and alerts | Cloud Monitoring, API and worker, when `cloud_monitoring_enabled = true`; alert policies and a dashboard ([Metrics and alerts](#metrics-and-alerts)) |
 | Cost control | A billing budget with alerts at 50 %, 90 % and 100 % of actual spend and at 100 % of forecast spend |
 
-Service accounts: `automaintainer-api` reads only the API's secrets (and
-writes traces if enabled); `automaintainer-worker` reads only the worker's
-secrets, pulls images and writes logs and metrics; `automaintainer-deployer`
-pushes images, deploys new API revisions and sets the worker VM's metadata
-(the deploy changes only `automaintainer-image`, but the permission covers
-every key, including `user-data`, which is about the same power as choosing
-the image). The deployer cannot read secrets or change IAM. Google lets a
-GitHub Actions job impersonate it only if the token is for
-`PxA-Labs/AutoMaintainer` (name and numeric repository and owner ids), the
-`production` environment, and the ref `main` or a `v*` tag. That check does
-not depend on GitHub settings; the environment's required reviewers (step 4)
-add a human approval on top, and a tag ruleset on `v*` limits who can push a
-release tag.
+The deployer service account, which GitHub Actions impersonates, can push
+images, deploy new API revisions and set the worker VM's metadata. It cannot
+read secrets or change IAM. Google lets a job impersonate it only if the
+token is for `PxA-Labs/AutoMaintainer` (name and numeric repository and owner
+ids), the `production` environment, and the ref `main` or a `v*` tag. The
+roles of every account are listed in the Terraform README,
+[Least privilege](../infra/terraform/README.md#least-privilege).
 
-**Redis: why the VM by default.** The Redis container costs nothing extra.
-It shares the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and
-is down while the VM restarts, when the worker is down too. Queued tasks
-survive restarts (append-only file on the VM disk). Memorystore is managed
-and keeps the queue up while the worker restarts, but its basic tier has no
-replica either and it costs more than the VM (see the cost table). Only the
-subnet can reach them (VPC firewall rules, and the VM's own firewall for the
-container), and Celery accepts only JSON messages, so a write to the broker
-cannot become a pickle payload. The subnet includes every Cloud Run instance,
-so a server-side request forgery in the API could still reach Redis; hence
-Redis AUTH below. Neither uses TLS, so the password crosses the VPC in clear.
+### Defaults and optional features
+
+The configuration starts with every new feature off. Each optional feature
+is described below the runbook, with how to turn it on and what it costs.
+
+| Feature | Default | Controlled by |
+|---|---|---|
+| Redis password (AUTH) | on | `redis_auth_enabled` |
+| Sandboxed verification | always created; every verification reports an error until `sandbox_image` is set | `sandbox_image` |
+| Cloud Trace | off | `cloud_trace_enabled` |
+| Metrics export to Cloud Monitoring | off | `cloud_monitoring_enabled` |
+| API 5xx alert and operations dashboard | on | always created |
+| Alerts on application metrics | off | `monitoring_app_alerts_enabled` |
+| Code retrieval (RAG) | off | `rag_enabled`, plus the repository variable `IMAGE_EXTRAS` |
+| ADK Reviewer | off (`REVIEWER_BACKEND` unset means `langgraph`) | `REVIEWER_BACKEND` in `app_env`, plus `IMAGE_EXTRAS` |
+| Memorystore instead of Redis on the VM | off | `redis_mode` |
+| SSH through Identity-Aware Proxy | on | `enable_iap_ssh` |
+
+### Limitations
+
+**The IDE has no clones.** The API on Cloud Run and the agent worker on the
+VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this deployment breaks the
+[topology invariant](#topology) in the same way as the Hugging Face Space in
+Option C: agent runs work, but the IDE routes answer
+`404 Repository not cloned yet` and the terminal has no repository (it is
+also off: Terraform refuses `ENABLE_TERMINAL`). The fix is the API cloning on
+demand or reading through the GitHub API (epic #418). Running the agent
+worker inside the Cloud Run service, as Render does, was not chosen: Cloud
+Run bills and scales by request and may stop an instance that serves none,
+which does not suit agent runs that last many minutes.
+
+**Verification fails closed until the sandbox is ready.** The worker always
+sends verification to the Cloud Run job. Until `sandbox_image` points at an
+image with `python3` and the [smoke test](#sandboxed-verification) passes,
+every verification reports an error, so `MERGE_POLICY=ci` never merges.
+Keep `MERGE_POLICY=human`. Terraform refuses `VERIFY_ALLOW_LOCAL` in
+`app_env`: the worker container uses the VM's host network and can reach the
+metadata server, so code running in it could obtain the worker service
+account's token and its secrets.
+
+### Redis
+
+**Why the VM by default.** The Redis container costs nothing extra. It shares
+the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and is down
+while the VM restarts, when the worker is down too. Queued tasks survive
+restarts (append-only file on the VM disk). Memorystore is managed and keeps
+the queue up while the worker restarts, but its basic tier has no replica
+either and it costs more than the VM (see [the cost table](#estimated-monthly-cost)).
+Only the subnet can reach either one (VPC firewall rules, and the VM's own
+firewall for the container), and Celery accepts only JSON messages, so a
+write to the broker cannot become a pickle payload. The subnet includes every
+Cloud Run instance, so a server-side request forgery in the API could still
+reach Redis; hence Redis AUTH. Neither mode uses TLS, so the password crosses
+the VPC in clear.
 
 **Redis AUTH** (`redis_auth_enabled`, default `true`, #532). Redis requires a
 password, which exists only in Secret Manager. Terraform creates the empty
 secret `redis-url` (no version, so the password is never in the Terraform
 state; a `random_password` would be). The owner adds the full broker URL,
-`redis://:<password>@<redis_address>/0`, as its version (step 3). Then:
+`redis://:<password>@<redis_address>/0`, as its version
+([step 3](#step-3-add-the-secret-values)). Then:
 
-- Cloud Run mounts it as `REDIS_URL` once `mount_secrets = true` (before
-  that the API gets the URL without the password, and Redis answers
-  `NOAUTH`, but the API has no other secret yet either);
-- the worker container reads it at start through `secrets_exec.py`, which
+- Cloud Run mounts it as `REDIS_URL` once `mount_secrets = true`. Before
+  that the API gets the URL without the password and Redis answers
+  `NOAUTH`, but the API has no other secret yet either.
+- The worker container reads it at start through `secrets_exec.py`, which
   refuses a value that is not a `redis://` or `rediss://` URL with a password
-  and never prints it;
+  and never prints it.
 - `vm` mode: `run-redis.sh` reads the same secret with the VM's account and
   starts Redis with `requirepass`, passed on stdin (`redis-server -`), so the
-  password is on no command line and in no `docker inspect` output. Use only
-  `A-Z a-z 0-9 . _ ~ -`, at least 32 characters (`openssl rand -hex 32`), so
-  the URL needs no escaping;
+  password is on no command line and in no `docker inspect` output. It
+  accepts only `A-Z a-z 0-9 . _ ~ -` and at least 32 characters
+  (`openssl rand -hex 32` gives 64), so the URL needs no escaping.
 - `memorystore` mode: the instance has AUTH enabled and Google generates the
   password (the AUTH string; `gcloud redis instances get-auth-string`).
   Caveat: the Google provider stores that generated string in the Terraform
@@ -436,200 +494,234 @@ state; a `random_password` would be). The owner adds the full broker URL,
 
 Until the version exists, the worker and the self-hosted Redis do not start
 (systemd retries every 10-30 seconds). Celery and kombu mask the password
-when they log the broker URL.
+when they log the broker URL. Redis AUTH costs nothing beyond one more
+Secret Manager secret, which is already in the cost table.
 
-**Limitation: the IDE has no clones.** The API on Cloud Run and the agent
-worker on the VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this
-deployment breaks the [topology invariant](#topology) in the same way as the
-Hugging Face Space in Option C: agent runs work, but the IDE routes answer
-`404 Repository not cloned yet` and the terminal has no repository (it is
-also off: Terraform refuses `ENABLE_TERMINAL`). The fix is the API cloning on
-demand or reading through the GitHub API (epic #418). Running the agent
-worker inside the Cloud Run service, as Render does, was not chosen:
-Cloud Run bills and scales by request and may stop an instance that serves
-none, which does not suit agent runs that last many minutes.
+### Before you start
 
-**Verification stays off for untrusted repositories.** Until verification is
-sandboxed (gVisor or one Cloud Run Job per verification, #158), install the
-GitHub App only on the owner's own repositories. Terraform refuses
-`VERIFY_ALLOW_LOCAL` in `app_env`, and the worker has no Docker daemon for
-`SANDBOX_BACKEND`, so each agent change's verification reports an error
-(`MERGE_POLICY=ci` then never merges). Keep `MERGE_POLICY=human`. The worker
-container uses the VM's host network and can reach the metadata server, so
-any code it runs can obtain the worker service account's token and its
-secrets: #158 must run verification somewhere else, not on this VM's network.
+Everything in this runbook needs the owner's credentials, and `terraform
+apply` creates billable resources. The code does nothing on Google Cloud by
+itself: no CI job holds Google credentials or runs `plan` or `apply`.
 
-### Owner steps
+1. Rotate the keys leaked in #60, restore the Supabase project and apply all
+   migrations, including the pgvector and `code_chunks` ones
+   ([Database](#database)).
+2. Install Terraform 1.9 or later and the gcloud CLI. Run
+   `gcloud auth application-default login` with an account that owns the
+   project and can create budgets on its billing account (Billing Account
+   Administrator, or Costs Manager on it).
+3. On GitHub, add a tag ruleset for `v*` under Settings > Rules > Rulesets
+   that limits who can create, update or delete such tags. A `v*` tag
+   triggers a production deploy, and without a ruleset anyone with write
+   access can push one.
 
-Prerequisites: rotate the keys leaked in #60, restore the Supabase project
-and apply the migrations ([Database](#database)). Install Terraform 1.9 or
-later and the gcloud CLI, then `gcloud auth application-default login` with
-an account that owns the project and can create budgets on its billing
-account (Billing Account Administrator, or Costs Manager on it).
+### Step 1: Create the state bucket and secure the default service account
 
-1. **Create the state bucket** (once):
+Create the state bucket once:
 
-   ```bash
-   gcloud storage buckets create gs://automaintainer-prod-tfstate \
-     --project automaintainer-prod --location us-central1 \
-     --uniform-bucket-level-access --public-access-prevention
-   gcloud storage buckets update gs://automaintainer-prod-tfstate --versioning
-   ```
+```bash
+gcloud storage buckets create gs://automaintainer-prod-tfstate \
+  --project automaintainer-prod --location us-central1 \
+  --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update gs://automaintainer-prod-tfstate --versioning
+```
 
-2. **Init, plan, apply.** Fill in `terraform.tfvars` (git-ignored) from the
-   example; `gcloud billing projects describe automaintainer-prod` prints the
-   billing account. Leave `mount_secrets = false` for now.
+Enabling the Compute Engine API creates the project's default compute
+service account, which Google normally grants `roles/editor`. Nothing here
+uses it. Either enforce the organization policy
+`iam.automaticIamGrantsForDefaultServiceAccounts` before the API is enabled,
+or enable the API now and remove the grant:
 
-   ```bash
-   cd infra/terraform
-   cp backend.tf.example backend.tf            # git-ignored; state goes to the bucket
-   cp terraform.tfvars.example terraform.tfvars
-   terraform init -backend-config="bucket=automaintainer-prod-tfstate"
-   terraform plan -out=tfplan
-   terraform apply tfplan
-   ```
+```bash
+P=automaintainer-prod
+gcloud services enable compute.googleapis.com --project $P
+N=$(gcloud projects describe $P --format='value(projectNumber)')
+gcloud projects remove-iam-policy-binding $P \
+  --member="serviceAccount:$N-compute@developer.gserviceaccount.com" --role=roles/editor
+```
 
-   The first apply enables the APIs, then creates everything else; if a
-   resource fails because an API it just enabled has not propagated yet,
-   run `plan` and `apply` again. The API starts with Google's public "hello"
-   placeholder image and the worker waits for its first image.
-   `terraform output api_url` prints the API URL.
+If you skip this and let the first apply enable the API, run the last two
+commands after the apply.
 
-   Enabling the Compute Engine API creates the project's default compute
-   service account, which Google normally grants `roles/editor`. Nothing here
-   uses it; remove the grant (or enforce the organization policy
-   `iam.automaticIamGrantsForDefaultServiceAccounts` before the first apply):
+### Step 2: Set the variables and apply
 
-   ```bash
-   P=automaintainer-prod
-   N=$(gcloud projects describe $P --format='value(projectNumber)')
-   gcloud projects remove-iam-policy-binding $P \
-     --member="serviceAccount:$N-compute@developer.gserviceaccount.com" --role=roles/editor
-   ```
+Fill in `terraform.tfvars` (git-ignored) from the example.
+`gcloud billing projects describe automaintainer-prod` prints the billing
+account. Set `monitoring_alert_email` to an address or to `null`; it has no
+default. Leave `mount_secrets = false` and the optional switches off for now.
+The [Terraform README](../infra/terraform/README.md#variables-that-matter)
+lists the variables that matter.
 
-3. **Add the secret versions.** Terraform created empty secrets
-   (`terraform output secret_ids`). Add a version to each one that is
-   mounted, i.e. every entry of `var.secrets` with `api` or `worker` true
-   (by default all but `github-token`):
+```bash
+cd infra/terraform
+cp backend.tf.example backend.tf            # git-ignored; state goes to the bucket
+cp terraform.tfvars.example terraform.tfvars
+terraform init -backend-config="bucket=automaintainer-prod-tfstate"
+terraform plan -out=tfplan
+terraform apply tfplan
+```
 
-   ```bash
-   P=automaintainer-prod
-   printf '%s' '<service-role key>' | gcloud secrets versions add supabase-service-key --data-file=- --project $P
-   printf '%s' '<groq key>'         | gcloud secrets versions add groq-api-key --data-file=- --project $P
-   gcloud secrets versions add github-app-private-key --data-file=<app>.private-key.pem --project $P
-   printf '%s' '<webhook secret>'   | gcloud secrets versions add github-webhook-secret --data-file=- --project $P
-   printf '%s' '<client secret>'    | gcloud secrets versions add github-app-client-secret --data-file=- --project $P
-   ```
+The first apply enables the APIs, then creates everything else. If a
+resource fails because an API it just enabled has not propagated yet, run
+`plan` and `apply` again. The API starts with Google's public "hello"
+placeholder image and the worker waits for its first image.
+`terraform output api_url` prints the API URL.
 
-   With `redis_auth_enabled` (the default), add the Redis URL with its
-   password to `redis-url`, from `infra/terraform`. In `vm` mode, generate the
-   password:
+### Step 3: Add the secret values
 
-   ```bash
-   PW="$(openssl rand -hex 32)"
-   printf 'redis://:%s@%s/0' "$PW" "$(terraform output -raw redis_address)" \
-     | gcloud secrets versions add redis-url --data-file=- --project $P
-   unset PW
-   ```
+Terraform created empty secrets (`terraform output secret_ids`). Add a
+version to each one that is mounted, that is every entry of `var.secrets`
+with `api` or `worker` true (by default all but `github-token`):
 
-   In `memorystore` mode, use the AUTH string Google generated instead:
-   `PW="$(gcloud redis instances get-auth-string automaintainer-redis --region us-central1 --project $P --format='value(authString)')"`,
-   then the same `printf` line. Then reset the worker VM
-   (`gcloud compute instances reset automaintainer-worker --zone us-central1-a`)
-   so Redis and the worker start with it.
+```bash
+P=automaintainer-prod
+printf '%s' '<service-role key>' | gcloud secrets versions add supabase-service-key --data-file=- --project $P
+printf '%s' '<groq key>'         | gcloud secrets versions add groq-api-key --data-file=- --project $P
+gcloud secrets versions add github-app-private-key --data-file=<app>.private-key.pem --project $P
+printf '%s' '<webhook secret>'   | gcloud secrets versions add github-webhook-secret --data-file=- --project $P
+printf '%s' '<client secret>'    | gcloud secrets versions add github-app-client-secret --data-file=- --project $P
+```
 
-   Do not put the values in shell history on a shared machine (`read -rs`
-   into a variable first). Then set `mount_secrets = true`, set
-   `ALLOWED_ORIGINS` and `DASHBOARD_URL` in `app_env` to the API URL (it also
-   serves the dashboard), and run `terraform plan -out=tfplan` and
-   `terraform apply tfplan` again.
+With `redis_auth_enabled` (the default), add the Redis URL with its password
+to `redis-url`, from `infra/terraform`. In `vm` mode, generate the password:
 
-4. **Set the repository variables and the environment.**
-   `terraform output -json github_repository_variables` prints the eight
-   `GCP_*` variables the deploy workflow reads; set each with
-   `gh variable set <NAME> --body '<value>' -R PxA-Labs/AutoMaintainer`. Also
-   set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (the anon
-   key, never the service key) and `NEXT_PUBLIC_BACKEND_URL` (the API URL),
-   which are public build values. None is a secret. Under Settings >
-   Environments, create `production` with required reviewers and deployment
-   branches and tags limited to `main` and `v*.*.*`. Until
-   `GCP_WORKLOAD_IDENTITY_PROVIDER` is set, the workflow is skipped.
+```bash
+PW="$(openssl rand -hex 32)"
+printf 'redis://:%s@%s/0' "$PW" "$(terraform output -raw redis_address)" \
+  | gcloud secrets versions add redis-url --data-file=- --project $P
+unset PW
+```
 
-5. **First deploy.** Actions > "Deploy to Google Cloud" > Run workflow on
-   `main`, and approve the `production` deployment. It builds the image,
-   pushes it to Artifact Registry, deploys it to Cloud Run by digest, checks
-   `/healthz`, and sets the worker VM's `automaintainer-image` metadata; the
-   VM restarts its container within about 20 seconds. Release tags
-   (`v*.*.*`) deploy the same way. Check the worker in Logs Explorer
-   (resource "VM Instance", `automaintainer-worker`): `POST /start` answers
-   `503 AGENT_WORKER_UNAVAILABLE` until it is up. The deployer holds
-   `roles/run.developer` on the one service only, with no project-level Run
-   role; this has not been exercised by a real deploy yet, so if
-   `gcloud run deploy` is denied, the error names the missing permission.
+In `memorystore` mode, use the AUTH string Google generated instead:
+`PW="$(gcloud redis instances get-auth-string automaintainer-redis --region us-central1 --project $P --format='value(authString)')"`,
+then the same `printf` line. Then reset the worker VM
+(`gcloud compute instances reset automaintainer-worker --zone us-central1-a`)
+so Redis and the worker start with it.
 
-6. **Point the GitHub App at the new URL.** Webhook URL
-   `<api_url>/webhooks/github` (secret: the `github-webhook-secret` value);
-   Callback URL and Setup URL `<api_url>/github/app/setup`
-   ([Install flow](#install-flow-setup-url)). Add
-   `<api_url>/auth/callback/` to the Supabase Auth redirect URLs. Then send a
-   test delivery from the App's *Advanced* tab: it should get `2xx`.
+Do not put the values in shell history on a shared machine (`read -rs` into
+a variable first). Then set `mount_secrets = true`, set `ALLOWED_ORIGINS` and
+`DASHBOARD_URL` in `app_env` to the API URL (it also serves the dashboard),
+and run `terraform plan -out=tfplan` and `terraform apply tfplan` again.
 
-**Changing configuration later.** `app_env`, `var.secrets` and the scaling
-settings are applied with `terraform apply`. Cloud Run picks them up in a new
-revision at once. The VM rewrites its configuration only at boot, so after a
-change that touches the worker, run
+### Step 4: Set the repository variables and the environment
+
+`terraform output -json github_repository_variables` prints the variables
+`deploy-gcp.yml` reads. Set each with
+`gh variable set <NAME> --body '<value>' -R PxA-Labs/AutoMaintainer`. None is
+a secret.
+
+| Variable | Required | Value |
+|---|---|---|
+| `GCP_PROJECT_ID`, `GCP_REGION` | yes | From the output |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | yes | From the output. While it is empty the workflow is skipped |
+| `GCP_DEPLOYER_SERVICE_ACCOUNT` | yes | From the output |
+| `GCP_IMAGE_REPOSITORY` | yes | From the output |
+| `GCP_RUN_SERVICE` | yes | From the output |
+| `GCP_WORKER_INSTANCE`, `GCP_WORKER_ZONE` | yes | From the output |
+| `IMAGE_EXTRAS` | no | Backend extras for the image build, `server` when unset. The output shows `server,rag` when `rag_enabled` is on. Add `adk` for the ADK Reviewer |
+| `NEXT_PUBLIC_SUPABASE_URL` | yes | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | The anon key, never the service key |
+| `NEXT_PUBLIC_BACKEND_URL` | yes | The API URL |
+
+The workflow checks the seven `GCP_*` variables other than the provider and
+stops with an error that names any that is missing. The `NEXT_PUBLIC_*`
+values are inlined into the dashboard bundle at build time.
+
+Under Settings > Environments, create `production` with required reviewers,
+and limit its deployment branches and tags to `main` and `v*.*.*`.
+
+### Step 5: First deploy
+
+Actions > "Deploy to Google Cloud" > Run workflow on `main`, and approve the
+`production` deployment. The workflow builds the image, pushes it to Artifact
+Registry, deploys it to Cloud Run by digest, checks `/healthz`, and sets the
+worker VM's `automaintainer-image` metadata; the VM restarts its container
+within about 20 seconds. Release tags (`v*.*.*`) deploy the same way.
+
+Check the worker in Logs Explorer (resource "VM Instance",
+`automaintainer-worker`): `POST /start` answers
+`503 AGENT_WORKER_UNAVAILABLE` until it is up. The deployer holds
+`roles/run.developer` on the one service only, with no project-level Run
+role. A real deploy has not exercised this yet; if `gcloud run deploy` is
+denied, the error names the missing permission.
+
+### Step 6: Point the GitHub App at the new URL
+
+Set the webhook URL to `<api_url>/webhooks/github` (secret: the
+`github-webhook-secret` value), and the Callback URL and Setup URL to
+`<api_url>/github/app/setup` ([Install flow](#install-flow-setup-url)). Add
+`<api_url>/auth/callback/` to the Supabase Auth redirect URLs. Then send a
+test delivery from the App's *Advanced* tab: it should get `2xx`.
+
+After this step, complete [Sandboxed verification](#sandboxed-verification)
+before relying on verification results.
+
+### Changing configuration later
+
+`app_env`, `var.secrets`, the switches and the scaling settings are applied
+with `terraform apply`. Cloud Run picks them up in a new revision at once.
+The VM rewrites its configuration only at boot, so after a change that
+touches the worker, run
 `gcloud compute instances reset automaintainer-worker --zone us-central1-a`;
 running tasks are requeued (`acks_late`). A new secret version is read when
 a Cloud Run instance or the worker container starts: redeploy (or reset the
-VM) after rotating a key. To rotate the Redis password in `vm` mode, add a
-new `redis-url` version, reset the VM (Redis and the worker restart with it)
-and deploy a new API revision; the API cannot reach Redis in between. In
-`memorystore` mode Google owns the AUTH string; how to rotate it was not
-checked for this guide (see the Memorystore AUTH documentation). Afterwards,
-update `redis-url` the same way.
+VM) after rotating a key.
+
+To rotate the Redis password in `vm` mode, add a new `redis-url` version,
+reset the VM (Redis and the worker restart with it) and deploy a new API
+revision; the API cannot reach Redis in between. In `memorystore` mode
+Google owns the AUTH string; how to rotate it has not been checked for this
+guide (see the Memorystore AUTH documentation). Afterwards, update
+`redis-url` the same way.
 
 ### Sandboxed verification
 
 `infra/terraform/sandbox.tf` runs every verification command as one
-execution of the Cloud Run job `automaintainer-sandbox` (#158), and the
-worker container gets `SANDBOX_BACKEND=cloud_run_job` with the job and
-bucket names. [VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend)
-describes the backend and its threat model. In short: the job runs as
-`automaintainer-sandbox@`, which holds no role at all; its egress goes into
-its own VPC (`automaintainer-sandbox-vpc`) that has no default route, no NAT,
-no peering and a deny-all egress firewall, with one exception, TCP 443 to
-Private Google Access, so it can fetch its working copy and upload its
+execution of the Cloud Run job `automaintainer-sandbox` (#158). The worker
+container always gets `SANDBOX_BACKEND=cloud_run_job` with the job and
+bucket names; no other deployment option sets this backend.
+[VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend) describes
+the backend and its threat model.
+
+**What it isolates.** The job runs as `automaintainer-sandbox@`, which holds
+no role at all. Its egress goes into its own VPC
+(`automaintainer-sandbox-vpc`), which has no default route, no NAT, no
+peering and a deny-all egress firewall, with one exception: TCP 443 to
+Private Google Access, so the job can fetch its working copy and upload its
 result through two URLs the worker signs for that run only. The bucket
 (`<project>-automaintainer-sandbox`) has uniform access, public access
 prevention and a 1-day lifecycle delete. The worker may run, read and cancel
 executions of that one job, use objects in that bucket and sign blobs as
-itself. `VERIFY_ALLOW_LOCAL` stays refused. Once the steps below pass, this
-replaces "Verification stays off for untrusted repositories" above:
-verification results become real, so `MERGE_POLICY=ci` can merge again.
+itself. Once the steps below pass, verification results are real, so
+`MERGE_POLICY=ci` can merge again.
 
 **What stays open: Google APIs.** This is weaker than the Docker backend's
 `--network=none`. The one allowed destination, the Private Google Access
-VIP (199.36.153.8/30), serves *every* `*.googleapis.com` API, not only this
+range (199.36.153.8/30), serves *every* `*.googleapis.com` API, not only this
 bucket. The job's own identity can do nothing, but test code needs no
 identity to write to a bucket someone else made publicly writable, or to
 poll one for commands. So a hostile test can still send the repository's
 contents and its own output out through Google Cloud Storage. Under
-`MERGE_POLICY=ci`, that is the remaining risk for private repositories
-whose issues come from outsiders. VPC Service Controls around the project
-would close it, but it is not set up here; see
-[VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend).
+`MERGE_POLICY=ci`, that is the remaining risk for private repositories whose
+issues come from outsiders. VPC Service Controls around the project would
+close it, but they are not set up here.
 
-**The sandbox settings cannot be changed through `app_env`.**
-`modules/worker` merges `SANDBOX_BACKEND` and the `CLOUD_RUN_SANDBOX_*`
-names *over* `var.app_env`, so a value set there is silently replaced. This
-fails closed: no `app_env` entry can switch the worker back to local or
-Docker verification. To change them, edit `modules/worker/main.tf`.
+**Settings.** `modules/worker` merges `SANDBOX_BACKEND` and
+`CLOUD_RUN_SANDBOX_PROJECT`, `_REGION`, `_JOB`, `_BUCKET` and `_SIGNER`
+*over* `var.app_env`, so a value set there is silently replaced. This fails
+closed: no `app_env` entry can switch the worker back to local or Docker
+verification. To change them, edit `modules/worker/main.tf`.
 `CLOUD_RUN_SANDBOX_START_SECONDS` is not set by the module, so `app_env`
-does control it.
+controls it. The job's size is `sandbox_cpu` and `sandbox_memory`.
 
-**Owner steps** (after the first deploy):
+**Cost.** Each verification command is one Cloud Run job execution, billed
+for its CPU and memory time, plus small bucket and private DNS zone charges.
+This guide has no estimate for them; check the
+[pricing calculator](https://cloud.google.com/products/calculator).
 
-1. **Point the job at an image with python3 and the test toolchain.** The
+#### Owner steps after the first deploy
+
+1. **Point the job at an image with `python3` and the test toolchain.** The
    default `sandbox_image` is Google's sample job image, which has no
    `python3`, so until this step every verification reports an error. The
    app image works (Python 3.11, git, node):
@@ -647,10 +739,12 @@ does control it.
    newer toolchain. Pin it by digest.
 
 2. **Run the smoke test** below and keep its output with the deployment
-   notes.
+   notes. It has not yet been run against a real project.
 
-**Smoke test.** Opt-in and manual: it starts real executions (a few cents).
-Run from `infra/terraform` with the owner's credentials.
+#### Smoke test: start latency and isolation
+
+Opt-in and manual: it starts real executions (a few cents). Run it from
+`infra/terraform` with the owner's credentials.
 
 ```bash
 P=automaintainer-prod; R=us-central1; JOB=automaintainer-sandbox
@@ -703,12 +797,13 @@ in Logging under the `automaintainer-sandbox-deny-egress` firewall rule.
 
 The metadata server cannot be blocked: a Cloud Run job always reaches its
 own (169.254.169.254 is served outside the VPC). The check is therefore that
-it answers as the sandbox account, whose token is useless (no role), and not
+it answers as the sandbox account, whose token is useless (no role), not
 that the address is unreachable.
 
-**3. The backend's own path, from the worker container.** The probes above
-start executions with `gcloud`. They do not test the calls the worker
-itself makes: the V4 signed URLs, the `runWithOverrides` body, the
+#### Smoke test: the backend's own path
+
+The probes above start executions with `gcloud`. They do not test the calls
+the worker itself makes: the V4 signed URLs, the `runWithOverrides` body, the
 execution name in the run response, and whether the worker's custom role is
 enough without `actAs` on the sandbox account. This step does. Run it on the
 VM. It sends a throwaway directory, never a repository.
@@ -740,15 +835,15 @@ gcloud storage ls "gs://$BUCKET/executions/" --project $P   # expect nothing lef
 ```
 
 Expected: `(0, 'copied in\n\n', '')` with a round trip a few seconds above
-the start latency from step 1, then `(3, '', '')`, then `timeout ok`.
-The bucket should be empty, and
-`gcloud run jobs executions list --job $JOB --region $R --project $P`
-should show three new executions: the first succeeded, the other two failed.
-The third failed because the entrypoint killed `sleep` at 5 s. It was not
+the start latency from the first test, then `(3, '', '')`, then
+`timeout ok`. The bucket should be empty, and
+`gcloud run jobs executions list --job $JOB --region $R --project $P` should
+show three new executions: the first succeeded, the other two failed. The
+third failed because the entrypoint killed `sleep` at 5 s; it was not
 cancelled. A `403` from `signBlob` or `:run` means the worker's role is
 missing a permission. `the job run returned no execution` means the response
-shape is not the one the backend expects. In both cases verification fails closed with an `error`
-until it is fixed.
+shape is not the one the backend expects. In both cases verification fails
+closed with an `error` until it is fixed.
 
 Then open an issue on a test repository with the App installed and check the
 run's verification: the PR's `automaintainer/verification` status should be
@@ -756,17 +851,19 @@ run's verification: the PR's `automaintainer/verification` status should be
 shows the execution; the worker's log shows no `could not delete` or
 `could not cancel` warnings.
 
-**When to fall back to GKE Sandbox.** Keep Cloud Run Jobs if a start takes
-well under `CLOUD_RUN_SANDBOX_START_SECONDS` (20 s) and every probe is as
-expected. Otherwise:
+#### When to fall back to GKE Sandbox
+
+Keep Cloud Run Jobs if a start takes well under
+`CLOUD_RUN_SANDBOX_START_SECONDS` (20 s) and every probe is as expected.
+Otherwise:
 
 - *Start latency.* If starts regularly approach 20 s (the most the worker
   allows: 20 s plus up to 8 s of cleanup must fit in verification's own
-  30-second grace), lower
-  `sandbox_memory` and the image size. If that is not enough, or the probe
-  shows `storage via private VIP` blocked (Direct VPC egress did not use the
-  private zone, so the job cannot fetch its copy; verification then fails
-  closed with an error), the job model does not fit.
+  30-second grace), lower `sandbox_memory` and the image size. If that is
+  not enough, or the probe shows `storage via private VIP` blocked (Direct
+  VPC egress did not use the private zone, so the job cannot fetch its copy;
+  verification then fails closed with an error), the job model does not
+  fit.
 - *Egress.* If any probe other than storage is `OPEN`, stop: remove the App
   from untrusted repositories and set `sandbox_image` back to the default
   (verification fails closed) until it is understood.
@@ -774,130 +871,184 @@ expected. Otherwise:
 The fallback is a GKE Standard cluster with a GKE Sandbox (gVisor) node pool
 (recent Autopilot versions also accept `runtimeClassName: gvisor`; check the
 current GKE documentation before choosing): one Kubernetes Job per
-verification, `runtimeClassName: gvisor`, a Kubernetes service account
-bound through Workload Identity to an account with no role, a default-deny
-egress `NetworkPolicy` (with an allow rule for Private Google Access only),
-no NAT for the node subnet, and the metadata server reachable only through
-GKE's metadata server (which serves the pod's own identity). Pods start in
-seconds on a warm node, at the cost of a cluster to run and pay for (a
-management fee plus at least one always-on node). It needs a new
-`SandboxBackend` against the Kubernetes API; that client is not in
-`backend/uv.lock` today.
+verification, `runtimeClassName: gvisor`, a Kubernetes service account bound
+through Workload Identity to an account with no role, a default-deny egress
+`NetworkPolicy` (with an allow rule for Private Google Access only), no NAT
+for the node subnet, and the metadata server reachable only through GKE's
+metadata server (which serves the pod's own identity). Pods start in seconds
+on a warm node, at the cost of a cluster to run and pay for (a management
+fee plus at least one always-on node). It needs a new `SandboxBackend`
+against the Kubernetes API; that client is not in `backend/uv.lock` today.
 
 ### Cloud Trace
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OTEL_CLOUD_TRACE_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a Cloud Trace span exporter to the API's existing OpenTelemetry tracer, next to the console and OTLP exporters (`backend/observability.py`). It authenticates with application default credentials, which on Cloud Run is the service's account (needs `roles/cloudtrace.agent`; Terraform grants it when `cloud_trace_enabled = true`). |
-| `GOOGLE_CLOUD_PROJECT` | unset | Project the traces go to. Unset: the project of the credentials. Terraform sets it. |
+Off by default. Set `cloud_trace_enabled = true` and apply. Terraform grants
+the API's service account `roles/cloudtrace.agent` and sets
+`OTEL_CLOUD_TRACE_ENABLED=true` on the API, which adds a Cloud Trace span
+exporter next to the console and OTLP exporters (`backend/observability.py`).
+`GOOGLE_CLOUD_PROJECT` (set by Terraform) selects the project. The worker
+does not export traces. A failure to set up the exporter (no credentials,
+package missing) is logged and does not stop the API. The spans are listed
+in [OBSERVABILITY.md, Traces](OBSERVABILITY.md#traces).
 
-A failure to set up the exporter (no credentials, package missing) is logged
-and does not stop the API. Metrics have their own switch, below.
+Cost: at low volume, within the free allotment (see the cost table; the
+figure is uncertain).
 
 ### Metrics and alerts
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OTEL_CLOUD_MONITORING_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a reader that exports the backend's OpenTelemetry metrics to Cloud Monitoring every 60 seconds, next to Prometheus and OTLP (`backend/observability.py`). Credentials and project as for Cloud Trace; the account needs `roles/monitoring.metricWriter` (Terraform grants it to the API and the worker). A missing package or missing credentials is logged once and the process keeps running. |
-| `LLM_PRICES_JSON` | unset | Overrides or extends the built-in LLM price table, e.g. `{"llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79}}` (USD per million tokens). An invalid value is logged once and ignored. |
+Off by default. Metrics, alerts and the dashboard are separate steps.
 
-Turn it on for both services with `cloud_monitoring_enabled = true` in
-`terraform.tfvars`: Terraform sets `OTEL_CLOUD_MONITORING_ENABLED` on Cloud
-Run and on the worker VM (reset the VM after changing it). `app_env` may not
-set the variable itself. Each metric becomes the
-metric type `workload.googleapis.com/<name>` on the `generic_task` resource
-(`job` is `automaintainer-backend` or `automaintainer-worker`, one `task_id`
-per process).
+**1. Export the metrics.** Set `cloud_monitoring_enabled = true` in
+`terraform.tfvars`, apply, and reset the worker VM. Terraform sets
+`OTEL_CLOUD_MONITORING_ENABLED=true` on Cloud Run and on the worker VM;
+`app_env` may not set the variable itself. The backend then adds a reader
+that exports its OpenTelemetry metrics to Cloud Monitoring every 60 seconds,
+next to Prometheus and OTLP. Both service accounts already hold
+`roles/monitoring.metricWriter`. A missing package or missing credentials is
+logged once and the process keeps running. The worker exports from every
+prefork process: `celery_app.py` calls
+`observability.install_celery_worker_hooks()`, so each process sets up its
+exporter after the fork. A worker started with `--pool solo` or `threads`
+exports no metrics.
 
-What is exported, all with the bounded labels of the catalogue in
-`observability.py`:
+Each metric becomes the metric type `workload.googleapis.com/<name>` on the
+`generic_task` resource (`job` is `automaintainer-backend` or
+`automaintainer-worker`, one `task_id` per process). What the worker records
+today, all with bounded labels
+([OBSERVABILITY.md](OBSERVABILITY.md#metric-catalogue) has the full
+catalogue):
 
-- runs finished, by mode and outcome (`agent_runs_total`), and their
-  duration (`agent_run_duration_seconds`, buckets up to an hour). The worker
-  records both when a run ends (`backend/tasks.py`). The outcome is
-  `completed`, `cancelled`, `failed` or `timeout`: a run stopped by the
-  30-minute limit is stored as `failed` but measured as `timeout`, and the
-  failure-rate alert counts both. A redelivered run that is already finished
-  and a run that gave up waiting for the repository lock are not counted.
-  The duration starts once the run holds the lock;
+- runs finished, by mode and outcome (`agent_runs_total`), and their duration
+  (`agent_run_duration_seconds`, buckets up to an hour), recorded when a run
+  ends (`backend/tasks.py`). The outcome is `completed`, `cancelled`,
+  `failed` or `timeout`: a run stopped by the 30-minute limit is stored as
+  `failed` but measured as `timeout`, and the failure-rate alert counts both.
+  A redelivered run that is already finished and a run that gave up waiting
+  for the repository lock are not counted;
 - LLM tokens by model, phase and kind (`llm_phase_tokens_total`) and the
-  **estimated** LLM cost by model and phase
-  (`llm_estimated_cost_usd_total`). The worker reads them from the engine's
-  `TelemetryEvent`s (`backend/telemetry_metrics.py`; the SDK package never
-  imports `observability`). The engine reports one token count per LLM call,
-  not split into prompt and completion, so the kind is `total` and the cost
-  is priced at the model's higher (output) rate: an upper bound, at most
-  about a third above the real figure for `llama-3.3-70b-versatile`, so the
-  cost alert fires early rather than late;
-- one `celery_worker_heartbeat` series per live worker process
-  (`celery_app.py` calls `observability.install_celery_worker_hooks()`, so
-  each prefork process sets up its exporter after the fork).
+  **estimated** LLM cost by model and phase (`llm_estimated_cost_usd_total`),
+  from the engine's `TelemetryEvent`s (`backend/telemetry_metrics.py`). The
+  engine reports one token count per LLM call, not split into prompt and
+  completion, so the kind is `total` and the cost is priced at the model's
+  higher (output) rate: an upper bound, at most about a third above the real
+  figure for `llama-3.3-70b-versatile`, so the cost alert fires early rather
+  than late;
+- one `celery_worker_heartbeat` series per live worker process.
 
-The cost is an estimate: Groq's earlier public list prices, which could not
-be confirmed (the model page shows "Contact sales"); models missing from the
-table add tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices
-before quoting it.
+The API exports its HTTP metrics.
 
-`terraform apply` creates (`infra/terraform/monitoring.tf`):
+The cost is an estimate from Groq's earlier public list prices, which could
+not be confirmed; models missing from the price table add tokens but no
+cost. Set `LLM_PRICES_JSON` (in `app_env`) to your contract prices before
+quoting it.
 
-- an e-mail notification channel for `monitoring_alert_email`. The variable
-  has no default: set an address, or `null` for no channel;
+**2. What `terraform apply` always creates** (`infra/terraform/monitoring.tf`):
+
+- an e-mail notification channel for `monitoring_alert_email`, unless it is
+  `null`;
 - an alert on the API's 5xx ratio (Cloud Run's own `request_count`, above
-  `alert_api_5xx_ratio` for 5 minutes);
-- when `monitoring_app_alerts_enabled = true`, alerts on the run failure
-  rate over the last hour, the p95 run duration over the last hour, the
-  estimated LLM cost over the last 24 hours, and the absence of any worker
-  heartbeat (thresholds: the `alert_*` variables). Cloud Monitoring refuses a
-  policy on a metric type that has never been written, so turn this on only
-  after `cloud_monitoring_enabled` has been on for a run or two, one of which
-  used the LLM (Metrics Explorer lists the `workload.googleapis.com` types);
-- a dashboard with the same charts (`terraform output monitoring_dashboard_url`).
+  `alert_api_5xx_ratio` for 5 minutes). It works without
+  `cloud_monitoring_enabled`;
+- an operations dashboard (`terraform output monitoring_dashboard_url`). Its
+  application charts stay empty until the metrics are exported.
+
+**3. Turn on the application alerts.** `monitoring_app_alerts_enabled = true`
+adds alerts on the run failure rate over the last hour, the p95 run duration
+over the last hour, the estimated LLM cost over the last 24 hours, and the
+absence of any worker heartbeat (thresholds: the `alert_*` variables). Cloud
+Monitoring refuses a policy on a metric type that has never been written, so
+the apply fails until all four types exist. Since #540 the worker records
+them, and they appear in this order once `cloud_monitoring_enabled` is on:
+
+- `celery_worker_heartbeat`: within about a minute of the worker starting;
+- `agent_runs_total` and `agent_run_duration_seconds`: when the first run
+  that acquired the repository lock ends;
+- `llm_estimated_cost_usd_total`: after the first LLM call on a model in the
+  price table. A run that fails before calling the LLM writes none.
+
+Check Metrics Explorer for the four `workload.googleapis.com` types, then set
+the switch and apply.
 
 With few runs a single failure can cross the failure-rate threshold, and at
-low traffic a few 5xx answers can cross the 5xx ratio. The worker exports
-only from the prefork pool (the default); a worker started with `--pool solo`
-or `threads` exports no metrics.
+low traffic a few 5xx answers can cross the 5xx ratio. The thresholds,
+conditions and charts are listed in
+[OBSERVABILITY.md](OBSERVABILITY.md#cloud-monitoring-alerts-and-dashboard).
+
+Cost: custom metrics are billed by volume past Cloud Monitoring's free
+allotment; the 60-second export interval keeps the number of points low. At
+low volume the cost table assumes the free allotment (uncertain).
 
 ### Code retrieval (RAG)
 
 Off by default (`rag_enabled = false`). [docs/RAG.md](RAG.md) explains what
-it does; read its [Data egress](RAG.md#data-egress) section first: with it
+it does. Read its [Data egress](RAG.md#data-egress) section first: with it
 on, the code of every repository the App works on is sent to Vertex AI in
 `rag_location`.
 
 `rag_enabled = true` makes `terraform apply`:
 
 - enable `aiplatform.googleapis.com`;
-- grant the worker's service account `roles/aiplatform.user`. Only the
-  worker embeds (indexing on the `maintenance` queue, queries in the agent
-  runs); the API only enqueues runs, so it gets no Vertex AI role;
+- grant the worker's service account `roles/aiplatform.user`. Only the worker
+  embeds (indexing on the `maintenance` queue, queries in the agent runs);
+  the API only enqueues runs, so it gets no Vertex AI role;
 - set `RAG_INDEXING_ENABLED=true`, `RAG_RETRIEVAL_ENABLED=true` and
   `GOOGLE_CLOUD_LOCATION=<rag_location>` (default `us-central1`) in the
-  shared environment (`GOOGLE_CLOUD_PROJECT` is already set). `app_env`
-  refuses these three names; set the variables instead.
+  shared environment. `app_env` refuses these three names; set the
+  variables instead.
 
 The image must also contain the Vertex AI client (the `rag` extra), which the
-default image leaves out. The Dockerfile's `EXTRAS` build arg (default
-`server`) chooses the extras, and the deploy workflow passes the optional
-repository variable `IMAGE_EXTRAS` (`server` when unset).
+default image leaves out.
 
 Owner steps:
 
-1. Apply the `code_chunks` migrations ([Database](#database)).
-2. Set `rag_enabled = true` (and `rag_location` if not `us-central1`) in
+1. Run the Vertex recall check described in
+   [RAG.md, Evaluation](RAG.md#evaluation) before turning retrieval on.
+2. Apply the `code_chunks` migrations ([Database](#database)).
+3. Set `rag_enabled = true` (and `rag_location` if not `us-central1`) in
    `terraform.tfvars`, then `terraform apply`.
-3. Set the repository variable `IMAGE_EXTRAS` to `server,rag`, the value in
+4. Set the repository variable `IMAGE_EXTRAS` to `server,rag`, the value in
    `terraform output github_repository_variables`.
-4. Run the deploy workflow, then reset the worker VM so it reads its new
-   environment (see *Changing configuration later* above).
-5. Check the worker's logs: a repository is indexed when its next run
-   starts (`rag index: ...`, or `rag index of repository ... skipped: ...`),
-   and a failed query is logged as `Code retrieval for the ... prompt
-   failed`; a failure leaves the prompts as with retrieval off.
+5. Run the deploy workflow, then reset the worker VM so it reads its new
+   environment ([Changing configuration later](#changing-configuration-later)).
+6. Check the worker's logs: a repository is indexed when its next run starts
+   (`rag index: ...`, or `rag index of repository ... skipped: ...`), and a
+   failed query is logged as `Code retrieval for the ... prompt failed`; a
+   failure leaves the prompts as with retrieval off.
+
+The one switch turns indexing and retrieval on together. Until a repository
+is indexed, its PM prompts get no context, but each PM query is still
+embedded.
 
 To turn it off, set `rag_enabled = false`, apply, reset the VM, and set
 `IMAGE_EXTRAS` back to `server` (or delete it) for the next deploy. The
 indexed chunks stay in Supabase until deleted.
+
+Cost: Vertex AI embeddings, billed by Google per character embedded; see
+[RAG.md, Cost](RAG.md#cost) for an estimate to verify.
+
+### ADK Reviewer
+
+Off by default: with `REVIEWER_BACKEND` unset (or `langgraph`), the
+Maintainer reviews with the single-shot LangGraph prompt. `REVIEWER_BACKEND=adk`
+selects the read-only ADK Reviewer (#525), which uses tools to read the PR
+head before deciding; the trust gate and merge policy are unchanged. Design:
+[docs/design/adk-specialist-agents.md](design/adk-specialist-agents.md).
+
+Terraform has no switch for it. To turn it on:
+
+1. Compare the two reviewers first
+   ([EVALS.md, Comparing Reviewer backends](EVALS.md#comparing-reviewer-backends-525)).
+   Keep `langgraph` unless the ADK Reviewer's false-approval rate is no
+   worse.
+2. Add `adk` to the repository variable `IMAGE_EXTRAS` (for example
+   `server,adk`, or `server,rag,adk` with code retrieval) and deploy. The
+   Terraform output does not know about this extra, so it keeps showing
+   `server` or `server,rag`.
+3. Add `REVIEWER_BACKEND = "adk"` to `app_env`, apply, and reset the worker
+   VM.
+
+Cost: the review uses more model calls than the single-shot prompt, within
+the review budget; its tokens are counted like any other LLM call.
 
 ### Estimated monthly cost
 
@@ -919,10 +1070,24 @@ before relying on them.
 | Secret Manager | 7 secrets (with `redis-url`), accesses at instance start | <1 |
 | Logging, Monitoring, Trace | low volume, within the free allotments | 0 (*uncertain*: log volume) |
 | Internet egress | API responses, GitHub, Groq and Supabase traffic | *uncertain* |
-| **Total** | `vm` mode / `memorystore` mode | **~40-60 / ~75-95** |
+| Verification sandbox | job executions, bucket, private DNS zone | not estimated |
+| Vertex AI embeddings (`rag_enabled`) | see [RAG.md, Cost](RAG.md#cost) | not included |
+| **Total** | `vm` mode / `memorystore` mode, without the two rows above | **~40-60 / ~75-95** |
 
 Groq and Supabase are billed by their providers. The budget
-(`budget_amount`, 100 by default) alerts but never stops spending.
+(`budget_amount`, 100 by default) sends alerts but never stops spending.
+
+## Dashboard on Vercel
+
+The dashboard is a static Next.js export (`output: 'export'` in
+`dashboard/next.config.ts`). The Docker image serves it from the API, so a
+separate host is optional. To host it on Vercel, import the repository with
+the root directory `dashboard/`; [`dashboard/vercel.json`](../dashboard/vercel.json)
+sets the output directory `out` and security headers. Set the build values
+`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (the anon key,
+never the service key) and `NEXT_PUBLIC_BACKEND_URL` in the Vercel project,
+and add the Vercel origin to the API's `ALLOWED_ORIGINS` and, for the
+install flow, `DASHBOARD_URL`.
 
 ## The image
 
@@ -958,6 +1123,12 @@ Groq and Supabase are billed by their providers. The budget
   client for code retrieval ([RAG](RAG.md)), `adk` the ADK Reviewer; any
   other name fails the build. Example:
   `docker build --build-arg EXTRAS=server,rag .`
+- Published images: `.github/workflows/docker-publish.yml` pushes the image to
+  `ghcr.io/pxa-labs/automaintainer` from `main` (tags `main` and `latest`),
+  from `v*.*.*` release tags (the version and `<major>.<minor>`), and with a
+  commit SHA tag. It builds with the default `EXTRAS=server`. Pull requests
+  that touch the image build it without pushing. The Google Cloud deployment
+  builds its own image (Option D).
 
 ## Environment variables
 
@@ -966,6 +1137,10 @@ startup, before any module reads its settings; variables already set in the
 environment win. Importing the SDK (`import automaintainer`) loads no `.env`
 file and logs nothing: an application embedding the engine passes an
 `AutoMaintainerConfig` or sets its own environment (#524).
+
+Variables marked "off" are opt-in. On Google Cloud, Terraform sets some
+variables itself; see
+[Set by Terraform on Google Cloud](#set-by-terraform-on-google-cloud).
 
 ### Required (API and workers)
 
@@ -991,15 +1166,13 @@ file and logs nothing: an application embedding the engine passes an
 | `WORKER_PING_TIMEOUT_SECONDS` / `WORKER_PING_CACHE_SECONDS` | `1.0` / `5.0` | Before creating a run, `/start` asks the Celery workers which queues they consume (`inspect active_queues`) and returns `503` with `"code": "AGENT_WORKER_UNAVAILABLE"` and a `Retry-After` header when none consuming `agent_runs` answers within the timeout, or the broker cannot be reached. No run row is created. A maintenance-only worker does not count. The probe opens its own broker connection with the timeout as its socket connect and read timeout and one retry, and `/start` waits for it at most `2 × timeout + 0.5` seconds (2.5 s by default) even if the broker host does not answer at all; while a probe is stuck past that, further `/start` calls answer `503` at once. The answer, positive or negative, is cached for the given number of seconds. |
 | `AGENT_WORKER_CHECK` | `true` | Set to `false` (or `0`, `no`, `off`) to skip that check, for local development or tests without a broker. Runs are then queued even if no worker will consume them. Any other value keeps the check on. Leave it unset in deployments; with `ENVIRONMENT=production` the API logs a warning the first time `/start` skips the check. |
 | `AUTOMAINTAINER_TRIGGER_LABEL` | unset (off) | Label name that starts an agent run when it is added to an open issue (`issues.labeled` webhook; compared case-insensitively). The run is the one `/start` would create for that issue, attributed to the org's first owner, with the label's adder as the trigger: under `MERGE_POLICY=ci`/`auto` its PR is merged only if the adder and the issue's author both have write access (`backend/automaintainer/_runtime/trust.py`), otherwise it waits for a human. No run is started when the adder is a bot, when an outsider's own issue got the label (an issue template applying it), when the repository is not registered to the installation's org, when a run for that issue is still queued, running or awaiting review, or when no `agent_runs` worker is available (the `/start` check above, so `AGENT_WORKER_CHECK` applies too); each is logged and the delivery is marked `ignored`. Set it on the service that processes webhooks: the worker consuming `github_sync`, or the API when `REDIS_URL` is unset. Requires the *Issues* webhook event (below). **Before enabling it:** anyone who can label issues, which includes users with only the *triage* role, can then start runs that spend LLM budget (and the worker time and GitHub API quota of a run). Such a run cannot be merged automatically unless the adder and the issue's author can write, so it ends as a PR for a human at worst, but the cost is spent either way. **A label added while no worker is available is ignored and not retried**: remove it and add it again once an `agent_runs` worker runs. The run row records who added the label (`runs.trigger_source = 'label'`, `trigger_github_id`, `trigger_login`); `runs.user_id` is the org's first owner. Details: `backend/webhook_processor.py`. |
-| `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. Timeouts, output limits and per-repository `.automaintainer.yml` are described in [VERIFICATION.md](./VERIFICATION.md). Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
-| `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, ...) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
 | `CHANGE_LIMIT_MAX_FILES` / `CHANGE_LIMIT_MAX_LINES` / `CHANGE_LIMIT_DENYLIST` | `10` / `500` / built-in list | An agent change over the file or line limit is opened as a **draft** PR with the `needs-human` label and a "Change limits exceeded" section, and the run never merges it under any `MERGE_POLICY`. A change to a **denied path** is refused before it is committed (#488): nothing reaches the run branch, no PR is opened, and the run fails with `PROTECTED_PATH`. That failure is terminal (a redelivery does not retry it), so a human makes the change or reruns by hand; only a run that already has a PR from an earlier iteration also gets that PR held as a draft `needs-human` PR. If the base branch's `.automaintainer.yml` cannot be read (any error but a 404, such as a GitHub 5xx or a rate limit) or parsed, its `deny` entries are unknown and **every** commit is refused the same way (`PROTECTED_PATH`, terminal, manual rerun), so a transient GitHub error ends the run. `CHANGE_LIMIT_DENYLIST` is a comma-separated list of globs that **replaces** the built-in one (workflows, Dockerfiles, compose files, lockfiles, `.env*`, `*.pem`, `*.key`, and test-runner configuration such as `conftest.py`, `pytest.toml`, `pytest.ini`, `tox.ini`, `setup.cfg`, `pyproject.toml`, `package.json`, `jest`/`vitest`/`vite`/`playwright` configs, `.npmrc`, and `pytest.py`/`pytest/`/`_pytest/` modules that would replace pytest; `.automaintainer.yml` is always denied). A deployment that sets `CHANGE_LIMIT_DENYLIST` keeps its own list after upgrading and gets **none** of the new test-runner entries; add them to it, or unset it to use the built-in list. Repositories can tighten or relax them with a `change_limits` mapping in `.automaintainer.yml`, read from the base branch (e.g. `allow: ["pyproject.toml"]`). Existing deployments start seeing draft `needs-human` PRs for large changes after upgrading, and `PROTECTED_PATH` failures once test-runner configuration is denied: every fix that edits `pyproject.toml` or `package.json` (a dependency bump, a tool setting) is now refused and left for a human; see [ARCHITECTURE.md](../ARCHITECTURE.md#change-limits). |
 | `MERGE_POLICY` | `human` | Whether the agent may merge its own PRs. `human` (default): never auto-merge; the agent opens the PR, posts its review and requests a human reviewer. `ci`: merge only if the Maintainer approves **and** every status/check on the PR head has passed, with at least one check present (evaluated once after the PR opens, so it usually fails closed). `auto`: merge on Maintainer approval alone; not recommended. Under `ci` and `auto` the merge also needs a trusted trigger: the user who started the run and the author of a targeted issue, each identified by GitHub user id and resolved to their current login (#491), must have write, maintain or admin permission on the repository, or the PR stays open for a human (`backend/automaintainer/_runtime/trust.py`). Users who start runs from the dashboard therefore need to have signed in with GitHub; with the dev-auth bypass nothing is merged automatically. The lookup (`GET /repos/{owner}/{repo}/collaborators/{username}/permission`) needs no new App permission: the REST reference lists none for it beyond the mandatory *Metadata: read*, which every installation grants. If GitHub ever refuses it, the merge fails closed (the PR is held, reason `trigger permission check failed`). Unknown values fall back to `human` with a warning. `MERGE_POLICY` is the **ceiling** for every repository: org owners and admins can make a single repository stricter (never looser) from the dashboard's *Merge policy* control or `PUT /repositories/{id}/merge-policy` (stored in `repositories.merge_policy`, migration `20261116220000_repository_merge_policy.sql`); the run uses the stricter of the two, and `human` if the repository's setting cannot be read or its row is missing. Lowering `MERGE_POLICY` later also lowers every repository whose setting is now above it. Set `MERGE_POLICY` **identically on the API and on every `agent_runs` worker**: the workers enforce it, the API uses it for the ceiling shown in the dashboard and for rejecting looser settings. Docker Compose shares one `env_file`; on Render or a custom deployment set it on each service, or the dashboard shows (and admins can choose) only what the API's value allows while runs follow the worker's value (enforcement stays safe, since the worker always takes the stricter of its ceiling and the setting). |
 | `GIT_TIMEOUT_SECONDS` | `300` | Timeout for each `git clone`/`fetch` the worker runs; the git process is killed and a partial clone removed when it expires. |
 | `AUTOMAINTAINER_WORKSPACE_DIR` | image: `/var/lib/automaintainer/workspaces`, code: `<tmp>/automaintainer` | Where repos are cloned. It must be the same path on the API and the `agent_runs` workers. |
 | `IDE_VIEW_TTL_HOURS` / `IDE_VIEW_MAX` | `24` / `50` | The Web IDE reads each user's working branch from a per-user git worktree of the shared clone, under `<workspace>/_ide_views/` (#505). Each view is one checkout of the repository (objects are shared with the clone), so budget about `IDE_VIEW_MAX` x the checkout size on top of the clones. Views unused for the TTL are removed, and beyond the cap the least recently used go first; a removed view is rebuilt on the user's next read. The sweep runs in the API process at most once a minute. A malformed value is ignored (with a warning in the log) and the default is used. |
 | `AUTH_DEV_BYPASS` | unset | **Never set this in a deployment.** When `true`, every request is trusted as `AUTH_DEV_USER_ID` / `AUTH_DEV_ORG_ID`, with no authentication. It is only for local development. |
-| `AUTH_DEV_USER_ID`, `AUTH_DEV_ORG_ID` | fixed UUIDs | Identity used by `AUTH_DEV_BYPASS`. Local only. |
+| `AUTH_DEV_USER_ID`, `AUTH_DEV_ORG_ID`, `AUTH_DEV_ROLE` | fixed UUIDs, `owner` | Identity used by `AUTH_DEV_BYPASS`. Local only. |
 
 ### GitHub App permissions
 
@@ -1147,6 +1320,38 @@ Why no GitHub token is needed to start the install (#481):
   call per install URL, and the `AUTH_DEV_BYPASS` user has no identity, so
   local development without Supabase Auth cannot start the install flow.
 
+### Verification and sandboxes
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VERIFY_CHANGES` / `SANDBOX_BACKEND` / `VERIFY_ALLOW_LOCAL` | on / unset / unset | Agent changes are verified with the repository's tests after each push. They run through `SANDBOX_BACKEND`; running them on the host needs `VERIFY_ALLOW_LOCAL=true` in **any** environment (untrusted code). Without either, verification reports an error, which blocks `MERGE_POLICY=ci`. `SANDBOX_BACKEND` takes `cloud_run_job` or a `package.module:factory` path such as `runners.docker_sandbox:create`. Under `ci` the GitHub App also needs the *Commit statuses: write* permission. |
+| `VERIFY_TIMEOUT_SECONDS` / `VERIFY_MAX_TIMEOUT_SECONDS` / `VERIFY_MAX_OUTPUT_BYTES` / `VERIFY_PYTHON` | `300` / `900` / `65536` / `python` | Test timeout, its ceiling, the output kept, and the interpreter of the detected pytest command. Details and per-repository `.automaintainer.yml`: [VERIFICATION.md](./VERIFICATION.md#server-settings). |
+| `SANDBOX_IMAGE` / `SANDBOX_NETWORK` / `SANDBOX_RUNTIME` (with `SANDBOX_BACKEND=runners.docker_sandbox:create`) | `python:3.12-slim` / `none` / unset | The shipped Docker sandbox backend runs each test command in an ephemeral, hardened container through the `docker` CLI, which the worker then needs, together with access to a Docker daemon (local socket or `DOCKER_HOST`; the working copy is streamed to the container, so the daemon need not share the worker's filesystem). Access to a Docker daemon is root-equivalent on that daemon's host: run the verification worker on a dedicated sandbox host or point `DOCKER_HOST` at one, and use rootless Docker and/or `SANDBOX_RUNTIME=runsc` (gVisor). Limits (`SANDBOX_MEMORY`, `SANDBOX_WORKSPACE_SIZE`, `SANDBOX_TMPFS_SIZE`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, `SANDBOX_USER`) and the threat model are in [VERIFICATION.md](./VERIFICATION.md#docker-sandbox-backend). |
+| `CLOUD_RUN_SANDBOX_PROJECT` / `_REGION` / `_JOB` / `_BUCKET` / `_SIGNER` (with `SANDBOX_BACKEND=cloud_run_job`) | project: `GOOGLE_CLOUD_PROJECT`; region, job, bucket: required; signer: the credentials' account | Where the Cloud Run Jobs sandbox runs. Terraform sets all of them on the Google Cloud worker. See [VERIFICATION.md](./VERIFICATION.md#cloud-run-jobs-sandbox-backend). |
+| `CLOUD_RUN_SANDBOX_START_SECONDS` | `20` (maximum `20`) | Extra seconds the worker waits for a job execution to start, on top of the command's timeout. |
+
+### Agents and models
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROQ_API_KEY_1` ... `GROQ_API_KEY_19` | unset | Extra Groq keys; the rate limiter uses them as one pool with `GROQ_API_KEY`. |
+| `REVIEWER_BACKEND` | `langgraph` | `adk` selects the ADK Reviewer, which needs the `adk` extra in the image. An unknown value is logged and `langgraph` is used. See [ADK Reviewer](#adk-reviewer). |
+| `IMPLEMENTER_MAX_FILE_CHARS` / `IMPLEMENTER_MIN_SIZE_RATIO` / `IMPLEMENTER_SHRINK_GUARD_MIN_BYTES` | `60000` / `0.4` / `2048` | Implementer limits: the largest file it rewrites, and the shrink guard. See [ARCHITECTURE.md](../ARCHITECTURE.md). |
+
+### Code retrieval
+
+All off unless set; only the worker acts on them. Details:
+[RAG.md, Configuration](RAG.md#configuration).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RAG_INDEXING_ENABLED` | unset (off) | Indexes a repository's code when its runs start (`maintenance` queue). |
+| `RAG_RETRIEVAL_ENABLED` | unset (off) | Adds retrieved code to the PM prompt and the ADK Reviewer's `search_code`. |
+| `RAG_TOP_K` | `8` | Chunks per query, 1..50. |
+| `RAG_EMBEDDING_MODEL` / `RAG_EMBEDDING_BATCH_SIZE` | `text-embedding-005` / `16` | Vertex AI embedding model and inputs per request (1..250). |
+| `RAG_MAX_CHUNKS` | `20000` | A repository with more chunks is skipped (cost guard). |
+| `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | unset / `us-central1` | Project billed for embeddings and region the code is sent to. `GOOGLE_CLOUD_PROJECT` also selects the project for Cloud Trace and Cloud Monitoring. |
+
 ### Tuning and observability (optional)
 
 | Variable | Default | Purpose |
@@ -1159,7 +1364,32 @@ Why no GitHub token is needed to start the install (#481):
 | `REPO_LOCK_TTL_SECONDS` | `1800` | TTL of the per-repo run lock. |
 | `GROQ_REQUESTS_PER_MINUTE` / `GROQ_TOKENS_PER_MINUTE` | `30` / `6000` | Client-side LLM rate limits. |
 | `CORS_ORIGIN_REGEX` | built-in default | Extra origin regex for CORS. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP traces and metrics endpoint. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP traces and metrics endpoint (gRPC, without TLS). |
+| `OTEL_CLOUD_TRACE_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` exports traces to Cloud Trace. Needs `roles/cloudtrace.agent`. |
+| `OTEL_CLOUD_MONITORING_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` exports metrics to Cloud Monitoring every 60 seconds, from the API and each prefork worker process. Needs `roles/monitoring.metricWriter`. |
+| `LLM_PRICES_JSON` | unset | Overrides or extends the price table of the estimated LLM cost metric, e.g. `{"llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79}}` (USD per million tokens). An invalid value is logged once and ignored. |
+
+Exporters and metrics: [OBSERVABILITY.md](OBSERVABILITY.md).
+
+### Set by Terraform on Google Cloud
+
+| Variable | Where | Value |
+|---|---|---|
+| `ENVIRONMENT` | API, worker | `production` |
+| `GOOGLE_CLOUD_PROJECT` | API, worker | `project_id` |
+| `OTEL_CLOUD_MONITORING_ENABLED` | API, worker | from `cloud_monitoring_enabled` |
+| `OTEL_CLOUD_TRACE_ENABLED` | API | from `cloud_trace_enabled` |
+| `RAG_INDEXING_ENABLED`, `RAG_RETRIEVAL_ENABLED`, `GOOGLE_CLOUD_LOCATION` | API, worker | only with `rag_enabled` (`true`, `true`, `rag_location`) |
+| `REDIS_URL` | API, worker | from the `redis-url` secret with `redis_auth_enabled`, otherwise the plain broker URL |
+| `SANDBOX_BACKEND`, `CLOUD_RUN_SANDBOX_PROJECT`, `_REGION`, `_JOB`, `_BUCKET`, `_SIGNER` | worker | `cloud_run_job` and the sandbox job and bucket |
+| `CELERY_QUEUES`, `CELERY_CONCURRENCY` | worker VM | all four queues, `worker_concurrency` |
+| `AUTOMAINTAINER_SECRETS` | worker | names of the secrets `secrets_exec.py` reads, not their values |
+
+Everything else comes from `app_env` (both services get the same values) or
+from Secret Manager. `app_env` may not set `AUTH_DEV_BYPASS`,
+`ENABLE_TERMINAL`, `VERIFY_ALLOW_LOCAL`, `ENVIRONMENT`, `REDIS_URL`, `PORT`,
+`OTEL_CLOUD_MONITORING_ENABLED`, `RAG_INDEXING_ENABLED`,
+`RAG_RETRIEVAL_ENABLED` or `GOOGLE_CLOUD_LOCATION`.
 
 ### Dashboard (build time, public)
 
@@ -1174,9 +1404,13 @@ never the service key), and `NEXT_PUBLIC_BACKEND_URL`.
 - [ ] `MERGE_POLICY` is unset or `human`, and branch protection with required checks is on for maintained repos.
 - [ ] `ALLOWED_ORIGINS` lists only your dashboard origins.
 - [ ] Use the GitHub App (short-lived installation tokens) rather than a long-lived PAT in `GITHUB_TOKEN`.
-- [ ] Redis is not exposed publicly. Compose does not publish it, and on Render `ipAllowList: []` allows internal access only.
+- [ ] Redis is not exposed publicly. Compose does not publish it, on Render `ipAllowList: []` allows internal access only, and on Google Cloud only the subnet can reach it.
 - [ ] **Rotate keys** (`SUPABASE_SERVICE_KEY`, `GROQ_API_KEY`, `GITHUB_TOKEN` or the App private key, `GITHUB_WEBHOOK_SECRET`) on a schedule, and immediately if any of these happens: the terminal was ever enabled, `AUTH_DEV_BYPASS` was ever set on a reachable deployment, or a secret appeared in logs, images or `.git/config` of a clone. After rotating, redeploy every service, because each one holds its own copy.
 - [ ] Never bake secrets into the image. `.dockerignore` excludes `**/.env`. Pass secrets at runtime only.
+- [ ] Verification never runs on a host that holds secrets: `VERIFY_ALLOW_LOCAL` is unset, and `SANDBOX_BACKEND` points at a sandbox (on Google Cloud, the Cloud Run job, after its smoke test passed).
+- [ ] Google Cloud: the Terraform state bucket is readable by the owner only, `roles/editor` is removed from the default compute service account, a tag ruleset protects `v*`, and the `production` environment has required reviewers.
+- [ ] Google Cloud: `redis_auth_enabled` stays `true`, and the `redis-url` password has at least 32 characters.
+- [ ] Before turning on code retrieval, confirm the owner may send the repositories' code to Vertex AI ([RAG.md, Data egress](RAG.md#data-egress)).
 
 ## What was and was not verified
 
@@ -1190,6 +1424,14 @@ stack and drives one run from `queued` to a terminal state (see
 [Smoke test](#smoke-test)). That run ends `failed` for lack of credentials. A
 run that reaches `completed` needs real GitHub and LLM credentials, and is
 not automated.
+
+The Google Cloud configuration is checked statically: `ci-terraform.yml`
+runs `terraform fmt`, `init -backend=false` and `validate`, and the
+`backend/tests/test_gcp_*.py` tests pin its security decisions. No CI job
+runs `plan` or `apply`. Not yet exercised against a real project: a deploy
+with the service-scoped `roles/run.developer`, the sandbox smoke tests,
+Redis reading `requirepass` from stdin in the real Redis image, the Cloud
+Monitoring alerts, and a live Vertex AI call.
 
 ## CI: Supabase keep-alive
 
@@ -1247,6 +1489,13 @@ not match `release.yml`'s `v*.*.*`, so they create no GitHub release.
 
 ## Upgrade notes
 
+- **Google Cloud deployment and opt-in features (#530-#541).** Option D,
+  the Cloud Trace and Cloud Monitoring exporters, the Cloud Run Jobs sandbox,
+  code retrieval and the ADK Reviewer are new. All are off unless configured:
+  `REVIEWER_BACKEND` defaults to `langgraph`, the `RAG_*` and `OTEL_CLOUD_*`
+  switches are unset, and only the Terraform worker sets
+  `SANDBOX_BACKEND=cloud_run_job`. Docker Compose, Render and
+  single-container deployments see no change.
 - **SDK distribution name and `.env` loading (#524).** The engine package is now
   distributed as `automaintainer` (was `automaintainer-backend`; the import name
   is unchanged), so a wheel built locally is `automaintainer-<version>-py3-none-any.whl`.
