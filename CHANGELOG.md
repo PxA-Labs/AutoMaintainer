@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **runners**: Add a Cloud Run Jobs sandbox backend for verification ([#537](https://github.com/PxA-Labs/AutoMaintainer/pull/537)) - @purvanshjoshi
 - **observability**: Export metrics to Cloud Monitoring, with alerts and a dashboard ([#536](https://github.com/PxA-Labs/AutoMaintainer/pull/536)) - @purvanshjoshi
 - **rag**: Pgvector code index with org-scoped RLS, chunker, embedders and indexing task ([#535](https://github.com/PxA-Labs/AutoMaintainer/pull/535)) - @purvanshjoshi
 - **specialists**: Read-only ADK Reviewer behind reviewer_backend (default langgraph) ([#534](https://github.com/PxA-Labs/AutoMaintainer/pull/534)) - @purvanshjoshi
