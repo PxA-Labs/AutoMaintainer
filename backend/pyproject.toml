@@ -79,6 +79,24 @@ server = [
     # set (observability.py imports it lazily). Pulls in google-auth and the
     # google-cloud-trace gRPC client.
     "opentelemetry-exporter-gcp-trace>=1.15.0",
+    # Cloud Monitoring metrics exporter, next to the Cloud Trace one. Upstream
+    # publishes it only as alpha releases (every version is aN), hence the
+    # pre-release floor.
+    "opentelemetry-exporter-gcp-monitoring>=1.15.0a0",
+]
+# Google ADK agent runtime. ADK reaches Groq through its LiteLLM model
+# wrapper, so litellm is declared here too (same floor reasoning as server).
+# Plain google-adk only: its [extensions] extra caps litellm<1.106.3.
+adk = [
+    "google-adk>=2.14.1",
+    "litellm>=1.109.1",
+]
+# Embeddings for retrieval. Groq serves none, so Vertex AI text embeddings
+# through google-genai (data stays in Google Cloud). Capped below 3.0 because
+# google-adk 2.14.1 requires google-genai>=2.30,<3; lift it with ADK.
+# Supabase/pgvector is reached over PostgREST, so no Postgres driver here.
+rag = [
+    "google-genai>=2.34.0,<3",
 ]
 
 [dependency-groups]
