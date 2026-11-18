@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- Refresh the documentation for the engine, google cloud deployment, rag and sandboxed verification ([#542](https://github.com/PxA-Labs/AutoMaintainer/pull/542)) - @purvanshjoshi
 - **readme**: Add a roadmap section ([#528](https://github.com/PxA-Labs/AutoMaintainer/pull/528)) - @purvanshjoshi
 - **readme**: Remove the project status banner ([#520](https://github.com/PxA-Labs/AutoMaintainer/pull/520)) - @purvanshjoshi
 - Correct stale statements about verification and fix a changelog heading ([#463](https://github.com/PxA-Labs/AutoMaintainer/pull/463)) - @purvanshjoshi
