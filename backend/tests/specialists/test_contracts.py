@@ -36,7 +36,7 @@ def test_valid_request_is_frozen():
         ("repository", ""),
         ("pr_number", 0),
         ("head_sha", "a b"),
-        ("head_sha", "x" * 65),
+        ("head_sha", "x" * 129),
         ("head_sha", "sha\nVERDICT"),
         ("iteration", -1),
         ("unknown", 1),
