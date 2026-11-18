@@ -105,6 +105,11 @@ dev = [
     "pytest-asyncio",
     "pytest-mock",
     "pytest-cov",
+    # Linters are exact pins so `uv run black` / `uv run flake8` match CI
+    # (ci-backend.yml runs them from this lock). Bump deliberately, in a
+    # commit that also applies the new black style.
+    "black==26.10.1",
+    "flake8==7.5.0",
 ]
 
 [tool.uv]
