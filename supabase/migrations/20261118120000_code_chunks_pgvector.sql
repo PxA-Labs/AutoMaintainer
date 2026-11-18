@@ -74,7 +74,9 @@ GRANT ALL ON code_chunks TO service_role;
 -- what the RLS policy above lets them see; the backend calls it with the
 -- service role, which bypasses RLS, so the function filters by org AND
 -- repository itself and never returns another tenant's code. k is clamped
--- to 0..50. similarity = 1 - cosine distance.
+-- to 0..50. similarity = 1 - cosine distance. search_path is empty (the
+-- Supabase linter's recommendation): every object in the body is
+-- schema-qualified, so a caller's search_path cannot shadow any of them.
 --
 -- The HNSW index is searched first and filtered after, so with many
 -- repositories in one table fewer than k rows can come back (pgvector's
@@ -93,7 +95,7 @@ RETURNS TABLE (
     content TEXT,
     similarity DOUBLE PRECISION
 )
-LANGUAGE sql STABLE SECURITY INVOKER SET search_path = public, extensions AS $$
+LANGUAGE sql STABLE SECURITY INVOKER SET search_path = '' AS $$
     SELECT c.path, c.symbol, c.start_line, c.end_line, c.content,
            1 - (c.embedding OPERATOR(extensions.<=>) p_query_embedding)
     FROM public.code_chunks c

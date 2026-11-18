@@ -229,7 +229,10 @@ def test_match_function_is_security_invoker_with_a_fixed_search_path(db):
     assert len(rows) == 1
     secdef, config = rows[0]
     assert secdef is False
-    assert any(c.startswith("search_path=") for c in config or [])
+    # An empty search_path (the Supabase linter's recommendation): every
+    # object in the body is schema-qualified, so nothing a caller puts on
+    # their own search_path can shadow it.
+    assert 'search_path=""' in (config or [])
 
 
 def test_the_same_chunk_cannot_be_stored_twice_for_a_commit(db):

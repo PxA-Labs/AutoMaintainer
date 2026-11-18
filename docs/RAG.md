@@ -57,7 +57,8 @@ agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
   organization's rows (`current_user_org_ids()`, as on every org table).
   Clients have no `INSERT`/`UPDATE`/`DELETE` policy; only the service role
   writes.
-- `match_code_chunks` is `SECURITY INVOKER` with a fixed `search_path`: a
+- `match_code_chunks` is `SECURITY INVOKER` with an empty `search_path`
+  (every object in it is schema-qualified): a
   member calling it is limited by RLS, and the backend (service role, which
   bypasses RLS) is limited by the function's own `org_id` **and**
   `repository_id` filter. `anon` cannot execute it.
@@ -73,7 +74,11 @@ agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
 PostgreSQL with pgvector, including the cross-org case: org A's member asking
 for org B's repository gets nothing, and the service role asking with a
 mismatched org and repository gets nothing, although every tenant's chunks
-have identical embeddings.
+have identical embeddings. The `ci-db` job runs them (and the general
+`test_rls_policies.py`, which seeds `code_chunks` for every tenant) on
+`pgvector/pgvector:0.8.6-pg16`, pinned by digest; the official `postgres:16`
+image has no pgvector, so the migration cannot apply there. To run them
+locally, point `DATABASE_URL_RLS_TEST` at any PostgreSQL 16 with pgvector.
 
 ### Indexing
 
@@ -212,11 +217,6 @@ How to read them:
 
 ## Owner actions before this is used
 
-- CI: the `ci-db` job runs `postgres:16`, which has no pgvector; the
-  migration needs an image with it (`pgvector/pgvector:pg16`). Supabase has
-  pgvector available.
-  **This must land before or with this migration**: without it every RLS
-  and db-migrate test in that job fails at `CREATE EXTENSION vector`.
 - Apply the migration (`supabase db push` or `python scripts/db-migrate up`).
 - Build the worker image with the `rag` extra as well
   (`uv sync --frozen --extra server --extra rag`). The images install
