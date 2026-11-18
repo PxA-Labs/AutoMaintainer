@@ -28,8 +28,14 @@ Trade-offs:
   retries later while another run holds it.
 * Commit order is not checked: if an older commit is indexed after a newer
   one, the index holds the older one until the next indexing run.
-* Nothing enqueues this task yet; the caller (round 18) passes a checkout
-  already at ``commit_sha``. The task checks that with ``git rev-parse``.
+* The caller passes a checkout already at ``commit_sha``; the task checks
+  that with ``git rev-parse``.
+
+What triggers indexing: an agent run starting (``task_prerun`` of
+``tasks.run_agent_loop_task``) enqueues ``ensure_repository_indexed_task``,
+at most once per repository every REQUEST_DEDUP_SECONDS. It indexes a
+fresh shallow clone of the default branch when the index does not already
+hold its head (see the section below).
 
 Queue: ``maintenance`` (set on the task, since celery_app's task_routes is
 not this module's to edit); every deployment's worker consumes it.
@@ -41,7 +47,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -304,6 +312,31 @@ def _checkout_head(clone_path: Path) -> str:
     ).stdout.strip()
 
 
+def _index_locked(repository_id: int, commit_sha: str, root: Path) -> dict:
+    """:func:`index_repository` under the per-repository Redis lock.
+
+    Raises RepositoryIndexBusy, without indexing, while another run of the
+    same repository holds the lock.
+    """
+    client = _redis()
+    key = _index_lock_key(repository_id)
+    token = uuid.uuid4().hex
+    if not client.set(key, token, nx=True, ex=INDEX_LOCK_TTL_SECONDS):
+        raise RepositoryIndexBusy(f"repository {repository_id} is being indexed")
+    try:
+        return index_repository(
+            _supabase(),
+            _embedder(),
+            repository_id=repository_id,
+            commit_sha=commit_sha,
+            clone_path=root,
+        )
+    finally:
+        # Compare-and-delete: never free a lock that expired and was taken
+        # by another run meanwhile.
+        client.eval(_RELEASE_SCRIPT, 1, key, token)
+
+
 @shared_task(
     name="rag_tasks.index_repository_task",
     queue="maintenance",
@@ -321,12 +354,9 @@ def index_repository_task(repository_id: int, commit_sha: str, clone_path: str) 
     head = _checkout_head(root)
     if not isinstance(commit_sha, str) or head != commit_sha.lower():
         raise ValueError(f"checkout HEAD is {head}, not {commit_sha}")
-
-    client = _redis()
-    key = _index_lock_key(repository_id)
-    token = uuid.uuid4().hex
-    if not client.set(key, token, nx=True, ex=INDEX_LOCK_TTL_SECONDS):
-        busy = RepositoryIndexBusy(f"repository {repository_id} is being indexed")
+    try:
+        return _index_locked(repository_id, commit_sha, root)
+    except RepositoryIndexBusy as busy:
         # Under a worker this schedules a retry (raising celery's Retry);
         # called directly it re-raises ``busy``.
         raise index_repository_task.retry(
@@ -334,15 +364,219 @@ def index_repository_task(repository_id: int, commit_sha: str, clone_path: str) 
             countdown=LOCK_RETRY_COUNTDOWN_SECONDS,
             max_retries=LOCK_MAX_RETRIES,
         )
+
+
+# --------------------------------------------------------------------------
+# When a repository is indexed: when one of its runs starts (round 18)
+# --------------------------------------------------------------------------
+#
+# A task_prerun handler sees every agent run start in its worker (this
+# module is in celery_app's include list, so every worker loads it) and,
+# with RAG_INDEXING_ENABLED, enqueues ensure_repository_indexed_task on the
+# maintenance queue. That task compares the default branch's head with the
+# indexed commit and indexes a fresh shallow clone when they differ. The
+# run's own clone is not used: maintenance workers do not share the agent
+# workers' workspace, and later runs move that clone while indexing reads it.
+#
+# Trade-offs: the run that triggered indexing does not wait for it (its
+# prompts use whatever is indexed already, or nothing); the default branch
+# is what gets indexed, so pull request heads are not.
+
+RUN_TASK_NAME = "tasks.run_agent_loop_task"
+# run_agent_loop_task's positional order (main.py /start sends positional
+# args): run_id, repo_name, org_id, user_id, repository_id, ...
+_RUN_REPOSITORY_ID_ARG = 4
+# At most one check per repository in this window, however many runs start.
+REQUEST_DEDUP_SECONDS = 600
+CLONE_TIMEOUT_SECONDS = 600
+LS_REMOTE_TIMEOUT_SECONDS = 60
+_FULL_NAME_RE = re.compile(
+    r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$"
+)
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$")
+
+
+def _request_key(repository_id) -> str:
+    return f"automaintainer:rag-index-requested:{repository_id}"
+
+
+def _run_repository_id(args, kwargs):
+    value = (kwargs or {}).get("repository_id")
+    if value is None and args and len(args) > _RUN_REPOSITORY_ID_ARG:
+        value = args[_RUN_REPOSITORY_ID_ARG]
+    if isinstance(value, bool):
+        return None
     try:
-        return index_repository(
-            _supabase(),
-            _embedder(),
-            repository_id=repository_id,
-            commit_sha=commit_sha,
-            clone_path=root,
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def request_index(repository_id: int) -> bool:
+    """Enqueue an index check of ``repository_id`` unless one was requested
+    in the last REQUEST_DEDUP_SECONDS; True when one was enqueued. Never
+    raises: a broker or Redis failure is logged (by type) and the run goes
+    on."""
+    key = _request_key(repository_id)
+    token = uuid.uuid4().hex
+    client = None
+    try:
+        client = _redis()
+        if not client.set(key, token, nx=True, ex=REQUEST_DEDUP_SECONDS):
+            return False
+        ensure_repository_indexed_task.apply_async(args=[repository_id])
+        return True
+    except Exception as e:
+        logger.warning(
+            "could not request a rag index check of repository %s (%s)",
+            repository_id,
+            type(e).__name__,
         )
+        if client is not None:
+            try:
+                client.eval(_RELEASE_SCRIPT, 1, key, token)
+            except Exception:  # pragma: no cover - Redis itself is down
+                pass
+        return False
+
+
+def _on_task_prerun(sender=None, task_id=None, task=None, args=None, kwargs=None, **_):
+    """task_prerun: an agent run of a repository is starting."""
+    if getattr(task, "name", None) != RUN_TASK_NAME or not rag_indexing_enabled():
+        return
+    repository_id = _run_repository_id(args, kwargs)
+    if repository_id is not None:
+        request_index(repository_id)
+
+
+try:
+    from celery.signals import task_prerun
+
+    task_prerun.connect(_on_task_prerun, weak=False)
+except ImportError:  # pragma: no cover - celery is in the server extra
+    pass
+
+
+def _repository(sb, repository_id: int) -> dict | None:
+    rows = (
+        sb.table("repositories")
+        .select("id, org_id, full_name, github_installation_id, default_branch")
+        .eq("id", repository_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
+def _indexed_commit(sb, repository_id: int, org_id: str) -> str | None:
+    """The commit indexed for the repository under its current org."""
+    rows = (
+        sb.table(TABLE)
+        .select("commit_sha")
+        .eq("repository_id", repository_id)
+        .eq("org_id", org_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0]["commit_sha"] if rows else None
+
+
+def _credentials(installation_id, *, purpose: str, repository: str):
+    from automaintainer._runtime.github_app import credentials_for_installation
+
+    return credentials_for_installation(
+        installation_id, purpose=purpose, repository=repository
+    )
+
+
+def _git_env(token) -> dict:
+    from automaintainer._runtime.workspace import git_auth_env
+
+    return {**git_auth_env(token), "GIT_LFS_SKIP_SMUDGE": "1"}
+
+
+def _ls_remote_head(url: str, branch: str, token) -> str:
+    """The commit ``branch`` points to on the remote (one HTTPS round trip)."""
+    out = subprocess.run(  # nosec B603 B607 - fixed argv, no shell
+        ["git", "ls-remote", "--exit-code", "--", url, f"refs/heads/{branch}"],
+        env=_git_env(token),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=LS_REMOTE_TIMEOUT_SECONDS,
+        check=True,
+    ).stdout
+    return out.split()[0].lower() if out.strip() else ""
+
+
+def _shallow_clone(url: str, branch: str, token, dest: Path) -> Path:
+    subprocess.run(  # nosec B603 B607 - fixed argv, no shell
+        ["git", "clone", "--quiet", "--depth", "1", "--single-branch", "--no-tags"]
+        + ["--branch", branch, "--", url, str(dest)],
+        env=_git_env(token),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=CLONE_TIMEOUT_SECONDS,
+        check=True,
+    )
+    return dest
+
+
+def ensure_repository_indexed(repository_id: int) -> dict:
+    """Index the default branch's head of ``repository_id`` unless the index
+    already holds it; a summary (``fresh``, ``busy``, ``unknown`` or the
+    :func:`index_repository` result)."""
+    from automaintainer._runtime.workspace import github_remote_url
+
+    sb = _supabase()
+    repo = _repository(sb, repository_id)
+    if repo is None:
+        return {"status": "unknown", "repository_id": repository_id}
+    full_name = repo.get("full_name") or ""
+    branch = repo.get("default_branch") or "main"  # the column's default
+    if not _FULL_NAME_RE.match(full_name) or ".." in full_name:
+        raise ValueError(f"repository {repository_id} has an unusable name")
+    if not _BRANCH_RE.match(branch) or ".." in branch or "//" in branch:
+        raise ValueError(f"repository {repository_id} has an unusable default branch")
+    creds = _credentials(
+        repo.get("github_installation_id"),
+        purpose=f"rag index of {full_name}",
+        repository=full_name,
+    )
+    token = creds.token()
+    url = github_remote_url(full_name)
+    head = _ls_remote_head(url, branch, token)
+    if head and _indexed_commit(sb, repository_id, repo["org_id"]) == head:
+        return {"status": "fresh", "repository_id": repository_id, "commit_sha": head}
+
+    workdir = tempfile.mkdtemp(prefix="automaintainer-rag-")
+    try:
+        root = _shallow_clone(url, branch, token, Path(workdir) / "repo")
+        # The branch may have moved since ls-remote: index what was cloned.
+        cloned = _checkout_head(root)
+        try:
+            return _index_locked(repository_id, cloned, root)
+        except RepositoryIndexBusy:
+            # Another index run of this repository is in progress; the next
+            # run start checks again.
+            return {"status": "busy", "repository_id": repository_id}
     finally:
-        # Compare-and-delete: never free a lock that expired and was taken
-        # by another run meanwhile.
-        client.eval(_RELEASE_SCRIPT, 1, key, token)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@shared_task(
+    name="rag_tasks.ensure_repository_indexed_task",
+    queue="maintenance",
+    autoretry_for=(ConnectionError, TimeoutError),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ensure_repository_indexed_task(repository_id: int) -> dict:
+    """Celery entry point: :func:`ensure_repository_indexed` behind
+    RAG_INDEXING_ENABLED."""
+    if not rag_indexing_enabled():
+        return {"status": "disabled"}
+    return ensure_repository_indexed(int(repository_id))
