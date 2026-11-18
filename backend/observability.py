@@ -87,7 +87,15 @@ try:
         OTLPMetricExporter,
     )
     from opentelemetry.exporter.prometheus import PrometheusMetricReader
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    # The FastAPI instrumentation imports FastAPI and Starlette, which the
+    # Celery workers (celery_app and tasks import this module) must not load
+    # (test_worker_probe.py). instrument_fastapi imports it instead; the spec
+    # check keeps a missing package disabling telemetry here, as before.
+    import importlib.util as _importlib_util
+
+    if _importlib_util.find_spec("opentelemetry.instrumentation.fastapi") is None:
+        raise ImportError("opentelemetry-instrumentation-fastapi is not installed")
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
@@ -567,6 +575,8 @@ def instrument_fastapi(app):
         return
 
     try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
         FastAPIInstrumentor.instrument_app(
             app,
             tracer_provider=_tracer_provider,
