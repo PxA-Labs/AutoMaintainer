@@ -208,16 +208,19 @@ and has the same guarantees, RLS and read access as verification rows:
 
 ### Effect on existing deployments
 
-- With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the shipped image
-  today, in any environment), every agent PR gets an `error` verification status (a red X on the
-  PR), whatever the merge policy, and `MERGE_POLICY=ci` no longer merges.
-  Configure a sandbox backend, or accept the risk with `VERIFY_ALLOW_LOCAL=true`.
+- With no `SANDBOX_BACKEND` and no `VERIFY_ALLOW_LOCAL=true` (the default in
+  every environment), every agent PR gets an `error` verification status (a
+  red X on the PR), whatever the merge policy, and `MERGE_POLICY=ci` does not
+  merge. Configure a [sandbox backend](#sandbox-backends), or accept the risk
+  with `VERIFY_ALLOW_LOCAL=true`. The Google Cloud Terraform deployment
+  configures the Cloud Run Jobs backend on the worker.
 - A `MERGE_POLICY=ci` deployment whose GitHub App lacks **Commit statuses:
   write** now stops every run with `VERIFICATION_STATUS_FAILED`.
 - `MERGE_POLICY=ci` with `VERIFY_CHANGES=false` never merges (the result is
   `skipped`).
-- These settings are also listed in the environment reference in
-  docs/DEPLOYMENT.md.
+- These settings are also listed in the
+  [environment reference](DEPLOYMENT.md#environment-variables) in
+  DEPLOYMENT.md.
 
 ## Configuration
 
@@ -350,14 +353,32 @@ prompt, the planted issue is left untouched and only the legitimate change is
 committed. The `.github/workflows/redteam.yml` workflow runs them on
 every pull request that touches `backend/`.
 
-## Docker sandbox backend
+## Sandbox backends
 
-`runners/docker_sandbox.py` is the shipped production backend. Each
+`SANDBOX_BACKEND` selects where the test command runs. It is unset by
+default, so verification reports `error` until a backend is configured or
+local execution is explicitly allowed.
+
+| Backend | Selected by | Isolation | Main limits |
+| --- | --- | --- | --- |
+| Local runner | No `SANDBOX_BACKEND` and `VERIFY_ALLOW_LOCAL=true` (an engine: `runner_type="local"`) | None beyond a scrubbed environment, a scratch `HOME`, a timeout and an output cap | Tests run as the worker's OS user and can read its secrets, files and network. Refused unless opted in, in every environment. The Terraform deployment refuses `VERIFY_ALLOW_LOCAL` in `app_env`. |
+| [Docker](#docker-sandbox-backend) | `SANDBOX_BACKEND=runners.docker_sandbox:create` | One ephemeral container per command: no host mount, `--network=none`, no capabilities, non-root, read-only root filesystem, resource limits; optional gVisor (`SANDBOX_RUNTIME=runsc`) | Access to the Docker daemon is root-equivalent on its host; with `runc` the tests share the host kernel. |
+| [Cloud Run Jobs](#cloud-run-jobs-sandbox-backend) | `SANDBOX_BACKEND=cloud_run_job`. The Google Cloud Terraform deployment sets it on the worker and nowhere else. | One Cloud Run job execution per command, as a service account with no role, in a VPC with no route out except Private Google Access | Test code can still reach Google APIs through the private VIP and so send data out through Cloud Storage. |
+
+Any other `package.module:factory` value loads a custom factory that returns
+a `runners.sandbox.SandboxBackend` ([Server settings](#server-settings)).
+`automaintainer.runners` is the package; `runners` is an alias kept for
+existing settings.
+
+### Docker sandbox backend
+
+`runners/docker_sandbox.py` is the backend for deployments outside Google
+Cloud. Each
 `exec_command` starts one ephemeral container with the `docker` CLI (an
 argument list, never a shell; no Docker SDK dependency), waits for it on the
 host and returns its exit code and output.
 
-### Configuration
+#### Configuration
 
 ```
 SANDBOX_BACKEND=runners.docker_sandbox:create
@@ -384,7 +405,7 @@ zero (docker reads `0` as "unlimited"). The image must provide `/bin/sh` and
 `tar` (the `python` and most distribution images do; distroless images do
 not).
 
-### Deployment
+#### Deployment
 
 The worker needs the `docker` CLI (the shipped image does not include it)
 and access to a daemon. The daemon does **not** need to see the worker's
@@ -410,7 +431,7 @@ reaches the worker's disk, so subordinate uids do not matter. `SANDBOX_USER`
 is never `0`, even though uid 0 in a rootless daemon is unprivileged on the
 host, because the same setting would be real root under a rootful daemon.
 
-### What one run does
+#### What one run does
 
 ```
 pack the working copy into a tar archive (symlinks kept as links, never followed;
@@ -457,7 +478,7 @@ on timeout, error or cancellation: kill the CLI, then docker rm --force <name>
   it. `commit_and_push` raises `NotImplementedError`: verification never
   pushes.
 
-### Threat model
+#### Threat model
 
 Isolated from the tests:
 
@@ -494,7 +515,7 @@ Not isolated:
 - **The change influencing its own tests** (see Limitations): the sandbox
   bounds what the tests can do to the host, not whether they are honest.
 
-### Testing
+#### Testing
 
 `backend/test_docker_sandbox.py` mocks the docker CLI and checks the exact
 argument list (no bind mount), the archive streamed on stdin, the absence of
@@ -503,23 +524,42 @@ output cap and cleanup on errors. `backend/test_docker_sandbox_integration.py`
 runs real containers and is skipped unless Docker can run Linux containers
 and `DOCKER_SANDBOX_TESTS=1`; the `Sandbox Integration` workflow
 (`.github/workflows/sandbox.yml`) runs it on `ubuntu-latest` whenever
-`backend/runners/**` or `backend/verification.py` change: a passing, a
+`backend/automaintainer/runners/**`,
+`backend/automaintainer/_runtime/verification.py`, their alias files
+(`backend/runners/**`, `backend/verification.py`),
+`backend/test_docker_sandbox*.py` or the workflow change: a passing, a
 failing and a hanging repository, and one whose tests try the network and a
 host environment variable. It runs them twice: against the runner's daemon,
 and against a separate Docker-in-Docker daemon reached through
 `DOCKER_HOST=tcp://...`, which shares no filesystem with the worker (the
 remote sandbox host setup).
 
-## Cloud Run Jobs sandbox backend
+### Cloud Run Jobs sandbox backend
 
 `runners/cloud_run_job_sandbox.py` (#158, #527) runs each test command as one
 execution of a Cloud Run job, so untrusted code never runs on the worker VM
 or its network. `infra/terraform/sandbox.tf` creates the job, its network
-and its bucket, and the worker module selects the backend; the owner's steps
-and the live smoke test are in
-[DEPLOYMENT.md, Option D, Sandboxed verification](DEPLOYMENT.md#sandboxed-verification).
+and its bucket, and `infra/terraform/modules/worker` selects the backend on
+the worker container. No other deployment option selects it.
 
-### Configuration
+This section describes the backend and its threat model. The Terraform
+resources, the owner steps and the smoke test are in
+[DEPLOYMENT.md, Option D, Sandboxed verification](DEPLOYMENT.md#sandboxed-verification).
+In outline, after `terraform apply` the owner:
+
+1. points the job at an image that has `python3` and the tests' toolchain
+   (`sandbox_image`; the default sample image has no `python3`, so until this
+   step every verification reports `error`);
+2. runs the smoke test: start latency, isolation probes from inside the job
+   (the worker, Redis and the internet unreachable; the metadata server
+   answering as the sandbox account), and the backend's own round trip from
+   the worker container.
+
+Until the owner runs the smoke test against a real project, start latency,
+cancellation and the signed-URL flow are tested only offline (see Testing
+below). Issue #532 tracks this step.
+
+#### Configuration
 
 ```
 SANDBOX_BACKEND=cloud_run_job
@@ -541,7 +581,7 @@ worker container (`modules/worker`), over `app_env`, so `app_env` cannot
 change or turn them off (fail closed); the start allowance and the output
 cap come from `app_env`.
 
-### What one run does
+#### What one run does
 
 ```
 worker: pack the working copy (symlinks as links), as the Docker backend does
@@ -599,7 +639,7 @@ worker: on timeout, error or cancellation cancel the execution; always delete
   v2, Cloud Storage JSON and IAM Credentials REST APIs with `httpx` and
   application default credentials from `google-auth` (server extra).
 
-### Threat model
+#### Threat model
 
 Isolated from the tests:
 
@@ -643,7 +683,7 @@ Not isolated:
 - **The change influencing its own tests** (see Limitations), as with every
   backend.
 
-### Testing
+#### Testing
 
 `backend/tests/test_cloud_run_job_sandbox.py` runs the Docker backend's cases
 (copy-in, exit codes, output cap, path escapes, timeouts, cancellation) against
