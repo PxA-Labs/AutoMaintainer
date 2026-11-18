@@ -84,11 +84,12 @@ Defaults are in `variables.tf`, `sandbox.tf` and `monitoring.tf`.
 
 ## Optional switches
 
-Every switch below is off by default except `redis_auth_enabled`.
+Every switch below is off by default except `redis_auth_enabled` and
+`enable_iap_ssh`.
 
 | Switch | What it creates or changes |
 |---|---|
-| `cloud_trace_enabled` | Grants the API account `roles/cloudtrace.agent` and sets `OTEL_CLOUD_TRACE_ENABLED=true` on the API. The worker does not export traces |
+| `cloud_trace_enabled` | Grants the API account `roles/cloudtrace.agent` and sets `OTEL_CLOUD_TRACE_ENABLED=true` on the API. The worker gets no trace role, so it should not export traces; a value of `OTEL_CLOUD_TRACE_ENABLED` in `app_env` still reaches it (see [Design notes](#design-notes)) |
 | `cloud_monitoring_enabled` | Sets `OTEL_CLOUD_MONITORING_ENABLED=true` on the API and the worker. The metric writer role, the 5xx alert and the dashboard exist without it |
 | `monitoring_app_alerts_enabled` | Creates the four alert policies on the backend's own metrics (run failure rate, p95 run duration, estimated LLM cost, worker heartbeat). Turn it on only after each metric has been written once |
 | `rag_enabled` | Enables `aiplatform.googleapis.com`, grants the worker account `roles/aiplatform.user`, sets `RAG_INDEXING_ENABLED=true`, `RAG_RETRIEVAL_ENABLED=true` and `GOOGLE_CLOUD_LOCATION=<rag_location>`, and changes the `IMAGE_EXTRAS` entry of `github_repository_variables` to `server,rag` |
@@ -99,6 +100,18 @@ Every switch below is off by default except `redis_auth_enabled`.
 The verification sandbox in `sandbox.tf` has no switch: it is always
 created, and the worker always uses it. Until `sandbox_image` points at an
 image with `python3`, every verification reports an error (fail closed).
+
+## Monitoring
+
+`monitoring.tf` always creates the 5xx alert policy and the dashboard.
+`cloud_monitoring_enabled` turns on the metrics export, and
+`monitoring_app_alerts_enabled` adds the four alert policies on the
+backend's own metrics. Cloud Monitoring refuses a policy on a metric that
+has never been written, so enable the metrics first, wait until each metric
+has been recorded, then enable the app alerts. The ordered steps are in
+[DEPLOYMENT.md, Metrics and alerts](../../docs/DEPLOYMENT.md#metrics-and-alerts),
+and the metrics, policies and dashboard are described in
+[OBSERVABILITY.md](../../docs/OBSERVABILITY.md#cloud-monitoring-alerts-and-dashboard).
 
 ## Design notes
 
@@ -131,8 +144,12 @@ those cannot be changed or turned off from `app_env`.
 `RAG_INDEXING_ENABLED`, `RAG_RETRIEVAL_ENABLED` and `GOOGLE_CLOUD_LOCATION`
 (use `rag_enabled` and `rag_location`); any name that is also in
 `var.secrets`; and multi-line values (the worker passes `app_env` through a
-`docker run` env file). `GOOGLE_CLOUD_PROJECT` and `OTEL_CLOUD_TRACE_ENABLED`
-are not refused but are overridden by Terraform.
+`docker run` env file). `GOOGLE_CLOUD_PROJECT` is not refused, but
+Terraform overrides it on both services. `OTEL_CLOUD_TRACE_ENABLED` is not
+refused either, and Terraform overrides it on the API only: a value set in
+`app_env` reaches the worker unchanged. Do not set it there. The worker then
+tries to export to Cloud Trace without `roles/cloudtrace.agent`, which only
+the API account receives (`iam.tf`).
 
 **Worker VM.** Container-Optimized OS, shielded VM, OS Login, no public IP,
 outbound through Cloud NAT. cloud-init, re-applied on every boot because
@@ -214,8 +231,8 @@ One service account per role, each with only what it uses.
 
 | Account | Roles |
 |---|---|
-| `<prefix>-api` | `secretmanager.secretAccessor` on each secret with `api = true` and on `redis-url`; `monitoring.metricWriter`; `cloudtrace.agent` with `cloud_trace_enabled` |
-| `<prefix>-worker` | `secretmanager.secretAccessor` on each secret with `worker = true` and on `redis-url`; `logging.logWriter`; `monitoring.metricWriter`; `artifactregistry.reader` on the one repository; `aiplatform.user` with `rag_enabled`; the custom `automaintainerSandboxRunner` role on the sandbox job; `storage.objectUser` on the sandbox bucket; `iam.serviceAccountTokenCreator` on itself (to sign the sandbox URLs) |
+| `<prefix>-api` | `secretmanager.secretAccessor` on each secret with `api = true` and, with `redis_auth_enabled`, on `redis-url`; `monitoring.metricWriter`; `cloudtrace.agent` with `cloud_trace_enabled` |
+| `<prefix>-worker` | `secretmanager.secretAccessor` on each secret with `worker = true` and, with `redis_auth_enabled`, on `redis-url`; `logging.logWriter`; `monitoring.metricWriter`; `artifactregistry.reader` on the one repository; `aiplatform.user` with `rag_enabled`; the custom `automaintainerSandboxRunner` role on the sandbox job; `storage.objectUser` on the sandbox bucket; `iam.serviceAccountTokenCreator` on itself (to sign the sandbox URLs) |
 | `<prefix>-deployer` | `artifactregistry.writer` on the one repository; `run.developer` on the one Cloud Run service; `iam.serviceAccountUser` on the `api` and `worker` accounts; the custom `automaintainerWorkerRoller` role (`compute.instances.get`, `compute.instances.setMetadata`) on the one VM; the custom `automaintainerZoneOperationReader` role (`compute.zoneOperations.get`) on the project |
 | `<prefix>-sandbox` | none |
 

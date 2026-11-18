@@ -415,8 +415,9 @@ roles of every account are listed in the Terraform README,
 
 ### Defaults and optional features
 
-The configuration starts with every new feature off. Each optional feature
-is described below the runbook, with how to turn it on and what it costs.
+Every opt-in feature from #530-#541 starts off; the table lists what is on
+by default. Each optional feature is described below the runbook, with how
+to turn it on and what it costs.
 
 | Feature | Default | Controlled by |
 |---|---|---|
@@ -887,7 +888,9 @@ the API's service account `roles/cloudtrace.agent` and sets
 `OTEL_CLOUD_TRACE_ENABLED=true` on the API, which adds a Cloud Trace span
 exporter next to the console and OTLP exporters (`backend/observability.py`).
 `GOOGLE_CLOUD_PROJECT` (set by Terraform) selects the project. The worker
-does not export traces. A failure to set up the exporter (no credentials,
+does not export traces as long as `app_env` does not set
+`OTEL_CLOUD_TRACE_ENABLED`: Terraform overrides that variable on the API
+only, and the worker account has no `roles/cloudtrace.agent`. A failure to set up the exporter (no credentials,
 package missing) is logged and does not stop the API. The spans are listed
 in [OBSERVABILITY.md, Traces](OBSERVABILITY.md#traces).
 
@@ -1036,15 +1039,18 @@ head before deciding; the trust gate and merge policy are unchanged. Design:
 
 Terraform has no switch for it. To turn it on:
 
-1. Compare the two reviewers first
+1. Run the ADK spike (`python -m evals.spike_adk_groq` from `backend/`),
+   the go/no-go check on Groq tool calling, and record the result. The
+   design note describes it.
+2. Compare the two reviewers
    ([EVALS.md, Comparing Reviewer backends](EVALS.md#comparing-reviewer-backends-525)).
    Keep `langgraph` unless the ADK Reviewer's false-approval rate is no
    worse.
-2. Add `adk` to the repository variable `IMAGE_EXTRAS` (for example
+3. Add `adk` to the repository variable `IMAGE_EXTRAS` (for example
    `server,adk`, or `server,rag,adk` with code retrieval) and deploy. The
    Terraform output does not know about this extra, so it keeps showing
    `server` or `server,rag`.
-3. Add `REVIEWER_BACKEND = "adk"` to `app_env`, apply, and reset the worker
+4. Add `REVIEWER_BACKEND = "adk"` to `app_env`, apply, and reset the worker
    VM.
 
 Cost: the review uses more model calls than the single-shot prompt, within
@@ -1380,7 +1386,7 @@ Exporters and metrics: [OBSERVABILITY.md](OBSERVABILITY.md).
 | `OTEL_CLOUD_MONITORING_ENABLED` | API, worker | from `cloud_monitoring_enabled` |
 | `OTEL_CLOUD_TRACE_ENABLED` | API | from `cloud_trace_enabled` |
 | `RAG_INDEXING_ENABLED`, `RAG_RETRIEVAL_ENABLED`, `GOOGLE_CLOUD_LOCATION` | API, worker | only with `rag_enabled` (`true`, `true`, `rag_location`) |
-| `REDIS_URL` | API, worker | from the `redis-url` secret with `redis_auth_enabled`, otherwise the plain broker URL |
+| `REDIS_URL` | API, worker | worker: from the `redis-url` secret with `redis_auth_enabled`; API: from that secret with `redis_auth_enabled` once `mount_secrets = true`; otherwise the plain broker URL |
 | `SANDBOX_BACKEND`, `CLOUD_RUN_SANDBOX_PROJECT`, `_REGION`, `_JOB`, `_BUCKET`, `_SIGNER` | worker | `cloud_run_job` and the sandbox job and bucket |
 | `CELERY_QUEUES`, `CELERY_CONCURRENCY` | worker VM | all four queues, `worker_concurrency` |
 | `AUTOMAINTAINER_SECRETS` | worker | names of the secrets `secrets_exec.py` reads, not their values |
@@ -1409,7 +1415,7 @@ never the service key), and `NEXT_PUBLIC_BACKEND_URL`.
 - [ ] Never bake secrets into the image. `.dockerignore` excludes `**/.env`. Pass secrets at runtime only.
 - [ ] Verification never runs on a host that holds secrets: `VERIFY_ALLOW_LOCAL` is unset, and `SANDBOX_BACKEND` points at a sandbox (on Google Cloud, the Cloud Run job, after its smoke test passed).
 - [ ] Google Cloud: the Terraform state bucket is readable by the owner only, `roles/editor` is removed from the default compute service account, a tag ruleset protects `v*`, and the `production` environment has required reviewers.
-- [ ] Google Cloud: `redis_auth_enabled` stays `true`, and the `redis-url` password has at least 32 characters.
+- [ ] Google Cloud: `redis_auth_enabled` stays `true`. In `vm` mode, the `redis-url` password has at least 32 characters (`run-redis.sh` refuses a shorter one); in `memorystore` mode Google generates the AUTH string.
 - [ ] Before turning on code retrieval, confirm the owner may send the repositories' code to Vertex AI ([RAG.md, Data egress](RAG.md#data-egress)).
 
 ## What was and was not verified
@@ -1495,7 +1501,10 @@ not match `release.yml`'s `v*.*.*`, so they create no GitHub release.
   `REVIEWER_BACKEND` defaults to `langgraph`, the `RAG_*` and `OTEL_CLOUD_*`
   switches are unset, and only the Terraform worker sets
   `SANDBOX_BACKEND=cloud_run_job`. Docker Compose, Render and
-  single-container deployments see no change.
+  single-container deployments see no change unless an OTLP endpoint is
+  configured: since #540 the Celery worker processes install the
+  observability hooks, so a deployment that sets
+  `OTEL_EXPORTER_OTLP_ENDPOINT` now also sends worker metrics over OTLP.
 - **SDK distribution name and `.env` loading (#524).** The engine package is now
   distributed as `automaintainer` (was `automaintainer-backend`; the import name
   is unchanged), so a wheel built locally is `automaintainer-<version>-py3-none-any.whl`.
