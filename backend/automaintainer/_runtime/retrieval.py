@@ -29,6 +29,7 @@ Nothing here is called by the agents yet. See docs/RAG.md.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import re
@@ -39,6 +40,8 @@ from typing import Callable, Iterable, Protocol, Sequence, runtime_checkable
 
 from .ast_indexer import CodebaseMapper, TreeSitterParser
 from .change_limits import DEFAULT_DENYLIST, path_matches
+
+logger = logging.getLogger(__name__)
 
 EMBEDDING_DIMENSIONS = 768  # text-embedding-005; the code_chunks column width
 DEFAULT_EMBEDDING_MODEL = "text-embedding-005"
@@ -599,6 +602,49 @@ class VertexEmbedder:
 # --------------------------------------------------------------------------
 
 MAX_K = 50  # match_code_chunks clamps to the same bound
+# Chunks a prompt gets when retrieval is on (config.DEFAULT_RAG_TOP_K).
+DEFAULT_TOP_K = 8
+
+# The runtime's switches without an engine (an engine's config has
+# rag_retrieval_enabled and rag_top_k). Read at call time; like the
+# runtime's other settings, a malformed value is logged and the default kept.
+RAG_RETRIEVAL_ENV = "RAG_RETRIEVAL_ENABLED"
+RAG_TOP_K_ENV = "RAG_TOP_K"
+_FLAG_TRUE = frozenset({"1", "true", "yes", "on"})
+_FLAG_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def retrieval_enabled_from_env() -> bool:
+    """RAG_RETRIEVAL_ENABLED: on for 1/true/yes/on, else off (the default)."""
+    raw = (os.getenv(RAG_RETRIEVAL_ENV) or "").strip().lower()
+    if raw in _FLAG_TRUE:
+        return True
+    if raw and raw not in _FLAG_FALSE:
+        logger.warning(
+            "Unknown %s value %r; retrieval stays off", RAG_RETRIEVAL_ENV, raw
+        )
+    return False
+
+
+def top_k_from_env() -> int:
+    """RAG_TOP_K if it is an integer in 1..MAX_K, else DEFAULT_TOP_K."""
+    raw = (os.getenv(RAG_TOP_K_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_TOP_K
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= MAX_K:
+        logger.warning(
+            "%s=%r is not an integer in 1..%d; using %d",
+            RAG_TOP_K_ENV,
+            raw,
+            MAX_K,
+            DEFAULT_TOP_K,
+        )
+        return DEFAULT_TOP_K
+    return value
 
 
 @dataclass(frozen=True)
@@ -609,6 +655,26 @@ class RetrievedChunk:
     end_line: int
     content: str
     similarity: float
+
+
+@dataclass(frozen=True)
+class RetrievalScope:
+    """What a run asks a retriever factory for.
+
+    ``repository_id`` is the run's repository (``repositories.id``); the
+    organization is never taken from the run but from that row (or decided
+    by an engine's own factory). ``commit_sha`` pins the index to one commit
+    (the ADK Reviewer's PR head): a factory returns None unless the index
+    holds exactly that commit. None accepts whatever commit is indexed.
+    """
+
+    repository_id: int
+    commit_sha: str | None = None
+
+
+# An engine's injected retriever factory: called once per prompt with the
+# scope, returns a Retriever bound to it or None (nothing indexed).
+RetrieverFactory = Callable[[RetrievalScope], "Retriever | None"]
 
 
 @runtime_checkable
@@ -637,6 +703,28 @@ class PgvectorRetriever:
         self._embedder = embedder
         self.org_id = str(org_id)
         self.repository_id = int(repository_id)
+
+    def indexed_commit(self) -> str | None:
+        """The commit the index holds for this scope, or None when empty.
+
+        The indexing task keeps one commit per repository (it deletes the
+        others after writing), so any row tells. Between its write and its
+        delete two commits coexist briefly; then this answers either.
+        """
+        rows = (
+            self._client.table("code_chunks")
+            .select("commit_sha")
+            .eq("org_id", self.org_id)
+            .eq("repository_id", self.repository_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0]["commit_sha"] if rows else None
+
+    def holds_commit(self, commit_sha: str) -> bool:
+        """Whether the index is at ``commit_sha`` (stored lower-case)."""
+        return bool(commit_sha) and self.indexed_commit() == commit_sha.lower()
 
     def retrieve(self, query: str, k: int = 5) -> list[RetrievedChunk]:
         k = min(int(k), MAX_K)
@@ -711,10 +799,31 @@ class InMemoryRetriever:
 DEFAULT_MAX_CHARS_PER_CHUNK = MAX_CHUNK_CHARS
 
 
+# The smallest cut chunk worth showing; below it the chunk is left out.
+_MIN_CUT_BODY_CHARS = 200
+
+
+def _fitted_block(untrusted_block, label: str, body: str, room: int) -> str | None:
+    """``untrusted_block(label, body)`` cut to at most ``room`` characters.
+
+    The body is cut before wrapping (escaping only lengthens it), then the
+    wrapped length is checked again; None when not even a useful prefix fits.
+    """
+    overhead = len(untrusted_block(label, "")) + len(TRUNCATED_MARKER)
+    cut = room - overhead
+    while cut >= _MIN_CUT_BODY_CHARS:
+        block = untrusted_block(label, body[:cut] + TRUNCATED_MARKER)
+        if len(block) <= room:
+            return block
+        cut -= len(block) - room
+    return None
+
+
 def format_untrusted_chunks(
     chunks: Sequence[RetrievedChunk],
     *,
     max_chars_per_chunk: int = DEFAULT_MAX_CHARS_PER_CHUNK,
+    max_total_chars: int | None = None,
 ) -> str:
     """Retrieved chunks as prompt text: the notice, then one block per chunk.
 
@@ -723,6 +832,10 @@ def format_untrusted_chunks(
     closing tags in the body and strips the label to safe characters, so
     nothing a chunk contains can end its block early. The symbol is written
     inside the body, not the label, for the same reason.
+
+    ``max_total_chars`` caps the whole text, notice included: chunks are
+    taken best first, the first one that does not fit is cut (when a useful
+    part of it fits) and the rest are left out. Every block stays closed.
     """
     if not chunks:
         return ""
@@ -730,7 +843,9 @@ def format_untrusted_chunks(
     # chunker and embedders (and the indexing task) do not need.
     from .agents import UNTRUSTED_DATA_NOTICE, untrusted_block
 
-    blocks = []
+    head = UNTRUSTED_DATA_NOTICE + "\n\n"
+    budget = None if max_total_chars is None else max_total_chars - len(head)
+    blocks: list[str] = []
     for c in chunks:
         label = f"{c.path}#L{c.start_line}-L{c.end_line}"
         body = c.content
@@ -738,5 +853,16 @@ def format_untrusted_chunks(
             body = body[:max_chars_per_chunk] + "\n...[truncated]"
         if c.symbol:
             body = f"symbol: {c.symbol}\n{body}"
-        blocks.append(untrusted_block(label, body))
-    return UNTRUSTED_DATA_NOTICE + "\n\n" + "\n\n".join(blocks)
+        block = untrusted_block(label, body)
+        if budget is not None:
+            room = budget - (2 if blocks else 0)  # the "\n\n" separator
+            if len(block) > room:
+                cut = _fitted_block(untrusted_block, label, body, room)
+                if cut is not None:
+                    blocks.append(cut)
+                break
+            budget = room - len(block)
+        blocks.append(block)
+    if not blocks:
+        return ""
+    return head + "\n\n".join(blocks)
