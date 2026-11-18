@@ -729,6 +729,8 @@ NOT_COVERED = {
     "OTEL_EXPORTER_OTLP_ENDPOINT": "observability exporter of the API process",
     "OTEL_CLOUD_TRACE_ENABLED": "Cloud Trace exporter switch of the API process",
     "GOOGLE_CLOUD_PROJECT": "project the Cloud Trace exporter writes to",
+    "OTEL_CLOUD_MONITORING_ENABLED": "Cloud Monitoring metrics exporter switch",
+    "LLM_PRICES_JSON": "price table of the estimated LLM cost metric",
     # Retrieval index (#526): the indexing task and its embedder, not runs.
     "GOOGLE_CLOUD_LOCATION": "Vertex AI region of the RAG embedder (retrieval.py)",
     "RAG_INDEXING_ENABLED": "switch of the RAG indexing task (rag_tasks.py)",

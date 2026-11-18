@@ -550,6 +550,56 @@ VM) after rotating a key.
 A failure to set up the exporter (no credentials, package missing) is logged
 and does not stop the API. Metrics are not sent to Google.
 
+### Metrics and alerts
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OTEL_CLOUD_MONITORING_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a reader that exports the backend's OpenTelemetry metrics to Cloud Monitoring every 60 seconds, next to Prometheus and OTLP (`backend/observability.py`). Credentials and project as for Cloud Trace; the account needs `roles/monitoring.metricWriter` (Terraform grants it to the API and the worker). A missing package or missing credentials is logged once and the process keeps running. |
+| `LLM_PRICES_JSON` | unset | Overrides or extends the built-in LLM price table, e.g. `{"llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79}}` (USD per million tokens). An invalid value is logged once and ignored. |
+
+Set the switch for both services through `app_env` in `terraform.tfvars`
+(`app_env = { OTEL_CLOUD_MONITORING_ENABLED = "true", ... }`): Terraform
+passes `app_env` to Cloud Run and the worker VM. Each metric becomes the
+metric type `workload.googleapis.com/<name>` on the `generic_task` resource
+(`job` is `automaintainer-backend` or `automaintainer-worker`, one `task_id`
+per process).
+
+What is exported, all with the bounded labels of the catalogue in
+`observability.py`: runs finished by mode and final status
+(`agent_runs_total`), run duration by final status
+(`agent_run_duration_seconds`, buckets up to an hour), LLM tokens by model,
+phase and kind (`llm_phase_tokens_total`), the **estimated** LLM cost by
+model and phase (`llm_estimated_cost_usd_total`), and one
+`celery_worker_heartbeat` series per live worker process. The cost is an
+estimate: Groq's earlier public list prices, which could not be confirmed
+(the model page shows "Contact sales"); models missing from the table add
+tokens but no cost. Set `LLM_PRICES_JSON` to your contract prices before
+quoting it.
+
+`terraform apply` creates (`infra/terraform/monitoring.tf`):
+
+- an e-mail notification channel for `monitoring_alert_email`. The variable
+  has no default: set an address, or `null` for no channel;
+- an alert on the API's 5xx ratio (Cloud Run's own `request_count`, above
+  `alert_api_5xx_ratio` for 5 minutes);
+- when `monitoring_app_alerts_enabled = true`, alerts on the run failure
+  rate over the last hour, the p95 run duration over the last hour, the
+  estimated LLM cost over the last 24 hours, and the absence of any worker
+  heartbeat (thresholds: the `alert_*` variables). Cloud Monitoring refuses a
+  policy on a metric type that has never been written, so turn this on only
+  after the switch has been on for a run or two (Metrics Explorer lists the
+  `workload.googleapis.com` types);
+- a dashboard with the same charts (`terraform output monitoring_dashboard_url`).
+
+Not yet wired in this change: the worker exports metrics only once
+`celery_app.py` calls `observability.install_celery_worker_hooks()` at
+import, and the run and token metrics stay empty until the engine calls
+`record_agent_run_complete` and `record_llm_tokens(model, tokens,
+phase=..., kind="input" | "output")`. Until then only the API's HTTP
+metrics and the 5xx alert carry data. With few runs a single failure can
+cross the failure-rate threshold, and at low traffic a few 5xx answers can
+cross the 5xx ratio.
+
 ### Estimated monthly cost
 
 Approximate us-central1 list prices for the default settings, in USD. They
