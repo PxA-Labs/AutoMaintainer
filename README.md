@@ -18,11 +18,18 @@ agents pick or receive an issue, decide whether to build it, change one file,
 open a pull request and review it. By default the agents never merge their
 own pull requests; a human does.
 
-It is built with **LangGraph**, **FastAPI**, **Celery + Redis**, **Supabase**
-and **Next.js**. The model is **Llama 3.3 70B on Groq**; on the main
-(GitNexus tool) path a failed 70B call silently falls back to **Llama 3.1 8B**,
-so reviews and code may come from the smaller model. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for how the pieces fit together.
+The pipeline is a LangGraph graph. It holds all authority: run state,
+cancellation, the retry loop, the trust gate, the merge policy and every
+GitHub write. The same engine runs behind the FastAPI server and Celery
+workers, and on its own as the `automaintainer` Python package
+(`AutoMaintainerEngine`). Optional parts, such as the ADK Reviewer, code
+retrieval, the sandbox backends and Cloud Trace and Cloud Monitoring export,
+are off by default.
+
+The model is **Llama 3.3 70B on Groq**. On the main (GitNexus tool) path, a
+failed 70B call falls back to **Llama 3.1 8B** without notice, so reviews and
+code may come from the smaller model. See [ARCHITECTURE.md](./ARCHITECTURE.md)
+for how the pieces fit together.
 
 ---
 
@@ -35,10 +42,12 @@ so reviews and code may come from the smaller model. See
 >   with `supabase db push` or `uv run --project backend python scripts/db-migrate up`, or paste the
 >   generated [`supabase_schema.sql`](./supabase_schema.sql) into the
 >   **Supabase SQL Editor**. They create `organizations`,
->   `organization_members`, `github_installations`, `repositories`, `runs`,
->   `logs`, `usage_events`, `webhook_events` and `ide_sessions`, with RLS
->   policies. All of them can be re-run, and upgrades keep your data
->   ([Database setup and upgrades](./docs/DEPLOYMENT.md#database)).
+>   `organization_members`, `github_installations`, `repositories`,
+>   `repository_merge_policy_changes`, `runs`, `logs`, `usage_events`,
+>   `webhook_events`, `ide_sessions`, `verification_results`,
+>   `merge_decisions` and `code_chunks` (which needs the `vector`
+>   extension), with RLS policies. All of them can be re-run, and upgrades
+>   keep your data ([Database setup and upgrades](./docs/DEPLOYMENT.md#database)).
 > * Put your credentials in `backend/.env` and `dashboard/.env.local`.
 >
 > If Supabase is unreachable or paused, the dashboard shows a warning banner,
@@ -47,23 +56,35 @@ so reviews and code may come from the smaller model. See
 ---
 
 ## Features
-Each item names the code it is based on.
+Each item names the code it is based on. Items marked *opt-in* are off
+unless you turn them on.
 
-- **Five-agent LangGraph pipeline** (`backend/agents.py`): Architect, Visionary, Reviewer/PM, Implementer and Maintainer. If the Maintainer rejects a change, the Implementer revises it, up to three Implementer attempts in total.
-- **Two modes**: autonomous (the Architect proposes the work) or targeted (`target_issue`: work on an existing issue). The issue must name the file to change.
-- **Works through GitHub**: issues, issue comments, branches, commits, pull requests and review comments, using the repository's GitHub App installation token (`backend/github_app.py`).
-- **Human-gated merging**: `MERGE_POLICY=human` (the default) never merges. `ci` merges only when the checks on the PR head pass (see the merge-policy table in [ARCHITECTURE.md](ARCHITECTURE.md#merge-policy); no checks at all counts as failing). `ci` also requires the change to pass the repository's own tests (the `automaintainer/verification` status; see [docs/VERIFICATION.md](./docs/VERIFICATION.md)). The PM and Maintainer return JSON decisions validated against a schema; anything that does not validate after one retry counts as rejection.
+**Pipeline**
+- **Five-agent LangGraph pipeline** (`backend/automaintainer/_runtime/agents.py`): Architect, Visionary, Reviewer/PM, Implementer and Maintainer. If the Maintainer rejects a change, the Implementer revises it, up to three Implementer attempts in total.
+- **Two modes**: autonomous (the Architect proposes the work) or targeted (`target_issue`: work on an existing issue). The issue must name the file to change. A targeted run starts from the dashboard or the API, or, when `AUTOMAINTAINER_TRIGGER_LABEL` is set, when that label is added to an open issue (`backend/webhook_processor.py`).
+- **Works through GitHub**: issues, issue comments, branches, commits, pull requests and review comments, using the repository's GitHub App installation token (`backend/automaintainer/_runtime/github_app.py`).
+- **Human-gated merging**: `MERGE_POLICY=human` (the default) never merges. `ci` merges only when the repository's own tests pass (the `automaintainer/verification` status; see [docs/VERIFICATION.md](./docs/VERIFICATION.md)) and every other check on the PR head passes; no checks at all counts as failing. Under `ci` and `auto`, a merge also needs a trusted trigger: every GitHub user who caused the run, and the author of a targeted issue, must have write access to the repository (`backend/automaintainer/_runtime/trust.py`). See the merge-policy table in [ARCHITECTURE.md](./ARCHITECTURE.md#merge-policy).
+- **Structured decisions**: the PM and Maintainer return JSON validated against a schema; anything that does not validate after one retry counts as a rejection.
 - **Durable runs**: a Celery worker runs each job, with a per-repository Redis lock, heartbeats, stale-run cleanup and cancellation (`backend/tasks.py`). A run that a crashed worker delivers again resumes from `runs.checkpoint`, without duplicate issues, branches or PRs.
-- **Prompt-injection hardening**: repository and issue text reach the model inside delimited untrusted-data blocks.
+- **Prompt-injection hardening**: repository text, issue text and retrieved code reach the model inside delimited untrusted-data blocks. Red-team fixtures in `backend/tests/redteam/` test this offline.
 - **Code context**: an AST map of the clone (tree-sitter) and GitNexus tools over MCP. GitNexus runs locally. Prompts, including repository content, are sent to Groq.
+
+**Engine and extensions**
+- **Python SDK** (`backend/automaintainer/`): `AutoMaintainerEngine` runs the pipeline in-process with per-engine configuration, isolated concurrent runs and cancellation. The distribution name is `automaintainer`; the extras are `server` (the API server, Celery and OpenTelemetry), `adk` and `rag`. See [Python SDK](#python-sdk).
+- **ADK Reviewer** (*opt-in*, `backend/automaintainer/_specialists/`): a read-only, tool-using reviewer built with Google's Agent Development Kit, selected with `REVIEWER_BACKEND=adk` and the `adk` extra. The default is `langgraph`, the single-prompt review. Design: [docs/design/adk-specialist-agents.md](./docs/design/adk-specialist-agents.md).
+- **Code retrieval** (*opt-in*, [docs/RAG.md](./docs/RAG.md)): function-level chunks of the target repository in `code_chunks` on pgvector, with org-scoped RLS. With `RAG_RETRIEVAL_ENABLED`, the PM prompt gets the nearest chunks and the ADK Reviewer's `search_code` can use the index. Indexing (`RAG_INDEXING_ENABLED`) embeds the code with Vertex AI (the `rag` extra), so repository code is sent to Google Cloud.
+- **Sandboxed verification** (*opt-in*, [docs/VERIFICATION.md](./docs/VERIFICATION.md)): the target repository's tests run through a sandbox backend selected with `SANDBOX_BACKEND`. Two backends ship: Docker (`backend/automaintainer/runners/docker_sandbox.py`) and Cloud Run Jobs (`backend/automaintainer/runners/cloud_run_job_sandbox.py`). Without a backend, verification refuses to run on the host unless `VERIFY_ALLOW_LOCAL=true`, so `ci` does not merge.
+
+**Operations**
 - **Dashboard** (`dashboard/`): start and stop runs, live logs through Supabase Realtime, run history and an org admin page.
-- **Web IDE**: a Monaco editor over the repository clone, inline AI assist (rate-limited per user and per organization) and a "propose changes" flow that opens a PR. Saving a single file commits directly to the default branch.
+- **Web IDE**: a Monaco editor over the repository clone, inline AI assist (rate-limited per user and per organization) and a "propose changes" flow that opens a PR.
 - **Opt-in admin terminal**: a PTY over WebSocket, off unless `ENABLE_TERMINAL=true`, and limited to `TERMINAL_ADMIN_USER_IDS`.
-- **Offline eval harness** (`backend/evals/`, [docs/EVALS.md](./docs/EVALS.md)): scores the Implementer step on 10 synthetic tasks with hidden tests. No benchmark results are published yet.
-- **Deployment configs**: Docker image (non-root), Docker Compose, a Render blueprint, and a static dashboard export for Vercel. See [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md).
+- **Evaluation** ([docs/EVALS.md](./docs/EVALS.md)): an Implementer harness (`backend/evals/`, 30 synthetic tasks with hidden tests) and an end-to-end evaluation of the whole engine (`backend/evals/e2e/`, 24 tasks from real upstream files, plus 27 Reviewer cases). Offline oracle, no-op and replay modes run in CI; live runs against Groq are manual. No live results are published yet.
+- **Observability** ([docs/OBSERVABILITY.md](./docs/OBSERVABILITY.md)): OpenTelemetry traces and metrics with bounded labels, including run outcomes, run duration, LLM tokens and an estimated LLM cost. Export to Cloud Trace (`OTEL_CLOUD_TRACE_ENABLED`) and Cloud Monitoring (`OTEL_CLOUD_MONITORING_ENABLED`) is *opt-in*.
+- **Deployment options**: Docker image (non-root), Docker Compose, a Render blueprint, a static dashboard export for Vercel, and Terraform for Google Cloud. See [Deployment](#deployment).
 
 No end-to-end latency or success-rate figures are claimed. None have been
-measured.
+measured on live models.
 
 ---
 
@@ -136,7 +157,7 @@ cd backend
 uv run celery -A celery_app worker -Q agent_runs,maintenance,github_sync -l info
 ```
 
-No `requirements.txt` is committed; run `bash scripts/export-backend-requirements.sh` if a tool needs one. See [CONTRIBUTING.md](./CONTRIBUTING.md#managing-backend-dependencies) for adding or upgrading dependencies.
+No `requirements.txt` is committed; run `bash scripts/export-backend-requirements.sh` if a tool needs one. See [CONTRIBUTING.md](./CONTRIBUTING.md#4-managing-backend-dependencies) for adding or upgrading dependencies.
 
 Alternatively, run the whole backend stack (API, worker, beat, Redis) with Docker:
 ```bash
@@ -144,7 +165,7 @@ docker compose up --build   # http://localhost:8000
 ```
 
 ### Python SDK
-The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`); `pip install "./backend[server]"` adds the server dependencies:
+The engine also installs on its own as the `automaintainer` package, without Celery or the server code (`main`, `tasks`). The base install covers `AutoMaintainerEngine`. The extras add optional parts: `server` (the API server, Celery and OpenTelemetry, for example `pip install "./backend[server]"`), `adk` (the ADK Reviewer) and `rag` (Vertex AI embeddings for code retrieval). Publishing to PyPI is off until the owner enables it (`.github/workflows/publish-sdk.yml`), so build the wheel from the repository:
 ```bash
 cd backend && uv build        # dist/automaintainer-<version>-py3-none-any.whl (+ the sdist)
 ```
@@ -183,6 +204,7 @@ Read [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) before deploying. It covers th
   ```bash
   docker pull ghcr.io/pxa-labs/automaintainer:latest
   ```
+* **Google Cloud (Terraform):** [`infra/terraform`](./infra/terraform/README.md) describes the API on Cloud Run, the workers on a Compute Engine VM, Secret Manager, Artifact Registry, a billing budget, the Cloud Run Jobs verification sandbox and optional monitoring. `.github/workflows/deploy-gcp.yml` deploys through Workload Identity Federation, with no stored key. The owner steps are in [docs/DEPLOYMENT.md, Option D](./docs/DEPLOYMENT.md#option-d-google-cloud-terraform). The configuration has not yet been applied to a live project.
 
 Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unless you have read the terminal section of the deployment guide.
 
@@ -190,7 +212,8 @@ Never set `AUTH_DEV_BYPASS` in a deployment. Leave `ENABLE_TERMINAL` unset unles
 
 ## Security
 
-- **Merging:** keep `MERGE_POLICY` unset or set to `human`. The agents then open and review PRs but never merge them. `auto` merges on an LLM approval alone, without running any tests; do not use it on repositories you care about. Enable branch protection with required checks in any case.
+- **Merging:** keep `MERGE_POLICY` unset or set to `human`. The agents then open and review PRs but never merge them. `auto` merges on the Maintainer's approval and a trusted trigger without running any tests; do not use it on repositories you care about. Enable branch protection with required checks in any case.
+- **Verification:** the target repository's tests are untrusted code. Run them through a sandbox backend, and do not set `VERIFY_ALLOW_LOCAL=true` on a shared host.
 - **Terminal:** `/api/terminal/ws` gives a shell on the API host. It is off unless `ENABLE_TERMINAL=true`, and then only for the user ids in `TERMINAL_ADMIN_USER_IDS`. The shell runs as the server's OS user, so it can read every tenant's clone and the server's files. Leave it off on any shared or hosted deployment.
 - **Development bypass:** never set `AUTH_DEV_BYPASS` in a deployment. It is refused when `ENVIRONMENT=production`.
 
@@ -198,29 +221,57 @@ See [SECURITY.md](./SECURITY.md) for how to report a vulnerability and for a sum
 
 ---
 
-## Architecture
-[ARCHITECTURE.md](./ARCHITECTURE.md) describes the components, the run lifecycle, the agent graph, the data model, authentication, and the security limits of each part.
+## Documentation
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md): components, run lifecycle, agent graph, engine, data model, authentication and security limits.
+- [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): deployment options, environment variables, database migrations and the security checklist.
+- [docs/VERIFICATION.md](./docs/VERIFICATION.md): how agent changes are tested, merge gating and the sandbox backends.
+- [docs/EVALS.md](./docs/EVALS.md): the Implementer harness and the end-to-end evaluation.
+- [docs/RAG.md](./docs/RAG.md): code retrieval, tenancy, data egress and cost.
+- [docs/OBSERVABILITY.md](./docs/OBSERVABILITY.md): the metric catalogue and its label rules.
+- [docs/design/adk-specialist-agents.md](./docs/design/adk-specialist-agents.md): design note for ADK specialist agents under the LangGraph engine.
+- [infra/terraform/README.md](./infra/terraform/README.md): the Google Cloud Terraform configuration.
+- [SECURITY.md](./SECURITY.md): reporting a vulnerability, and a summary of the security controls.
+- [CONTRIBUTING.md](./CONTRIBUTING.md): development setup, tests, CI checks and pull request conventions.
 
 ---
 
-## Roadmap
-Work in progress, in order. Each step is measured against the one before it.
+## Status and roadmap
 
-1. **Evaluation baseline.** A fixed set of 20–30 real tasks with known fixes, run several times each: PRs merged without help, fix iterations, cost and latency per run.
-2. **GCP production deployment** ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)). Terraform, Cloud Run, Secret Manager, keyless CI through Workload Identity Federation, Cloud Trace, and sandboxed verification before other users' repositories are allowed.
-3. **ADK specialist agents** ([#525](https://github.com/PxA-Labs/AutoMaintainer/issues/525)). Tool-using agents built with Google's Agent Development Kit, called from the LangGraph engine, which keeps all authority. The first is the Reviewer. Design: [docs/design/adk-specialist-agents.md](https://github.com/PxA-Labs/AutoMaintainer/blob/feat/adk-migration/docs/design/adk-specialist-agents.md).
-4. **RAG over the codebase** ([#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526)). Function-level chunks in pgvector with org-scoped RLS, a retriever tool for planning and review, and prompt-injection tests for retrieved text.
-5. **Metrics and alerting.** Per-run latency, tokens and cost in Cloud Monitoring, with alerts.
+The evaluation baseline, the Google Cloud deployment, the ADK Reviewer, code
+retrieval, and metrics with alerting are implemented in code. Each one is off
+by default or needs an owner to deploy it:
+
+| Feature | How it is turned on |
+| --- | --- |
+| End-to-end evaluation | Offline modes run in CI. Live runs: manual dispatch of `evals.yml` with the suite `e2e` (needs the `GROQ_API_KEY` secret). |
+| Google Cloud deployment | `terraform apply` in `infra/terraform`, then `deploy-gcp.yml`. |
+| ADK Reviewer | `REVIEWER_BACKEND=adk` with the `adk` extra installed. The default is `langgraph`. |
+| Code retrieval | `RAG_INDEXING_ENABLED` and `RAG_RETRIEVAL_ENABLED` with the `rag` extra installed, or `rag_enabled` in Terraform with the image built with `IMAGE_EXTRAS="server,rag"`. |
+| Sandboxed verification | `SANDBOX_BACKEND`. Terraform sets it to `cloud_run_job` on the Google Cloud worker only. |
+| Cloud Trace and Cloud Monitoring | `OTEL_CLOUD_TRACE_ENABLED` and `OTEL_CLOUD_MONITORING_ENABLED`, or `cloud_trace_enabled`, `cloud_monitoring_enabled` and `monitoring_app_alerts_enabled` in Terraform. |
+
+What remains are owner steps that need credentials or cost money. The full
+ordered checklist is in [#532](https://github.com/PxA-Labs/AutoMaintainer/issues/532).
+It starts with rotating the keys leaked in #60, which must happen before any
+deployment, and also covers restoring Supabase and applying the migrations,
+PyPI trusted publishing and publishing the security advisory drafts. The main
+validation steps are:
+
+1. **First deployment** ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)): apply Terraform, add the secret values (including `redis-url`), run the sandbox smoke test, then turn on Cloud Monitoring and the application alerts.
+2. **Live evaluation baseline**: the first live end-to-end run against Groq.
+3. **ADK spike and Reviewer comparison** ([#525](https://github.com/PxA-Labs/AutoMaintainer/issues/525)): run `evals/spike_adk_groq.py` for a go or no-go on Groq tool calling, then compare the two Reviewer backends over at least three repeats. `REVIEWER_BACKEND` stays `langgraph` unless the false-approval rate does not get worse.
+4. **Vertex recall check** ([#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526)): measure recall with Vertex AI embeddings before turning on indexing or retrieval.
 
 ---
 
 ## Contributing
-Want to add a new Agent or improve the dashboard? Check out our [Contributing Guidelines](./CONTRIBUTING.md).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development setup, tests, CI checks and pull request conventions.
 
 ---
 
-## Release & Changelog
-AutoMaintainer maintains a living changelog and automated release notes adhering to [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Conventional Commits](https://www.conventionalcommits.org/). Review all historical and unreleased updates in our [CHANGELOG.md](./CHANGELOG.md).
+## Release and changelog
+[CHANGELOG.md](./CHANGELOG.md) follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). It is updated automatically from [Conventional Commits](https://www.conventionalcommits.org/) pull request titles.
 
 ---
 

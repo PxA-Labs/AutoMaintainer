@@ -21,12 +21,13 @@ Closes #
 
 ## Quality & Security Verification
 <!-- Please confirm the following checks have been performed locally before submitting. -->
-- [ ] My code follows the code style guidelines of this project (PEP 8 for Python, ESLint/Prettier for Next.js).
-- [ ] I have formatted my Python code using Black (`black backend/`).
-- [ ] I have executed the local test suite and all unit/integration tests pass (`pytest backend/`).
-- [ ] For frontend changes, the Next.js application builds without errors (`npm run build` in `dashboard/`).
+- [ ] My code follows the project style: Black and the flake8 gate for Python, ESLint (`npm run lint`) for the dashboard.
+- [ ] I have formatted my Python code with the pinned Black (`uv run black .` in `backend/`).
+- [ ] The backend test suite passes locally (`uv run pytest` in `backend/`).
+- [ ] For dashboard changes, lint, unit tests and the build pass (`npm run lint`, `npm test`, `npm run build` in `dashboard/`).
 - [ ] I have added corresponding tests for new functionality or bug fixes.
 - [ ] My changes do not introduce security vulnerabilities or unvalidated path traversal.
+- [ ] I have updated the documentation affected by this change (see CONTRIBUTING.md, "Documentation"). I have not edited `CHANGELOG.md`.
 
 ## AI-Assisted Contribution Policy & Integrity
 - [ ] I confirm that every line of code and test in this PR has been manually inspected, verified, and tested against local execution.
