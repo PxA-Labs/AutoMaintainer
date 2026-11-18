@@ -1,29 +1,21 @@
-"""The label trigger's dedup is check-then-insert, not atomic (#518).
+"""Two label deliveries for one issue at the same moment start one run (#518).
 
 webhook_processor._start_label_run looks for an active run of the issue
 (_active_run) and inserts a new one (_queue_run) in separate steps. With the
 github_sync worker at concurrency above 1, two deliveries for the same issue
 (the label removed and re-added quickly) can both pass the check before
-either inserts. The fix #518 proposes is a partial unique index on
-runs(repository_id, target_issue_number) for active statuses plus handling
-the conflict; until then this test documents the race and fails strictly
-(xfail strict=True).
+either inserts. The database closes the race: the partial unique index
+runs_one_active_per_issue rejects the second active run with a unique
+violation (23505), which _queue_run records as 'ignored'.
 
-The database is test_webhook_processor's in-memory FakeDB; the two
-deliveries run in two threads, held after the check until both have done it.
-
-What flips it: a fix that serialises check and insert in the process (a
-lock around _start_label_run) makes it XPASS, after the barrier below times
-out (about 15 s). The FakeDB enforces no unique constraints, so the index
-#518 proposes does not flip it on its own: whoever lands that fix must also
-make the fake reject a second active run for the same issue (as the index
-would) and assert the conflict handling, then drop the xfail.
+The database is test_webhook_processor's in-memory FakeDB, which enforces
+that index the way Postgres does (#524). The two deliveries run in two
+threads, held after the check until both have done it, so both reach the
+insert and the index decides.
 """
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
-
-import pytest
 
 import webhook_processor
 import test_webhook_label_trigger as label_tests
@@ -34,12 +26,6 @@ from webhook_processor import process_event
 trigger = label_tests.trigger
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="#518: _active_run and the run insert are not atomic; two concurrent "
-    "label deliveries for one issue both start a run",
-)
 def test_concurrent_label_events_for_one_issue_start_one_run(trigger, monkeypatch):
     first = labeled(id="ev-1", github_delivery_id="d-1")
     second = labeled(id="ev-2", github_delivery_id="d-2")
@@ -72,6 +58,7 @@ def test_concurrent_label_events_for_one_issue_start_one_run(trigger, monkeypatc
         if r["target_issue_number"] == 12
         and r["status"] in webhook_processor.ACTIVE_RUN_STATUSES
     ]
-    assert "completed" in outcomes
+    # One delivery queued the run; the index refused the other's insert.
+    assert sorted(outcomes) == ["completed", "ignored"]
     assert len(active) == 1
     assert trigger.task.apply_async.call_count == 1

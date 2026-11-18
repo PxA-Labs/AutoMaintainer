@@ -1,0 +1,156 @@
+name: Publish SDK
+
+# Builds the automaintainer SDK (backend/, `uv build`) when an `sdk-v<version>`
+# tag is pushed, publishes it to TestPyPI, then to PyPI once a reviewer of the
+# `pypi` environment approves. Uploads use PyPI trusted publishing (OIDC):
+# no API token is stored. The tag must match automaintainer.__version__.
+#
+# Inert until the owner sets the repository variable SDK_PUBLISH_ENABLED to
+# `true` and registers the trusted publishers: until then a tag only builds
+# and checks the distributions. Owner setup: docs/DEPLOYMENT.md,
+# "Publishing the Python SDK".
+#
+# The tag prefix keeps these tags apart from release.yml's `v*.*.*`.
+
+on:
+  push:
+    tags:
+      - 'sdk-v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Keep in step with ci-backend.yml and the Dockerfile.
+  UV_VERSION: "0.13.8"
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./backend
+    env:
+      UV_PYTHON: "3.11"
+      UV_PYTHON_DOWNLOADS: never
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: "3.11"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: ${{ env.UV_VERSION }}
+        enable-cache: false
+
+    - name: Check the tag matches automaintainer.__version__
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        python - <<'EOF'
+        import os
+        import re
+        from pathlib import Path
+
+        text = Path("automaintainer/__init__.py").read_text(encoding="utf-8")
+        version = re.search(r'^__version__ = "([^"]+)"$', text, re.M).group(1)
+        tag = os.environ["TAG"]
+        assert tag == f"sdk-v{version}", f"tag {tag} != sdk-v{version} (__version__)"
+        print("publishing automaintainer", version)
+        EOF
+
+    - name: Build the sdist and wheel
+      run: |
+        uv build --out-dir dist
+
+    - name: Check the wheel ships only the automaintainer package
+      run: |
+        python - dist/*.whl <<'EOF'
+        import sys
+        import zipfile
+
+        (wheel,) = sys.argv[1:]
+        tops = {name.split("/", 1)[0] for name in zipfile.ZipFile(wheel).namelist()}
+        extra = sorted(
+            t for t in tops if t != "automaintainer" and not t.endswith(".dist-info")
+        )
+        assert "automaintainer" in tops, tops
+        assert not extra, f"unexpected top-level wheel entries: {extra}"
+        EOF
+
+    - name: Import the wheel in a fresh venv
+      run: |
+        uv venv "$RUNNER_TEMP/sdk-venv"
+        uv pip install --python "$RUNNER_TEMP/sdk-venv/bin/python" dist/*.whl
+        cd "$RUNNER_TEMP"
+        "$RUNNER_TEMP/sdk-venv/bin/python" -I -c \
+          "import automaintainer; from automaintainer import AutoMaintainerEngine; print(automaintainer.__version__)"
+
+    - name: Upload the distributions
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: sdk-dist
+        path: backend/dist/
+        if-no-files-found: error
+        retention-days: 7
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.repository == 'PxA-Labs/AutoMaintainer' && vars.SDK_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/automaintainer
+    permissions:
+      id-token: write
+
+    steps:
+    - name: Download the distributions
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: sdk-dist
+        path: dist/
+
+    - name: Publish to TestPyPI (trusted publishing)
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      with:
+        repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    # Only after TestPyPI accepted the same files. The `pypi` environment's
+    # required reviewers are the manual approval.
+    needs: publish-testpypi
+    if: github.repository == 'PxA-Labs/AutoMaintainer' && vars.SDK_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/automaintainer
+    permissions:
+      id-token: write
+
+    steps:
+    - name: Download the distributions
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: sdk-dist
+        path: dist/
+
+    - name: Publish to PyPI (trusted publishing)
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

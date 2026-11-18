@@ -4042,7 +4042,8 @@ async def _mark_run_cancelled_once(run_id: str, progress: Optional[dict]) -> Non
     is being recorded) without emitting RUN_CANCELLED twice.
     """
     if progress is not None:
-        if progress.get("cancel_marked"):
+        if progress.get("cancel_marked") or progress.get("completed"):
+            # "completed": the run finished and its row says so (#524).
             return
         progress["cancel_marked"] = True
         # A cancel during the "running" upsert does not stop its thread: let
@@ -4054,6 +4055,48 @@ async def _mark_run_cancelled_once(run_id: str, progress: Optional[dict]) -> Non
             except Exception:
                 pass  # already reported by _run_pipeline
     await _mark_run_cancelled(run_id)
+
+
+async def _await_completed_write(
+    write: asyncio.Future, should_stop, progress: Optional[dict]
+) -> None:
+    """Wait for the run's final ``completed`` write, shielded from cancels.
+
+    A cancel that lands meanwhile does not stop the write (#524): this waits
+    for it to land, then sets ``progress["completed"]`` so neither the
+    pipeline nor the engine marks the finished run ``cancelled``. What
+    happens to the cancel:
+
+    - the engine's own stop (``cancel(grace_seconds=...)``, ``aclose``; the
+      stop flag is set) is absorbed: the run returns ``completed``, which is
+      what its row says;
+    - any other cancellation (the caller of run() was cancelled) is
+      re-raised once the write landed, as callers expect.
+
+    Trade-off: if the caller is cancelled while the engine's stop flag is
+    also set, the cancel is absorbed and the caller gets the ``completed``
+    result instead of CancelledError; the two cannot be told apart here.
+    """
+    cancels = 0
+    while not write.done():
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            cancels += 1  # the write keeps running: wait for it again
+        except Exception:
+            pass  # reported below
+    if not write.cancelled() and write.exception() is not None:
+        print(f"Failed to update run status in Supabase: {write.exception()}")
+    if not cancels:
+        return
+    if progress is not None:
+        progress["completed"] = True
+    if should_stop is not None and should_stop():
+        task = asyncio.current_task()
+        for _ in range(cancels):
+            task.uncancel()
+        return
+    raise asyncio.CancelledError()
 
 
 def cancelled_result(final_state: Optional[dict]) -> dict:
@@ -4208,15 +4251,19 @@ async def _run_pipeline(
 
         await broadcast_log({"agent": "System", "msg": "Agent loop complete."})
         if supabase:
-            try:
-                await asyncio.to_thread(
+            # Shielded (#524): the graph finished (the PR may be merged), so
+            # a cancel that lands while "completed" is being written must not
+            # turn the run into a cancelled one. The write is left to finish;
+            # see _await_completed_write for what happens to the cancel.
+            completed_write = asyncio.ensure_future(
+                asyncio.to_thread(
                     lambda: supabase.table("runs")
                     .update({"status": "completed"})
                     .eq("id", run_id)
                     .execute()
                 )
-            except Exception as e:
-                print(f"Failed to update run status in Supabase: {e}")
+            )
+            await _await_completed_write(completed_write, should_stop, progress)
 
         return {
             "status": "completed",
