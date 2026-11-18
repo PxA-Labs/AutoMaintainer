@@ -266,8 +266,48 @@ def _definition_chunks(
         end = _strip_trailing_blank(lines, start, end)
         chunks += _windows(path, qualified(cls), lines, start, end)
 
+    chunks += _gap_chunks(path, lines, chunks, classes, qualified)
     chunks.sort(key=lambda c: (c.start_line, c.end_line, c.symbol or ""))
     return chunks
+
+
+def _gap_chunks(path, lines, chunks, classes, qualified) -> list[CodeChunk]:
+    """Chunks for code outside every definition chunk.
+
+    Module-level imports, constants, docstrings and ``if __name__`` blocks,
+    and class attributes between methods, would otherwise never be indexed.
+    Runs of such lines become chunks of their own, named after the innermost
+    enclosing class (None at module level). Runs without a word character
+    (a closing ``}`` or ``)``) carry nothing worth embedding and are skipped.
+    """
+    covered = set()
+    for c in chunks:
+        covered.update(range(c.start_line, c.end_line + 1))
+    runs: list[tuple[int, int]] = []
+    for n in range(1, len(lines) + 1):
+        if n in covered:
+            continue
+        if runs and runs[-1][1] == n - 1:
+            runs[-1] = (runs[-1][0], n)
+        else:
+            runs.append((n, n))
+
+    gaps: list[CodeChunk] = []
+    for start, end in runs:
+        while start <= end and not lines[start - 1].strip():
+            start += 1
+        end = _strip_trailing_blank(lines, start, end)
+        if start > end:
+            continue
+        if not re.search(r"\w", "\n".join(lines[start - 1 : end])):
+            continue
+        owners = [
+            c for c in classes if c["start_line"] <= start and end <= c["end_line"]
+        ]
+        owner = max(owners, key=lambda c: c["start_line"], default=None)
+        symbol = qualified(owner) if owner else None
+        gaps += _windows(path, symbol, lines, start, end)
+    return gaps
 
 
 def _skipped_name(name: str) -> bool:

@@ -45,7 +45,8 @@ def test_python_file_is_chunked_per_function_method_and_class(tmp_path):
     (tmp_path / "q.py").write_text(SAMPLE, encoding="utf-8")
     chunks = chunk_file(tmp_path, "q.py")
     by = _by_symbol(chunks)
-    assert set(by) == {"Queue", "Queue.add", "Queue.empty", "helper"}
+    # None: the module-level docstring, import and constant (a gap chunk).
+    assert set(by) == {None, "Queue", "Queue.add", "Queue.empty", "helper"}
     assert all(c.path == "q.py" for c in chunks)
 
     add = by["Queue.add"]
@@ -181,7 +182,7 @@ def test_symbol_names_are_right_after_non_ascii_text(tmp_path):
     )
     (tmp_path / "w.py").write_text(source, encoding="utf-8")
     symbols = {c.symbol for c in chunk_file(tmp_path, "w.py")}
-    assert symbols == {"Week", "Week.day", "daterange"}
+    assert symbols == {None, "Week", "Week.day", "daterange"}  # None: docstring
 
 
 def test_javascript_definitions_are_named_from_their_line(tmp_path):
@@ -198,7 +199,7 @@ def test_javascript_definitions_are_named_from_their_line(tmp_path):
     )
     (tmp_path / "b.js").write_text(source, encoding="utf-8")
     symbols = {c.symbol for c in chunk_file(tmp_path, "b.js")}
-    assert symbols == {"Box", "Box.open", "wrap"}
+    assert symbols == {None, "Box", "Box.open", "wrap"}  # None: the comment
 
 
 DECORATED = textwrap.dedent("""\
@@ -302,3 +303,61 @@ def test_nested_class_methods_carry_the_full_class_path(tmp_path):
     (tmp_path / "n.py").write_text(source, encoding="utf-8")
     symbols = {c.symbol for c in chunk_file(tmp_path, "n.py")}
     assert "A.Inner.im" in symbols and "Inner.im" not in symbols
+
+
+def test_module_level_code_between_definitions_gets_its_own_chunks(tmp_path):
+    """Imports, constants, docstrings and __main__ blocks are retrievable."""
+    source = textwrap.dedent('''\
+        """Rate limits."""
+        import os
+
+        MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+
+
+        def f():
+            return 1
+
+
+        BACKOFF_SECONDS = 2.5
+
+        if __name__ == "__main__":
+            f()
+        ''')
+    (tmp_path / "m.py").write_text(source, encoding="utf-8")
+    spans = [(c.symbol, c.start_line, c.end_line) for c in chunk_file(tmp_path, "m.py")]
+    assert spans == [(None, 1, 4), ("f", 7, 8), (None, 11, 14)]
+
+
+def test_class_attributes_between_methods_are_chunked_under_the_class(tmp_path):
+    source = textwrap.dedent("""\
+        class Config:
+            def a(self):
+                return 1
+
+            TIMEOUT = 30
+
+            def b(self):
+                return 2
+        """)
+    (tmp_path / "c.py").write_text(source, encoding="utf-8")
+    spans = [(c.symbol, c.start_line, c.end_line) for c in chunk_file(tmp_path, "c.py")]
+    assert ("Config", 5, 5) in spans
+
+
+def test_punctuation_only_gaps_are_not_chunked(tmp_path):
+    source = "class Box {\n  open(x) {\n    return x;\n  }\n}\n"
+    (tmp_path / "b.js").write_text(source, encoding="utf-8")
+    covered = [c.content for c in chunk_file(tmp_path, "b.js")]
+    assert all(content.strip() != "}" for content in covered)
+
+
+def test_every_non_blank_python_line_with_a_word_is_in_some_chunk(tmp_path):
+    (tmp_path / "q.py").write_text(SAMPLE, encoding="utf-8")
+    covered = set()
+    for c in chunk_file(tmp_path, "q.py"):
+        covered.update(range(c.start_line, c.end_line + 1))
+    lines = SAMPLE.splitlines()
+    missing = [
+        n for n, line in enumerate(lines, 1) if line.strip() and n not in covered
+    ]
+    assert missing == []
