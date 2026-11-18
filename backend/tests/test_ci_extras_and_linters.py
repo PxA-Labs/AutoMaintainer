@@ -6,6 +6,7 @@
 - A CI job installs the ``adk`` and ``rag`` extras and runs the tests that
   otherwise skip (specialists, the ADK reviewer concurrency test, rag and the
   red-team fixtures), and fails if any of them still skips.
+- README names the wheel the build produces since #529.
 """
 
 import re
@@ -139,3 +140,9 @@ def test_the_extras_job_fails_when_a_test_skips():
     assert "ripgrep" in commands
     assert "--junitxml" in commands
     assert "skipped" in commands
+
+
+def test_readme_names_the_automaintainer_wheel():
+    readme = (REPO_ROOT / "README.md").read_text("utf-8")
+    assert "automaintainer_backend" not in readme
+    assert "automaintainer-<version>-py3-none-any.whl" in readme
