@@ -729,6 +729,10 @@ NOT_COVERED = {
     "OTEL_EXPORTER_OTLP_ENDPOINT": "observability exporter of the API process",
     "OTEL_CLOUD_TRACE_ENABLED": "Cloud Trace exporter switch of the API process",
     "GOOGLE_CLOUD_PROJECT": "project the Cloud Trace exporter writes to",
+    # Retrieval index (#526): the indexing task and its embedder, not runs.
+    "GOOGLE_CLOUD_LOCATION": "Vertex AI region of the RAG embedder (retrieval.py)",
+    "RAG_EMBEDDING_MODEL": "Vertex AI embedding model of the RAG indexer",
+    "RAG_EMBEDDING_BATCH_SIZE": "Vertex AI request batching of the RAG indexer",
     # API server, authentication and dashboard.
     "ENVIRONMENT": "deployment-wide production gates of the API",
     "AUTH_DEV_BYPASS": "API authentication (local development only)",
