@@ -1,7 +1,11 @@
 # Design note: ADK specialist agents under the LangGraph orchestrator
 
-Status: proposed. Tracking issue: #525.
-Branch: `feat/adk-migration`.
+Status: **implemented behind a switch, off by default** (rollout steps 1 and
+2). The ADK Reviewer exists as `reviewer_backend="adk"`; the default stays
+`langgraph`. Not yet done: the spike run against Groq (the owner's go/no-go,
+below), the live comparison (step 3) and the enable decision (step 4).
+Tracking issue: #525. See [Implementation](#implementation) for what was
+built and where it differs from the plan.
 
 ## Why
 
@@ -126,9 +130,86 @@ its cost measured in the comparison.
    - fix iterations per run;
    - cost and latency per review.
 
-   Each figure is reported as a mean and spread over repeated runs.
+   Each figure is reported as a mean and spread over repeated runs. How to
+   run it: [docs/EVALS.md](../EVALS.md#comparing-reviewer-backends-525)
+   (`--reviewer-backend`).
 4. **Enable** only if the false-approval rate does not get worse and at least
    one other figure improves. Otherwise keep the switch off and record why.
+
+## Implementation
+
+Code: `backend/automaintainer/_runtime/specialists/` (`contracts.py`,
+`tools.py`, `reviewer_adk.py`); one seam in `maintainer_node`
+(`agents.py`); `reviewer_backend` in `AutoMaintainerConfig`. Tests:
+`backend/tests/specialists/` and
+`backend/tests/concurrency/test_concurrency_adk_reviewer.py`.
+
+- **Switch.** `reviewer_backend: "langgraph" | "adk"` (env
+  `REVIEWER_BACKEND`). An engine config with `adk` and no `adk` extra fails
+  validation; a process without an engine that reads `REVIEWER_BACKEND=adk`
+  without the extra aborts the run with `REVIEWER_BACKEND_UNAVAILABLE`.
+  Neither falls back to the other review.
+- **Seam.** `maintainer_node` builds its prompt as before and then asks
+  either `_llm_decision` (unchanged) or `reviewer_adk.review_pull_request`.
+  The comment, merge policy, trust gate and checkpoint after it are shared.
+- **Checkout.** The tools read a shallow clone of the PR branch at exactly
+  the head SHA, in a temporary directory deleted after the review (cloned
+  as verification does). The run's own clone is not used: it is at the base
+  branch and shared with the run's other steps. A branch that moved, or a
+  failed clone, is a rejection.
+- **Tools** (`tools.ReviewTools`, plain Python, no ADK): paths resolved to
+  real paths and refused outside the checkout (including through symlinks)
+  or under `.git`; ripgrep with the query after `--`, fixed-string,
+  `--no-config`, no symlink following, repository ignore files ignored;
+  every output capped. A refused call costs a tool call and is answered as
+  a refusal; it does not end the review.
+- **Budgets** (`ReviewBudget`): 8 tool calls, 11 model calls (8 tool turns,
+  the answer and the corrective retry), 60 000 tokens as reported by the
+  provider, 180 s for the whole review. Constants for now; the comparison
+  should show which values to keep before they become configuration.
+- **Model and credentials.** `ModelRouting.maintainer` names the model. A
+  Groq model goes through ADK's `LiteLlm` with a key from the engine's rate
+  limiter (one key and one reservation per review, not per model call in
+  the loop). A Gemini name (`gemini-...` or `vertex_ai/gemini-...`) uses
+  ADK's native client on Vertex AI with the process's Google credentials.
+- **Fail closed.** Budgets, timeout, exceptions, a call to an unregistered
+  tool, a stop requested by `engine.cancel()` (also one arriving during the
+  final answer) and an invalid answer after the retry all return a
+  rejection that says why. A cancelled task (`engine.cancel(grace_seconds=)`,
+  `aclose()`) propagates `CancelledError`: no decision at all. ADK reports
+  exceptions raised in callbacks as error events and swallows the
+  cancellation of its own root task; the reviewer records the first abort
+  reason itself and treats a model call that never returned as cancelled.
+- **Accounting and tracing.** One `TelemetryEvent` per review with its
+  tokens, the `llm_tokens` metric, a `specialist.reviewer` span and a
+  `specialist.tool` child span per tool call, from `observability.get_tracer`.
+- **Red-team.** `tests/specialists/test_reviewer_redteam.py` runs every
+  `tests/redteam` test with `REVIEWER_BACKEND=adk` and a model that obeys the
+  payload with its tools; every fixture's outcome holds.
+
+## Spike: the owner's go/no-go
+
+`backend/evals/spike_adk_groq.py` (manual; not run in CI or here, it calls
+the provider) gives Llama 3.3 70B on Groq, through ADK's LiteLLM wrapper,
+the Reviewer's real system prompt and its four tool declarations on one
+small review task, and prints every tool call, whether it parsed, whether
+the answer parses as a `MaintainerDecision`, and the verdict:
+
+```bash
+cd backend
+GROQ_API_KEY=... uv run --extra adk python -m evals.spike_adk_groq --repeats 5
+```
+
+**GO** (exit 0) when every repeat made at least one tool call, every call
+named a registered tool with a JSON object of arguments, and every answer
+parsed. Record the output in #525. On **NO-GO**, try the fallback, Gemini on
+Vertex AI for the Reviewer only: the same script with
+`--model vertex_ai/gemini-2.5-flash` and `GOOGLE_GENAI_USE_VERTEXAI=true`,
+`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` and Application Default
+Credentials. If it passes, route only the Reviewer there with
+`ModelRouting(maintainer="vertex_ai/gemini-2.5-flash")`; the other roles stay
+on Groq. Its cost must then be part of the comparison (Groq's pricing table
+in `evals/e2e/pricing.py` does not cover it; pass `--prices`).
 
 ## Non-goals
 
