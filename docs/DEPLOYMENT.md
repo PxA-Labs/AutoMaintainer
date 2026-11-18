@@ -559,6 +559,26 @@ itself. `VERIFY_ALLOW_LOCAL` stays refused. Once the steps below pass, this
 replaces "Verification stays off for untrusted repositories" above:
 verification results become real, so `MERGE_POLICY=ci` can merge again.
 
+**What stays open: Google APIs.** This is weaker than the Docker backend's
+`--network=none`. The one allowed destination, the Private Google Access
+VIP (199.36.153.8/30), serves *every* `*.googleapis.com` API, not only this
+bucket. The job's own identity can do nothing, but test code needs no
+identity to write to a bucket someone else made publicly writable, or to
+poll one for commands. So a hostile test can still send the repository's
+contents and its own output out through Google Cloud Storage. Under
+`MERGE_POLICY=ci`, that is the remaining risk for private repositories
+whose issues come from outsiders. VPC Service Controls around the project
+would close it, but it is not set up here; see
+[VERIFICATION.md](VERIFICATION.md#cloud-run-jobs-sandbox-backend).
+
+**The sandbox settings cannot be changed through `app_env`.**
+`modules/worker` merges `SANDBOX_BACKEND` and the `CLOUD_RUN_SANDBOX_*`
+names *over* `var.app_env`, so a value set there is silently replaced. This
+fails closed: no `app_env` entry can switch the worker back to local or
+Docker verification. To change them, edit `modules/worker/main.tf`.
+`CLOUD_RUN_SANDBOX_START_SECONDS` is not set by the module, so `app_env`
+does control it.
+
 **Owner steps** (after the first deploy):
 
 1. **Point the job at an image with python3 and the test toolchain.** The
@@ -638,6 +658,50 @@ own (169.254.169.254 is served outside the VPC). The check is therefore that
 it answers as the sandbox account, whose token is useless (no role), and not
 that the address is unreachable.
 
+**3. The backend's own path, from the worker container.** The probes above
+start executions with `gcloud`. They do not test the calls the worker
+itself makes: the V4 signed URLs, the `runWithOverrides` body, the
+execution name in the run response, and whether the worker's custom role is
+enough without `actAs` on the sandbox account. This step does. Run it on the
+VM. It sends a throwaway directory, never a repository.
+
+```bash
+gcloud compute ssh automaintainer-worker --zone ${R}-a --project $P -- \
+  sudo docker exec -i automaintainer-worker python - <<'EOF'
+import asyncio, tempfile, time
+from pathlib import Path
+from automaintainer.runners.cloud_run_job_sandbox import create
+from automaintainer.runners.base import CommandTimeoutError
+
+async def main():
+    work = Path(tempfile.mkdtemp())
+    (work / "hello.txt").write_text("copied in\n")
+    box = create(work)  # reads CLOUD_RUN_SANDBOX_* from the container's env
+    t = time.monotonic()
+    print(await box.exec_command(["python3", "-c", "print(open('hello.txt').read())"], timeout=60))
+    print("round trip %.1f s" % (time.monotonic() - t))
+    print(await box.exec_command(["python3", "-c", "import sys; sys.exit(3)"], timeout=60))
+    try:
+        await box.exec_command(["sleep", "30"], timeout=5)
+    except CommandTimeoutError as e:
+        print("timeout ok:", e)
+
+asyncio.run(main())
+EOF
+gcloud storage ls "gs://$BUCKET/executions/" --project $P   # expect nothing left
+```
+
+Expected: `(0, 'copied in\n\n', '')` with a round trip a few seconds above
+the start latency from step 1, then `(3, '', '')`, then `timeout ok`.
+The bucket should be empty, and
+`gcloud run jobs executions list --job $JOB --region $R --project $P`
+should show three new executions: the first succeeded, the other two failed.
+The third failed because the entrypoint killed `sleep` at 5 s. It was not
+cancelled. A `403` from `signBlob` or `:run` means the worker's role is
+missing a permission. `the job run returned no execution` means the response
+shape is not the one the backend expects. In both cases verification fails closed with an `error`
+until it is fixed.
+
 Then open an issue on a test repository with the App installed and check the
 run's verification: the PR's `automaintainer/verification` status should be
 `success` or `failure`, not `error`. Logs Explorer, resource "Cloud Run Job",
@@ -648,8 +712,9 @@ shows the execution; the worker's log shows no `could not delete` or
 well under `CLOUD_RUN_SANDBOX_START_SECONDS` (20 s) and every probe is as
 expected. Otherwise:
 
-- *Start latency.* If starts regularly approach 20 s, raise the worker's
-  allowance (at most 25 s, verification's own grace is 30 s) or lower
+- *Start latency.* If starts regularly approach 20 s (the most the worker
+  allows: 20 s plus up to 8 s of cleanup must fit in verification's own
+  30-second grace), lower
   `sandbox_memory` and the image size. If that is not enough, or the probe
   shows `storage via private VIP` blocked (Direct VPC egress did not use the
   private zone, so the job cannot fetch its copy; verification then fails

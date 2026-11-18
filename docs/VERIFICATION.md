@@ -532,11 +532,14 @@ SANDBOX_BACKEND=cloud_run_job
 | `CLOUD_RUN_SANDBOX_JOB` | required | Job name (not the full resource path). |
 | `CLOUD_RUN_SANDBOX_BUCKET` | required | Bucket for the copies and results. |
 | `CLOUD_RUN_SANDBOX_SIGNER` | the credentials' account | Service account that signs the URLs (`signBlob` on itself). Terraform sets it to the worker's account. |
-| `CLOUD_RUN_SANDBOX_START_SECONDS` | `20` | Extra seconds the worker waits for the job to start, on top of the command's timeout. At most 25: verification stops waiting 30 seconds after the timeout. |
+| `CLOUD_RUN_SANDBOX_START_SECONDS` | `20` | Extra seconds the worker waits for the job to start, on top of the command's timeout. At most 20: this plus up to 8 seconds of cleanup must fit in the 30 seconds verification waits after the timeout. |
 | `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Also caps the output the job uploads and the worker reads. |
 
-Every name is validated before it is put in an API URL. Terraform sets all
-of these on the worker container (`modules/worker`).
+Every name is validated before it is put in an API URL. Terraform sets
+`SANDBOX_BACKEND` and the project, region, job, bucket and signer on the
+worker container (`modules/worker`), over `app_env`, so `app_env` cannot
+change or turn them off (fail closed); the start allowance and the output
+cap come from `app_env`.
 
 ### What one run does
 
@@ -580,6 +583,16 @@ worker: on timeout, error or cancellation cancel the execution; always delete
   waits `timeout_seconds + CLOUD_RUN_SANDBOX_START_SECONDS`, counted from the
   start of packing, so a cold start does not eat the test's own budget but
   a start slower than that allowance is reported as a timeout.
+- **Cleanup:** on timeout, error or cancellation the execution is cancelled.
+  This includes a cancellation that arrives while the run request is still
+  in flight: cleanup waits for the request to return the execution's name.
+  The input archive is deleted at once, and the result object after the
+  cancel. All of this shares one 8-second budget and runs in its own task,
+  so verification's own timeout cannot interrupt it. One case is left: if
+  the run request fails on the worker's side after Cloud Run has created the
+  execution (for example, a dropped connection), the execution's name is
+  never known. Its task timeout (command timeout + start allowance + 60 s)
+  ends it, and the 1-day lifecycle rule removes its objects.
 - File operations, `get_git_diff` and the refusal of `commit_and_push` are
   the Docker backend's (host working copy, same path-escape rules).
 - No Google client library is needed: the worker calls the Cloud Run Admin
