@@ -6,7 +6,9 @@ the iteration under review. Its four methods are what the model may call:
 
 - ``get_diff(path=None, page=1)``: the diff, whole or for one file, in pages;
 - ``read_file(path, start=1, end=None)``: numbered lines of a file at the head;
-- ``search_code(query)``: ripgrep over the checkout;
+- ``search_code(query)``: the nearest chunks of the RAG index when one is
+  given (retrieval on and the index at the PR head, #526), else ripgrep over
+  the checkout; an index that fails or finds nothing falls back to ripgrep;
 - ``get_verification_log()``: the end of this iteration's test output.
 
 Everything the model sends is attacker-steerable (the diff and the files it
@@ -30,6 +32,7 @@ refusal costs the model a tool call and never ends the review.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess  # nosec B404 - ripgrep with a fixed argv, no shell
@@ -45,6 +48,8 @@ __all__ = [
     "TRUNCATED",
     "TRUNCATED_HEAD",
 ]
+
+logger = logging.getLogger(__name__)
 
 TRUNCATED = "\n...[truncated]"
 TRUNCATED_HEAD = "...[earlier output truncated]\n"
@@ -110,6 +115,8 @@ class ReviewTools:
         diff_files: Iterable[tuple[str, str]],
         verification_log: str,
         limits: ToolLimits = ToolLimits(),
+        retriever=None,
+        search_k: int = 8,
     ):
         real_root = Path(os.path.realpath(root))
         if not real_root.is_dir():
@@ -118,6 +125,11 @@ class ReviewTools:
         self.diff_files = [(str(p), str(s)) for p, s in diff_files]
         self.verification_log = verification_log or ""
         self.limits = limits
+        # The RAG index of this repository at the PR head (#526), or None.
+        # Bound to its tenant and commit by whoever built it; only the query
+        # reaches it from the model.
+        self.retriever = retriever
+        self.search_k = max(1, int(search_k))
 
     # --- paths -------------------------------------------------------------------
 
@@ -209,13 +221,52 @@ class ReviewTools:
         return argv + ["--", query, "."]
 
     def search_code(self, query: str, regex: bool = False) -> str:
-        """Lines matching ``query`` in the checkout, as ``path:line:text``."""
+        """Code relevant to ``query``: the nearest chunks of the RAG index
+        when there is one (and the search is not a regex), else lines that
+        match in the checkout, as ``path:line:text`` (ripgrep).
+
+        An index that fails or finds nothing falls back to ripgrep, so the
+        tool answers as it did before retrieval whenever the index cannot.
+        """
         if not isinstance(query, str) or not query:
             raise ToolRefused("a non-empty query is required")
         if len(query) > MAX_QUERY_CHARS:
             raise ToolRefused(f"the query is longer than {MAX_QUERY_CHARS} characters")
         if any(c in query for c in "\x00\r\n"):
             raise ToolRefused("the query must be a single line")
+        if self.retriever is not None and not regex:
+            found = self._index_search(query)
+            if found is not None:
+                return found
+        return self._ripgrep(query, regex=bool(regex))
+
+    def _index_search(self, query: str) -> Optional[str]:
+        """The index's nearest chunks with numbered lines, or None to fall
+        back (an error, logged by type only, or no result)."""
+        k = min(self.search_k, self.limits.max_search_results)
+        try:
+            chunks = list(self.retriever.retrieve(query, k))
+        except Exception as e:  # the index is an optimisation, never required
+            logger.warning(
+                "search_code: the code index failed (%s); using ripgrep",
+                type(e).__name__,
+            )
+            return None
+        if not chunks:
+            return None
+        parts = [f"{len(chunks)} code index matches for {query!r}, best first"]
+        for c in chunks:
+            label = f"{c.path} lines {c.start_line}-{c.end_line}"
+            if c.symbol:
+                label += f" ({c.symbol})"
+            lines = str(c.content).split("\n")
+            numbered = "\n".join(
+                f"{c.start_line + i}| {line}" for i, line in enumerate(lines)
+            )
+            parts.append(f"{label}\n{numbered}")
+        return _cap("\n\n".join(parts), self.limits.max_output_chars)
+
+    def _ripgrep(self, query: str, regex: bool = False) -> str:
         rg = shutil.which("rg")
         if rg is None:
             raise ToolUnavailable(
