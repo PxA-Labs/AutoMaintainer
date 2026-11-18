@@ -138,7 +138,7 @@ its cost measured in the comparison.
 
 ## Implementation
 
-Code: `backend/automaintainer/_runtime/specialists/` (`contracts.py`,
+Code: `backend/automaintainer/_specialists/` (`contracts.py`,
 `tools.py`, `reviewer_adk.py`); one seam in `maintainer_node`
 (`agents.py`); `reviewer_backend` in `AutoMaintainerConfig`. Tests:
 `backend/tests/specialists/` and
@@ -165,8 +165,18 @@ Code: `backend/automaintainer/_runtime/specialists/` (`contracts.py`,
   a refusal; it does not end the review.
 - **Budgets** (`ReviewBudget`): 8 tool calls, 11 model calls (8 tool turns,
   the answer and the corrective retry), 60 000 tokens as reported by the
-  provider, 180 s for the whole review. Constants for now; the comparison
-  should show which values to keep before they become configuration.
+  provider (a response without usage counts an estimate of about four
+  characters per token of its prompt and answer, so a route that reports
+  no usage cannot disable the cap), 4 096 output tokens per answer, 180 s
+  for the whole review. Constants for now; the comparison should show
+  which values to keep before they become configuration.
+- **Rate limiter (trade-off).** A review reserves `estimated_tokens` (3 000)
+  once, when it takes its key, but may use up to the 60 000-token cap, and
+  its real usage is not fed back to the limiter. With the default 6 000
+  TPM per key an ADK review can overrun the engine's per-minute budget, so
+  per-engine budget isolation is weaker than on the LangGraph path. The
+  limiter's own wait timeout is a rejection that says no key was available,
+  not a review timeout.
 - **Model and credentials.** `ModelRouting.maintainer` names the model. A
   Groq model goes through ADK's `LiteLlm` with a key from the engine's rate
   limiter (one key and one reservation per review, not per model call in
@@ -181,8 +191,32 @@ Code: `backend/automaintainer/_runtime/specialists/` (`contracts.py`,
   cancellation of its own root task; the reviewer records the first abort
   reason itself and treats a model call that never returned as cancelled.
 - **Accounting and tracing.** One `TelemetryEvent` per review with its
-  tokens, the `llm_tokens` metric, a `specialist.reviewer` span and a
-  `specialist.tool` child span per tool call, from `observability.get_tracer`.
+  tokens (as the LangGraph review reports its own), a `specialist.reviewer`
+  span and a `specialist.tool` child span per tool call, from the
+  OpenTelemetry API's global tracer (`opentelemetry.trace.get_tracer`,
+  imported lazily). The package never imports the server's `observability`
+  module, which the SDK wheel does not ship; in the server,
+  `init_observability` installs the global provider, so the spans join the
+  run's trace.
+- **Package location.** `automaintainer/_specialists/`, a sibling of
+  `_runtime`, not inside it: `_runtime` holds only the modules moved there
+  by #187, each aliased under its old top-level name, and the SDK packaging
+  test pins that set.
+- **The engine's LLM transport is bypassed.** The ADK Reviewer calls the
+  provider through ADK (LiteLLM or the Gemini client), not through an
+  engine's injected `llm` transport. A host that injects its own transport
+  (an SDK user, the eval harness's recording/replay) does not see the
+  Reviewer's calls; with `reviewer_backend="adk"` they go to the provider.
+- **No pull request, no review.** Without a GitHub client or a PR (pr is
+  None) the ADK backend has no head to check out and always rejects, where
+  the LangGraph review still reviews the generated code in the graph state.
+  This is fail-closed and intended.
+- **CI gap.** CI installs only the `server` extra, so every `needs_adk` test
+  (approve, reject, budgets, timeout, cancel, the red-team re-run, the
+  two-engine isolation test) is skipped there. Rollout rule 6 is therefore
+  not enforced by CI yet: before anyone enables the switch, a CI job must
+  run `backend/tests/specialists` and the concurrency module with
+  `uv sync --extra server --extra adk`.
 - **Red-team.** `tests/specialists/test_reviewer_redteam.py` runs every
   `tests/redteam` test with `REVIEWER_BACKEND=adk` and a model that obeys the
   payload with its tools; every fixture's outcome holds.

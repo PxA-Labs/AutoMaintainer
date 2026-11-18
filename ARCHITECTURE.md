@@ -339,7 +339,7 @@ silent fallback on the tool path. Source: `backend/automaintainer/_runtime/agent
 
 ### Specialists
 
-Source: `backend/automaintainer/_runtime/specialists/`. Design:
+Source: `backend/automaintainer/_specialists/`. Design:
 [docs/design/adk-specialist-agents.md](docs/design/adk-specialist-agents.md)
 (#525). A specialist is a read-only, tool-using agent that one graph node
 calls with a typed request; LangGraph keeps run state, cancellation, the
@@ -357,8 +357,11 @@ verification log) over a temporary checkout of the PR at its head SHA. Tool
 results reach the model as `<untrusted-data>`. Budgets (8 tool calls, a
 token cap, a timeout), errors, a run stop and an answer that is invalid
 after one retry all end in a rejection; a cancelled task propagates. Each
-review is a `specialist.reviewer` span with `specialist.tool` children and
-one `TelemetryEvent` for its tokens.
+review is a `specialist.reviewer` span with `specialist.tool` children (from
+the OpenTelemetry API, never the server's `observability` module) and
+one `TelemetryEvent` for its tokens. It calls the provider through ADK, not
+through an engine's injected `llm` transport, and with no PR it always
+rejects (the LangGraph review still reviews the generated code).
 
 ### Engine configuration
 
