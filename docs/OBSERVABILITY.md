@@ -26,7 +26,8 @@ Two mechanisms enforce this:
 1. The `record_*` helpers build their labels themselves and normalize values
    that can come from a request. `mode` must be one of `autonomous`,
    `targeted_issue`, `code_review`, `refactor`, and a run `outcome` one of
-   `completed`, `failed`, `cancelled`; anything else is recorded as `other`.
+   `completed`, `failed`, `cancelled`, `timeout`; anything else is recorded
+   as `other`.
    `model`, `operation`, `queue` and `task_name` must look like an identifier
    (letters, digits, `_ . : -`, at most 64 characters, so no `/`, spaces or
    sentences); anything else is recorded as `other`.
@@ -45,7 +46,7 @@ Recorded through the helpers in `observability.py`.
 
 | Metric | Type | Labels | Values |
 | --- | --- | --- | --- |
-| `agent_runs_total` | counter | `mode`, `outcome` | mode as above; outcome `completed` / `failed` / `cancelled` / `other` |
+| `agent_runs_total` | counter | `mode`, `outcome` | mode as above; outcome `completed` / `failed` / `cancelled` / `timeout` / `other`. `timeout` is a run stopped by the 30-minute soft time limit, stored with status `failed` (`runs.status` has no timeout value) |
 | `agent_run_duration_seconds` | histogram (s) | `mode`, `outcome` | as above |
 | `agent_runs_active` | up-down counter | `mode` | as above |
 | `llm_tokens_total` | counter | `model` | configured model name |
@@ -96,12 +97,21 @@ Notes:
 | Raw request path, `Host` | Spans from the FastAPI instrumentation |
 | Error messages | Logs and span events (`record_exception`) |
 
-## Current limitation
+## Where the metrics are recorded
 
-`observability.py` enables OpenTelemetry only when every module it imports is
-installed, including `opentelemetry.instrumentation.logging`, which is not a
-dependency in `backend/pyproject.toml`. In an environment installed from the
-lock file the backend therefore runs in no-op telemetry mode and exports no
-metrics; the custom helpers are also not called anywhere yet (see
-ARCHITECTURE.md). The catalogue and Views above apply as soon as telemetry is
-enabled.
+- `agent_runs_total` and `agent_run_duration_seconds`: `backend/tasks.py`,
+  once per run that held the repository lock, when it ends.
+- `llm_tokens_total`, `llm_phase_tokens_total` and
+  `llm_estimated_cost_usd_total`: `backend/telemetry_metrics.py`, from the
+  engine's `TelemetryEvent`s (phase from the event, kind `total` because the
+  engine does not split prompt and completion tokens; the cost of an unsplit
+  count is priced at the model's higher rate, an upper bound). The SDK
+  package (`backend/automaintainer`) never imports `observability`.
+- `celery_worker_heartbeat`: every Celery worker process, through the hooks
+  `celery_app.py` installs.
+
+`agent_runs_active`, `llm_request_duration_seconds`,
+`github_api_calls_total`, `celery_queue_depth` and
+`celery_task_duration_seconds` are catalogued but not recorded by any caller
+yet. `observability.py` enables OpenTelemetry only when every module it
+imports is installed (the `server` extra); otherwise it runs in no-op mode.

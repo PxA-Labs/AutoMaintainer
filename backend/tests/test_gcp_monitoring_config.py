@@ -61,7 +61,15 @@ def _metric_types(text: str) -> list[str]:
 
 
 def _label_filters(text: str) -> list[tuple[str, str]]:
-    return re.findall(r'metric\.label\.([a-z_]+)\s*=\s*\\"([^"\\]+)\\"', text)
+    """(label, value) for every ``metric.label.X="v"`` and, one pair per
+    alternative, every ``metric.label.X=monitoring.regex.full_match("a|b")``."""
+    pairs = re.findall(r'metric\.label\.([a-z_]+)\s*=\s*\\"([^"\\]+)\\"', text)
+    for label, pattern in re.findall(
+        r'metric\.label\.([a-z_]+)\s*=\s*monitoring\.regex\.full_match\(\\"([^"\\]+)\\"\)',
+        text,
+    ):
+        pairs.extend((label, value) for value in pattern.split("|"))
+    return pairs
 
 
 # --- APIs and IAM -------------------------------------------------------------
@@ -152,9 +160,15 @@ def test_app_alerts_wait_until_the_metrics_exist(monitoring):
         assert bool(gated) == bool(metric), name
 
 
-def test_failure_rate_is_failed_runs_over_all_runs(monitoring):
+def test_failure_rate_counts_failed_and_timed_out_runs_over_all_runs(monitoring):
     body = _alert(monitoring, "run_failure_rate")
-    assert 'metric.label.outcome=\\"failed\\"' in body
+    numerator = re.search(r'\n\s*filter\s*=\s*"([^\n]+)"', body)
+    assert numerator
+    outcomes = {v for k, v in _label_filters(numerator.group(1)) if k == "outcome"}
+    # A run stopped by the 30-minute limit is recorded as "timeout" (tasks.py)
+    # and must count as a failure, not vanish from the numerator.
+    assert outcomes == {"failed", "timeout"}
+    assert outcomes <= observability.RUN_OUTCOMES
     denominator = re.search(r'denominator_filter\s*=\s*"([^\n]+)"', body)
     assert denominator and "outcome" not in denominator.group(1)
     assert "var.alert_run_failure_rate" in body
@@ -210,13 +224,57 @@ def test_dashboard_charts_every_alerted_metric(monitoring):
     assert f"{PREFIX}/llm_phase_tokens_total" in charted
 
 
-def test_monitoring_tf_only_adds_resources(monitoring):
-    # Shared files stay untouched: the switch reaches the services through
-    # var.app_env (main.tf merges it into the API and worker environment).
-    assert "OTEL_CLOUD_MONITORING_ENABLED" not in (TF / "run.tf").read_text(
-        encoding="utf-8"
-    )
+def test_monitoring_tf_enables_no_api_itself(monitoring):
     assert not re.search(r'resource\s+"google_project_service"', monitoring)
+
+
+# --- The export switch ------------------------------------------------------------
+
+
+def _tf(name: str) -> str:
+    return _strip_comments((TF / name).read_text(encoding="utf-8"))
+
+
+def test_cloud_monitoring_enabled_is_an_off_by_default_bool():
+    var = _block(_tf("variables.tf"), r'variable\s+"cloud_monitoring_enabled"')
+    assert re.search(r"type\s*=\s*bool", var)
+    assert re.search(r"default\s*=\s*false", var)
+
+
+def test_the_switch_reaches_the_api_and_the_worker():
+    # Like cloud_trace_enabled, but for both services: local.app_env is the
+    # environment main.tf hands to the worker module, and run.tf builds the
+    # API's environment on top of it.
+    main = _tf("main.tf")
+    app_env = _block(main, r"app_env\s*=\s*merge\(var\.app_env,\s*")
+    assert re.search(
+        r'OTEL_CLOUD_MONITORING_ENABLED\s*=\s*var\.cloud_monitoring_enabled\s*\?\s*"true"\s*:\s*"false"',
+        app_env,
+    )
+    worker = _block(main, r'module\s+"worker"')
+    assert re.search(r"app_env\s*=\s*local\.app_env", worker)
+    run = _tf("run.tf")
+    assert re.search(r"api_env\s*=\s*merge\(\s*local\.app_env", run)
+
+
+def test_app_env_cannot_override_the_switch():
+    # main.tf merges its value over var.app_env, which would silently
+    # replace an app_env entry, so the entry is refused instead.
+    var = _block(_tf("variables.tf"), r'variable\s+"app_env"')
+    assert '"OTEL_CLOUD_MONITORING_ENABLED"' in var
+
+
+def test_example_tfvars_shows_both_monitoring_settings_without_an_address():
+    example = (TF / "terraform.tfvars.example").read_text(encoding="utf-8")
+    assert re.search(r"^cloud_monitoring_enabled\s*=\s*false\s*$", example, re.M)
+    # The address is a commented placeholder; the active value is null (the
+    # variable has no default, so it must be set).
+    assert re.search(r"^#\s*monitoring_alert_email\s*=\s*\"<[^\"@]+>\"", example, re.M)
+    assert re.search(r"^monitoring_alert_email\s*=\s*null\s*$", example, re.M)
+    active = [
+        line for line in example.splitlines() if not line.lstrip().startswith("#")
+    ]
+    assert not any("monitoring_alert_email" in x and "@" in x for x in active)
 
 
 # --- Docs ------------------------------------------------------------------------
@@ -228,12 +286,21 @@ def test_metrics_and_alerts_are_documented():
     section = option_d.split("### Metrics and alerts", 1)[1].split("\n### ", 1)[0]
     for needle in (
         "OTEL_CLOUD_MONITORING_ENABLED",
+        "cloud_monitoring_enabled",
         "monitoring_alert_email",
         "monitoring_app_alerts_enabled",
         "LLM_PRICES_JSON",
         "estimate",
         "install_celery_worker_hooks",
+        "timeout",
     ):
         assert needle in section, needle
+    # The metrics are wired now (tasks.py, telemetry_metrics.py, celery_app).
+    assert "Not yet wired" not in section
+    # Stale since the Cloud Monitoring exporter exists.
+    assert "Metrics are not sent to Google" not in option_d
     readme = (TF / "README.md").read_text(encoding="utf-8")
-    assert "monitoring.tf" in readme
+    layout = readme.split("## Layout", 1)[1].split("\n## ", 1)[0]
+    for name in ("monitoring.tf", "sandbox.tf"):
+        assert f"`{name}`" in layout, name
+    assert "cloud_monitoring_enabled" in readme

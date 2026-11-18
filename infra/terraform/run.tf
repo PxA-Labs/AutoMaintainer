@@ -9,11 +9,23 @@
 locals {
   placeholder_image = "us-docker.pkg.dev/cloudrun/container/hello"
 
-  api_env = merge(local.app_env, {
-    REDIS_URL                = local.redis_url
-    OTEL_CLOUD_TRACE_ENABLED = var.cloud_trace_enabled ? "true" : "false"
-  })
+  # With Redis AUTH (#532), REDIS_URL carries the password and comes from
+  # the "redis-url" secret, mounted with the others. Before mount_secrets the
+  # API gets the plain URL; Redis then answers NOAUTH, as the API has no
+  # other secret yet either.
+  api_redis_url_from_secret = var.redis_auth_enabled && var.mount_secrets
+
+  api_env = merge(
+    local.app_env,
+    local.api_redis_url_from_secret ? {} : { REDIS_URL = local.redis_url },
+    { OTEL_CLOUD_TRACE_ENABLED = var.cloud_trace_enabled ? "true" : "false" },
+  )
   api_secrets = { for k, v in var.secrets : k => v if v.api && var.mount_secrets }
+  # Environment variable => Secret Manager secret id, mounted at "latest".
+  api_secret_refs = merge(
+    { for k, v in local.api_secrets : k => google_secret_manager_secret.app[k].secret_id },
+    local.api_redis_url_from_secret ? { REDIS_URL = google_secret_manager_secret.redis_url[0].secret_id } : {},
+  )
 }
 
 resource "google_cloud_run_v2_service" "api" {
@@ -71,12 +83,12 @@ resource "google_cloud_run_v2_service" "api" {
       }
 
       dynamic "env" {
-        for_each = local.api_secrets
+        for_each = local.api_secret_refs
         content {
           name = env.key
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.app[env.key].secret_id
+              secret  = env.value
               version = "latest"
             }
           }
@@ -117,6 +129,7 @@ resource "google_cloud_run_v2_service" "api" {
   depends_on = [
     google_project_service.services,
     google_secret_manager_secret_iam_member.api,
+    google_secret_manager_secret_iam_member.redis_url_api,
   ]
 }
 

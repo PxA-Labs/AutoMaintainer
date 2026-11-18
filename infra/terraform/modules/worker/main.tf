@@ -61,7 +61,7 @@ variable "app_env" {
 }
 
 variable "secrets" {
-  description = "Environment variable name => Secret Manager secret resource name (projects/<p>/secrets/<id>)."
+  description = "Environment variable name => Secret Manager secret resource name (projects/<p>/secrets/<id>). A REDIS_URL entry (Redis AUTH) replaces the plain broker URL, and the self-hosted Redis takes its password from it."
   type        = map(string)
 }
 
@@ -113,6 +113,9 @@ data "google_client_config" "current" {}
 locals {
   tag               = "${var.name}-worker"
   self_hosted_redis = var.redis_url == null
+  # Redis AUTH (#532): the secret holding redis://:<password>@<host>:<port>/0,
+  # or "" without AUTH.
+  redis_url_secret = lookup(var.secrets, "REDIS_URL", "")
 
   # Sandboxed verification (sandbox.tf, #158): the worker runs each test
   # command as one execution of this Cloud Run job. The names are decided
@@ -130,11 +133,16 @@ locals {
     "REDIS_IMAGE=${var.redis_image}",
     "REDIS_MAXMEMORY=${var.redis_maxmemory}",
     "REDIS_ALLOW_CIDR=${var.subnet_cidr}",
+    # run-redis.sh reads the password from it; empty means no requirepass.
+    # A secret name, not a value.
+    "REDIS_URL_SECRET=${local.redis_url_secret}",
     "",
   ])
 
+  # With Redis AUTH, REDIS_URL is not in the env file: secrets_exec.py sets
+  # it from the secret (the URL there names the VM's internal address, which
+  # also works from the VM itself).
   container_env = merge(var.app_env, {
-    REDIS_URL              = local.self_hosted_redis ? "redis://127.0.0.1:6379/0" : var.redis_url
     AUTOMAINTAINER_SECRETS = join(",", [for k, v in var.secrets : "${k}=${v}"])
     # Verification runs in the Cloud Run job, never on this VM.
     SANDBOX_BACKEND           = "cloud_run_job"
@@ -144,7 +152,9 @@ locals {
     CLOUD_RUN_SANDBOX_BUCKET  = local.sandbox_bucket_name
     # Signs the per-run URLs (signBlob on itself).
     CLOUD_RUN_SANDBOX_SIGNER = var.service_account_email
-  })
+    }, local.redis_url_secret == "" ? {
+    REDIS_URL = local.self_hosted_redis ? "redis://127.0.0.1:6379/0" : var.redis_url
+  } : {})
 
   user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     self_hosted_redis = local.self_hosted_redis

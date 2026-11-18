@@ -40,3 +40,13 @@ output "secret_ids" {
 output "redis_mode" {
   value = var.redis_mode
 }
+
+output "redis_address" {
+  description = "host:port of Redis, for the URL in the redis-url secret: redis://:<password>@<redis_address>/0."
+  value       = local.redis_host_port
+}
+
+output "redis_url_secret_id" {
+  description = "Secret that holds the Redis URL with its password (redis_auth_enabled); null without AUTH."
+  value       = one(google_secret_manager_secret.redis_url[*].secret_id)
+}

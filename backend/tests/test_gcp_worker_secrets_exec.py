@@ -160,3 +160,55 @@ def test_a_command_is_required(launcher, fake_google, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         launcher.main(["secrets_exec.py"])
     assert exc.value.code == 2
+
+
+# --- REDIS_URL with the Redis password (#532) -------------------------------
+
+REDIS_SPEC = "REDIS_URL=projects/p/secrets/redis-url"
+REDIS_PASSWORD = "0123456789abcdef0123456789abcdef"  # gitleaks:allow (test value)
+
+
+def test_redis_url_with_its_password_reaches_the_worker(
+    launcher, fake_google, monkeypatch, capsys
+):
+    calls, values, execs = fake_google
+    url = f"redis://:{REDIS_PASSWORD}@10.10.0.2:6379/0"
+    values["projects/p/secrets/redis-url"] = url
+    # The plain URL from the env file (no password) is replaced.
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    monkeypatch.setenv("AUTOMAINTAINER_SECRETS", REDIS_SPEC)
+
+    launcher.main(["secrets_exec.py", "celery", "worker"])
+
+    assert launcher.os.environ["REDIS_URL"] == url
+    assert execs == [("celery", ["celery", "worker"])]
+    captured = capsys.readouterr()
+    assert REDIS_PASSWORD not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "value,reason",
+    [
+        ("redis://10.10.0.2:6379/0", "no password"),
+        (REDIS_PASSWORD, "redis://"),  # the bare password, not a URL
+        (f"http://:{REDIS_PASSWORD}@10.10.0.2:6379/0", "redis://"),
+        (f"redis://:{REDIS_PASSWORD}@:6379/0", "no host"),
+        (f"redis://:{REDIS_PASSWORD}@10.10.0.2:6379/0\n", "whitespace"),
+        (f"redis://:{REDIS_PASSWORD}@10.10.0.2:port/0", "not a URL"),
+    ],
+)
+def test_an_unusable_redis_url_fails_closed_without_printing_it(
+    launcher, fake_google, monkeypatch, capsys, value, reason
+):
+    calls, values, execs = fake_google
+    values["projects/p/secrets/redis-url"] = value
+    monkeypatch.setenv("AUTOMAINTAINER_SECRETS", REDIS_SPEC)
+
+    with pytest.raises(SystemExit) as exc:
+        launcher.main(["secrets_exec.py", "celery"])
+
+    assert exc.value.code == 1
+    assert execs == []
+    err = capsys.readouterr().err
+    assert "REDIS_URL" in err and reason in err
+    assert REDIS_PASSWORD not in err and value.strip() not in err

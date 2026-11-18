@@ -13,6 +13,7 @@ import os
 import asyncio
 import inspect
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
@@ -63,8 +64,22 @@ from supabase import create_client, Client
 
 from agents import run_agent_loop, broadcast_log
 from github_app import sync_installation_repositories
+from observability import record_agent_run_complete
+from telemetry_metrics import MetricsEmitter
 
 logger = logging.getLogger(__name__)
+
+
+def _record_run_metrics(mode: str, outcome: str, started: float) -> None:
+    """agent_runs_total and agent_run_duration_seconds for a finished run.
+
+    Never raises: a metrics problem must not change how the run ends.
+    """
+    try:
+        record_agent_run_complete(mode, outcome, time.monotonic() - started)
+    except Exception as e:
+        logger.warning(f"Could not record run metrics: {e!r}")
+
 
 # Supabase client for tasks (service role)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -372,6 +387,14 @@ def _execute_agent_run(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Run metrics (agent_runs_total, agent_run_duration_seconds): counted
+    # once per run that got past the lock, with the outcome set below. A run
+    # that ends without reaching one of them (an exception that is not an
+    # Exception) counts as failed. Its duration starts here, so time spent
+    # queued or waiting for the lock is not included.
+    started = time.monotonic()
+    outcome = "failed"
+
     try:
         logger.info(f"Starting agent run {run_id} for repo {repo_name}")
 
@@ -417,6 +440,10 @@ def _execute_agent_run(
                     trigger_login=trigger_login,
                     trigger_source=trigger_source,
                     trigger_github_id=trigger_github_id,
+                    # Records each TelemetryEvent's tokens and estimated
+                    # cost, then forwards it to the Supabase emitter the
+                    # engine would use without one.
+                    emitter=MetricsEmitter(),
                 )
             )
         )
@@ -429,6 +456,9 @@ def _execute_agent_run(
             }
 
         # Update status based on result
+        outcome = result.get("status")
+        if outcome not in ("completed", "cancelled"):
+            outcome = "failed"
         if result.get("status") == "completed":
             loop.run_until_complete(
                 update_run_status(
@@ -498,6 +528,9 @@ def _execute_agent_run(
         return result
 
     except SoftTimeLimitExceeded:
+        # Stored as "failed" (runs.status has no timeout value), measured
+        # as "timeout".
+        outcome = "timeout"
         logger.warning(f"Run {run_id} exceeded soft time limit")
         loop.run_until_complete(
             update_run_status(
@@ -533,6 +566,7 @@ def _execute_agent_run(
         raise
 
     finally:
+        _record_run_metrics(mode, outcome, started)
         heartbeat_stop.set()
         heartbeat_thread.join(timeout=2)
         release_repo_lock(repository_id, run_id)

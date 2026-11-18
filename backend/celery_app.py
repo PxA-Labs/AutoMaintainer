@@ -21,6 +21,15 @@ from github_app import configure_process_environment
 
 configure_process_environment()
 
+# Each prefork worker process sets up OpenTelemetry after the fork (traces,
+# metrics and, with OTEL_CLOUD_MONITORING_ENABLED, the Cloud Monitoring
+# reader and the celery_worker_heartbeat gauge) and flushes it on exit. The
+# signals only fire in worker child processes, so the API, which also
+# imports this module, is unaffected.
+from observability import install_celery_worker_hooks
+
+install_celery_worker_hooks()
+
 import os
 from urllib.parse import urlparse
 

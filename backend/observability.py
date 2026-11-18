@@ -87,7 +87,15 @@ try:
         OTLPMetricExporter,
     )
     from opentelemetry.exporter.prometheus import PrometheusMetricReader
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    # The FastAPI instrumentation imports FastAPI and Starlette, which the
+    # Celery workers (celery_app and tasks import this module) must not load
+    # (test_worker_probe.py). instrument_fastapi imports it instead; the spec
+    # check keeps a missing package disabling telemetry here, as before.
+    import importlib.util as _importlib_util
+
+    if _importlib_util.find_spec("opentelemetry.instrumentation.fastapi") is None:
+        raise ImportError("opentelemetry-instrumentation-fastapi is not installed")
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     from opentelemetry.instrumentation.requests import RequestsInstrumentor
     from opentelemetry.instrumentation.redis import RedisInstrumentor
@@ -201,7 +209,11 @@ def all_metric_labels() -> dict[str, frozenset[str]]:
 
 # Bounded values for labels whose input can come from a request.
 AGENT_MODES = frozenset({"autonomous", "targeted_issue", "code_review", "refactor"})
-RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled"})
+# The terminal runs.status values, plus "timeout": a run stopped by the
+# Celery soft time limit is stored as "failed" (runs.status has no timeout
+# value) but recorded as "timeout", so it can be told apart and still counted
+# as a failure by the failure-rate alert (monitoring.tf).
+RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled", "timeout"})
 # events.AgentPhase values (not imported: this module must stay importable
 # without the engine).
 LLM_PHASES = frozenset(
@@ -335,6 +347,20 @@ def estimated_llm_cost_usd(model: str, tokens: int, kind: str) -> Optional[float
     if entry is None:
         return None
     return tokens * entry[f"{kind}_per_mtok"] / 1_000_000
+
+
+def estimated_llm_cost_upper_bound_usd(model: str, tokens: int) -> Optional[float]:
+    """Estimated USD cost of ``tokens`` not split into input and output.
+
+    Priced at the higher of the model's two rates, so the figure can only
+    overstate the cost (by at most output/input - 1, about 34 % for
+    llama-3.3-70b-versatile): a cost alert built on it fires early rather
+    than late. None if the model is unpriced.
+    """
+    entry = _parse_llm_prices(os.getenv(LLM_PRICES_ENV, "")).get(model)
+    if entry is None:
+        return None
+    return tokens * max(entry[k] for k in _PRICE_KEYS) / 1_000_000
 
 
 # --- Cloud Trace (#527) ---
@@ -563,6 +589,8 @@ def instrument_fastapi(app):
         return
 
     try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
         FastAPIInstrumentor.instrument_app(
             app,
             tracer_provider=_tracer_provider,
@@ -912,9 +940,14 @@ def record_llm_tokens(
     )
     cost = estimated_llm_cost_usd(model, tokens, kind_label)
     if cost is not None:
-        llm_estimated_cost_usd_total.add(
-            cost, {"model": model_label, "phase": phase_label}
-        )
+        record_llm_estimated_cost(model, cost, phase)
+
+
+def record_llm_estimated_cost(model: str, usd: float, phase: Optional[str] = None):
+    """Add ``usd`` to the ESTIMATED LLM cost (per model and phase)."""
+    llm_estimated_cost_usd_total.add(
+        usd, {"model": _identifier(model), "phase": _one_of(phase, LLM_PHASES)}
+    )
 
 
 def record_llm_request(model: str, duration: float, success: bool):
