@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,7 +23,7 @@ class Query:
         self.filters = []
         self.patch = None
         self.one = False
-        self.inserted = False
+        self.inserted = None  # the row an insert() will write
         self.max_rows = None
 
     def select(self, *_a):
@@ -60,20 +61,32 @@ class Query:
     single = maybe_single
 
     def insert(self, row):
-        # Column defaults from supabase_schema.sql.
-        defaults = {"retry_count": 0, "max_retries": 3, "processed_at": None}
-        self.db[self.table].append(
-            {**defaults, "id": f"row-{len(self.db[self.table])}", **row}
-        )
-        self.inserted = True
+        # Written at execute(), as postgrest-py does: that is where a
+        # constraint violation is raised.
+        self.inserted = row
         return self
 
     def execute(self):
-        if self.inserted:
+        # One statement at a time, as the database runs each atomically:
+        # the unique-index check and the write cannot interleave (threads).
+        with self.db.lock:
+            return self._execute()
+
+    def _execute(self):
+        table = self.db[self.table]
+        if self.inserted is not None:
+            # Column defaults from supabase_schema.sql.
+            defaults = {"retry_count": 0, "max_retries": 3, "processed_at": None}
+            new = {**defaults, "id": f"row-{len(table)}", **self.inserted}
+            self.db.check_unique(self.table, [new], table)
+            table.append(new)
             return SimpleNamespace(data=[])
-        rows = [r for r in self.db[self.table] if all(f(r) for f in self.filters)]
+        rows = [r for r in table if all(f(r) for f in self.filters)]
         if self.patch is not None:
             self.db.calls.append((self.table, dict(self.patch)))
+            updated = [{**row, **self.patch} for row in rows]
+            others = [r for r in table if not any(r is row for row in rows)]
+            self.db.check_unique(self.table, updated, others)
             for row in rows:
                 row.update(self.patch)
             return SimpleNamespace(data=[dict(r) for r in rows])
@@ -84,10 +97,55 @@ class Query:
         return SimpleNamespace(data=[dict(r) for r in rows])
 
 
+def _active_issue_key(row):
+    """runs_one_active_per_issue's key for ``row``, or None outside the index
+    (supabase/migrations/20261117140000_run_trigger_and_active_issue.sql:
+    (repository_id, target_issue_number) where the status is active and the
+    target issue is not null)."""
+    if row.get("target_issue_number") is None:
+        return None
+    if row.get("status") not in webhook_processor.ACTIVE_RUN_STATUSES:
+        return None
+    return (row.get("repository_id"), row["target_issue_number"])
+
+
+def _unique_violation(index, key):
+    """What postgrest-py raises when Postgres reports SQLSTATE 23505."""
+    from postgrest.exceptions import APIError
+
+    return APIError(
+        {
+            "code": "23505",
+            "message": f'duplicate key value violates unique constraint "{index}"',
+            "details": f"Key (repository_id, target_issue_number)={key} "
+            "already exists.",
+        }
+    )
+
+
 class FakeDB(dict):
+    """In-memory tables. Enforces the one unique index the code relies on
+    for correctness, runs_one_active_per_issue (#518, #524); nothing else."""
+
     def __init__(self, **tables):
         super().__init__(tables)
         self.calls = []
+        self.lock = threading.RLock()
+
+    def check_unique(self, table, written, others):
+        """Raise the index's 23505 if ``written`` (the rows a statement
+        writes, as they will be) clash with each other or with ``others``
+        (the rows it leaves alone)."""
+        if table != "runs":
+            return
+        seen = {_active_issue_key(r) for r in others} - {None}
+        for row in written:
+            key = _active_issue_key(row)
+            if key is None:
+                continue
+            if key in seen:
+                raise _unique_violation(webhook_processor.ACTIVE_RUN_INDEX, key)
+            seen.add(key)
 
     def table(self, name):
         self.setdefault(name, [])
@@ -399,3 +457,62 @@ def test_route_does_not_enqueue_duplicates(monkeypatch):
 
     assert response.json()["status"] == "duplicate"
     task.apply_async.assert_not_called()
+
+
+# --- The fake enforces runs_one_active_per_issue (#518, #524) ------------------
+
+
+def _run(run_id, status="queued", issue=12, repository_id=55):
+    return {
+        "id": run_id,
+        "repository_id": repository_id,
+        "target_issue_number": issue,
+        "status": status,
+    }
+
+
+def _refused(write):
+    with pytest.raises(Exception) as caught:
+        write()
+    assert webhook_processor.is_active_run_conflict(caught.value), caught.value
+
+
+@pytest.mark.parametrize("status", webhook_processor.ACTIVE_RUN_STATUSES)
+def test_fake_db_refuses_a_second_active_run_for_an_issue(status):
+    db = FakeDB(runs=[_run("r1", status=status)])
+
+    _refused(lambda: db.table("runs").insert(_run("r2")).execute())
+
+    assert [r["id"] for r in db["runs"]] == ["r1"]
+
+
+@pytest.mark.parametrize(
+    "existing, new",
+    [
+        (_run("r1", status="completed"), _run("r2")),  # the old run is over
+        (_run("r1", status="failed"), _run("r2")),
+        (_run("r1"), _run("r2", issue=13)),  # another issue
+        (_run("r1"), _run("r2", repository_id=56)),  # another repository
+        (_run("r1", issue=None), _run("r2", issue=None)),  # no target issue
+        (_run("r1"), _run("r2", status="cancelled")),  # the new row is inactive
+    ],
+)
+def test_fake_db_allows_what_the_index_allows(existing, new):
+    db = FakeDB(runs=[existing])
+
+    db.table("runs").insert(new).execute()
+
+    assert [r["id"] for r in db["runs"]] == ["r1", "r2"]
+
+
+def test_fake_db_refuses_an_update_that_reactivates_a_second_run():
+    db = FakeDB(runs=[_run("r1"), _run("r2", status="failed")])
+
+    _refused(
+        lambda: db.table("runs").update({"status": "queued"}).eq("id", "r2").execute()
+    )
+
+    assert db["runs"][1]["status"] == "failed"
+    # Updating the active run itself (queued -> running) is fine.
+    db.table("runs").update({"status": "running"}).eq("id", "r1").execute()
+    assert db["runs"][0]["status"] == "running"
