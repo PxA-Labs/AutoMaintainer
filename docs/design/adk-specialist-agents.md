@@ -1,11 +1,37 @@
 # Design note: ADK specialist agents under the LangGraph orchestrator
 
-Status: **implemented behind a switch, off by default** (rollout steps 1 and
-2). The ADK Reviewer exists as `reviewer_backend="adk"`; the default stays
-`langgraph`. Not yet done: the spike run against Groq (the owner's go/no-go,
-below), the live comparison (step 3) and the enable decision (step 4).
-Tracking issue: #525. See [Implementation](#implementation) for what was
-built and where it differs from the plan.
+Tracking issue: #525.
+
+## Status
+
+**Implemented behind a switch, off by default.** The default review backend
+stays `langgraph`, so a deployment that changes nothing behaves as before.
+
+Done in code:
+
+| Item | Where | PR |
+| --- | --- | --- |
+| ADK Reviewer behind `reviewer_backend: "langgraph" \| "adk"` (`REVIEWER_BACKEND`), default `langgraph` | `backend/automaintainer/_specialists/` (`contracts.py`, `tools.py`, `reviewer_adk.py`), one seam in `maintainer_node` | #534 |
+| `adk` optional extra (`google-adk`, `litellm`); the base SDK install is unchanged | `backend/pyproject.toml` | #533 |
+| Spike script for the Groq go/no-go | `backend/evals/spike_adk_groq.py` | #534 |
+| Reviewer comparison on the end-to-end evaluation set (`--reviewer-backend`) | `backend/evals/e2e/`, [docs/EVALS.md](../EVALS.md#comparing-reviewer-backends-525) | #531, #534 |
+| `search_code` backed by the code index when retrieval is on and the index holds the PR head; ripgrep otherwise | `backend/automaintainer/_specialists/tools.py` | #539 |
+| CI job that installs the `adk` and `rag` extras and fails if any specialist, ADK concurrency, RAG or red-team test is skipped | `test-extras` in `.github/workflows/ci-backend.yml` | #538 |
+| Review tokens recorded as server-side metrics from the review's `TelemetryEvent` | `backend/telemetry_metrics.py` | #540 |
+
+Pending (owner steps; they need provider keys and cost money):
+
+1. Run the spike against Groq and record GO or NO-GO in #525 (see
+   [Spike: the owner's go/no-go](#spike-the-owners-gono-go)).
+2. Run the live Reviewer comparison (rollout step 3): at least 3 repeats per
+   backend, compared with the `langgraph` live run of the same model and with
+   the 3/14 fixture baseline.
+3. Decide whether to enable `adk` (rollout step 4). Until then, keep
+   `REVIEWER_BACKEND=langgraph`.
+
+See [Implementation](#implementation) for what was built and where it
+differs from the plan. The architecture overview is in
+[ARCHITECTURE.md, Specialists](../../ARCHITECTURE.md#specialists).
 
 ## Why
 
@@ -126,7 +152,7 @@ its cost measured in the comparison.
 2. **Behind a switch:** `reviewer_backend: "langgraph" | "adk"` in
    `AutoMaintainerConfig`, default `langgraph`. `google-adk` ships as an
    optional `adk` extra, so the base SDK install stays as slim as #521 left it.
-3. **Compare** on the evaluation set (built before this work starts):
+3. **Compare** on the evaluation set (the end-to-end set from #531):
    - false-approval rate (approving a change that breaks hidden tests) —
      the number that matters most;
    - false-rejection rate;
@@ -200,7 +226,10 @@ Code: `backend/automaintainer/_specialists/` (`contracts.py`,
   imported lazily). The package never imports the server's `observability`
   module, which the SDK wheel does not ship; in the server,
   `init_observability` installs the global provider, so the spans join the
-  run's trace.
+  run's trace. The server records the review's tokens and estimated cost as
+  metrics with phase `maintainer` from that `TelemetryEvent`
+  (`MetricsEmitter` in `backend/telemetry_metrics.py`, #540), as it does
+  for the LangGraph review.
 - **Package location.** `automaintainer/_specialists/`, a sibling of
   `_runtime`, not inside it: `_runtime` holds only the modules moved there
   by #187, each aliased under its old top-level name, and the SDK packaging
@@ -214,15 +243,20 @@ Code: `backend/automaintainer/_specialists/` (`contracts.py`,
   None) the ADK backend has no head to check out and always rejects, where
   the LangGraph review still reviews the generated code in the graph state.
   This is fail-closed and intended.
-- **CI gap.** CI installs only the `server` extra, so every `needs_adk` test
-  (approve, reject, budgets, timeout, cancel, the red-team re-run, the
-  two-engine isolation test) is skipped there. Rollout rule 6 is therefore
-  not enforced by CI yet: before anyone enables the switch, a CI job must
-  run `backend/tests/specialists` and the concurrency module with
-  `uv sync --extra server --extra adk`.
+- **CI coverage.** The main test matrix installs only the `server` extra, so
+  the `needs_adk` tests (approve, reject, budgets, timeout, cancel, the
+  red-team re-run, the two-engine isolation test) skip there. The
+  `test-extras` job in `.github/workflows/ci-backend.yml` (#538) installs the
+  `adk` and `rag` extras, runs `tests/specialists`,
+  `tests/concurrency/test_concurrency_adk_reviewer.py`, `tests/rag` and
+  `tests/redteam`, and fails if any of them is skipped. Rules 5 and 6 are
+  therefore checked in CI. These tests use scripted fake models; they do not
+  measure a live model.
 - **Red-team.** `tests/specialists/test_reviewer_redteam.py` runs every
   `tests/redteam` test with `REVIEWER_BACKEND=adk` and a model that obeys the
   payload with its tools; every fixture's outcome holds.
+  `tests/specialists/test_search_code_redteam.py` does the same for a
+  poisoned code index behind `search_code`.
 
 ## Spike: the owner's go/no-go
 
@@ -269,20 +303,32 @@ in `evals/e2e/pricing.py` does not cover it; pass `--prices`).
 
 ## Open questions
 
-- Which evaluation tasks give enough bad changes for the false-approval rate to
-  mean something? This depends on the evaluation set (roadmap step 2).
+None at the moment. The questions below were open when this note was
+written and are now resolved.
 
-## Decided
+## Resolved questions
 
-- **The RAG retriever arrived first and is shared** (round 18, #526). The PM
-  node stays a single LangGraph prompt; it gets retrieved code in its prompt
-  (`agents.retrieved_context`), and the Reviewer's `search_code` uses the
-  same resolution (`agents.resolve_retriever`: an engine's injected factory,
-  else a pgvector retriever over the run's database client). Both are behind
-  `rag_retrieval_enabled`, off by default. Whether the PM becomes a
-  tool-using specialist is left until the retrieval numbers on the
-  evaluation set (Vertex embeddings) are in: a retriever in the prompt is
+- **Which evaluation tasks give enough bad changes for the false-approval
+  rate to mean something?** Resolved by the end-to-end evaluation (#531):
+  its Reviewer change set has 27 cases, 14 defective and 13 correct
+  (`backend/evals/e2e/reviewer/`). With 14 defective cases one approval moves
+  the rate by about 0.07, so the comparison uses at least 3 repeats and
+  treats a difference smaller than the two spreads as no difference
+  ([docs/EVALS.md](../EVALS.md#comparing-reviewer-backends-525)). Whether 14
+  cases are enough to detect a small change is a judgement for the
+  comparison itself.
+- **Does the PM get retrieval as a tool-using specialist or in its prompt?**
+  In its prompt (#539). The RAG retriever arrived first and is shared
+  (#526). The PM node stays a single LangGraph prompt and gets retrieved
+  code in it (`agents.retrieved_context`); the Reviewer's `search_code` uses
+  the same resolution (`agents.resolve_retriever`: an engine's injected
+  factory, #541, else a pgvector retriever over the run's database client).
+  Both are behind `rag_retrieval_enabled`, off by default. Whether the PM
+  becomes a tool-using specialist is left until the retrieval numbers on the
+  evaluation set with Vertex embeddings are in: a retriever in the prompt is
   cheaper than a tool loop, and the loop only pays off if the PM needs to
   look further than the top chunks. Retrieved chunks are one more source of
   untrusted text; the red-team fixtures run with retrieval on, through the
-  PM prompt and through `search_code`, before it can be enabled (rule 6).
+  PM prompt and through `search_code` (rule 6).
+- **Does CI run the ADK tests?** Yes, since #538 (the `test-extras` job; see
+  [Implementation](#implementation)).
