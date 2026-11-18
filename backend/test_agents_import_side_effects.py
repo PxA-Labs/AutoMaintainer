@@ -7,10 +7,10 @@ lookup, every process spawn and SQLite connection, and records every file
 opened for writing and every directory created. Supabase credentials are
 set, so an eagerly constructed client would show up too.
 
-The probe runs with ``-c``, so python-dotenv's find_dotenv() resolves from
-the temporary cwd and its ancestors: the real backend/.env load path is not
-exercised. That does not matter for what is checked here (no writes, no
-network, no processes), only for which environment the import sees.
+Importing agents does not load ``.env``: since #524 only the API and worker
+entry points do, through ``github_app.configure_process_environment()``,
+which this probe never calls. The import therefore sees exactly the
+environment set below, and no backend/.env file can change the result.
 """
 
 import json

@@ -114,11 +114,10 @@ git checkout -b feat/183-pydantic-config-schema
   # Run backend unit tests
   cd backend && uv run pytest -v && cd ..
 
-  # Format code with Black
-  uvx black backend/
-
-  # Check code style with Flake8
-  uvx flake8 backend/ --max-line-length=120 --exclude=backend/.venv,backend/venv
+  # Format and lint with the black and flake8 pinned in the uv dev group
+  # (the versions CI runs; the flake8 line is CI's blocking gate)
+  cd backend && uv run black . && cd ..
+  cd backend && uv run flake8 . --extend-exclude=.venv,venv --count --select=E9,F63,F7,F82 --show-source --statistics && cd ..
 
   # Dashboard: lint (incl. jsx-a11y), unit tests, build, end-to-end smoke tests
   cd dashboard && npm run lint && npm test && npm run build && npm run test:e2e && cd ..
