@@ -169,12 +169,12 @@ commit_sha=None)` is called per prompt, never cached in a module global:
    taken from the run. With a `commit_sha` it is returned only when the
    index holds exactly that commit.
 
-> The engine constructor does not take a `retriever=` argument yet
-> (`engine.py` and `context.py` were outside this change): the lead's
-> follow-up adds `retriever: Optional[RetrieverFactory] = None` to
-> `EngineContext` and passes it through `AutoMaintainerEngine(...,
-> retriever=...)` like `llm=` and `github=`. The runtime reads the attribute
-> with `getattr`, so it works before and after.
+An engine takes the factory as `AutoMaintainerEngine(config, ...,
+retriever=factory)`, like `llm=` and `github=`, and publishes it on its
+`EngineContext` (`retriever`, default None). It is only consulted when the
+engine's config has `rag_retrieval_enabled=True`; two engines in one
+process each see only their own factory
+(`tests/concurrency/test_concurrency_rag_retriever.py`).
 
 **PM prompt.** `pm_node` queries with the issue text (title and body in
 targeted mode, else the proposed idea), capped at 2000 characters, asks

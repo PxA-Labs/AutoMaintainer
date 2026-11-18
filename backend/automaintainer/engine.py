@@ -32,13 +32,16 @@ import threading
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from ._runtime import agents
 from ._runtime.rate_limiter import RateLimitManager
 
 from .config import AutoMaintainerConfig
 from .context import EngineContext, current_engine
+
+if TYPE_CHECKING:
+    from ._runtime.retrieval import RetrievalScope, Retriever
 
 __all__ = [
     "AutoMaintainerEngine",
@@ -55,6 +58,9 @@ LLMTransport = Callable[..., Awaitable[str]]
 # github_app.credentials_for_installation(installation_id, purpose=,
 # repository=); returns an object with .mode, .token() and .client().
 CredentialsFactory = Callable[..., Any]
+# An injected retriever factory (#526, docs/RAG.md): called once per prompt
+# with the run's RetrievalScope; returns a Retriever bound to it, or None.
+RetrieverFactory = Callable[["RetrievalScope"], Optional["Retriever"]]
 
 _engine_ids = itertools.count(1)
 # Every live engine, so a cancel request can find a run in this process.
@@ -124,6 +130,9 @@ class AutoMaintainerEngine:
     PAT credentials derived from the config. ``emitter``: the default event
     emitter of the engine's runs (else the Supabase emitter, else none).
     ``nodes``: replacement node functions, as ``agents.build_graph``.
+    ``retriever``: an optional retriever factory for code retrieval, used
+    only with ``config.rag_retrieval_enabled``; without it the engine
+    retrieves through its own ``supabase`` client and Vertex AI embeddings.
 
     Use it as an async context manager, or call ``aclose()``.
     """
@@ -137,6 +146,7 @@ class AutoMaintainerEngine:
         github: Optional[CredentialsFactory] = None,
         emitter: Any = None,
         nodes: Optional[dict] = None,
+        retriever: Optional[RetrieverFactory] = None,
     ):
         if not isinstance(config, AutoMaintainerConfig):
             raise TypeError("config must be an AutoMaintainerConfig")
@@ -149,6 +159,7 @@ class AutoMaintainerEngine:
             supabase=supabase,
             llm=llm,
             github=github,
+            retriever=retriever,
         )
 
     def _init_common(self, emitter: Any, nodes: Optional[dict]) -> None:

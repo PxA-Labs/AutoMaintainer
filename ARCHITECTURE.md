@@ -406,7 +406,8 @@ Celery path) still reads the environment, as before.
 ### Engine
 
 `backend/automaintainer/engine.py` defines `AutoMaintainerEngine(config, *,
-supabase=None, llm=None, github=None, emitter=None, nodes=None)` (#186).
+supabase=None, llm=None, github=None, emitter=None, nodes=None,
+retriever=None)` (#186; `retriever`, a code retrieval factory, #526).
 Several engines with different configurations can run in one process and one
 event loop without sharing clients, settings or caches.
 
