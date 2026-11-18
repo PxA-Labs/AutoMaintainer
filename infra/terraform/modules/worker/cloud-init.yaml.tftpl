@@ -1,0 +1,88 @@
+#cloud-config
+# Container-Optimized OS re-applies this on every boot (/etc is not
+# persistent); the Docker volumes under /var/lib/docker are.
+
+write_files:
+  - path: /etc/automaintainer/worker.env
+    permissions: "0644"
+    owner: root
+    encoding: b64
+    content: ${worker_env}
+  - path: /etc/automaintainer/app.env
+    permissions: "0600"
+    owner: root
+    encoding: b64
+    content: ${app_env}
+  - path: /etc/automaintainer/secrets_exec.py
+    permissions: "0644"
+    owner: root
+    encoding: b64
+    content: ${secrets_exec}
+  - path: /etc/automaintainer/run-worker.sh
+    permissions: "0644"
+    owner: root
+    encoding: b64
+    content: ${run_worker}
+  - path: /etc/automaintainer/watch-image.sh
+    permissions: "0644"
+    owner: root
+    encoding: b64
+    content: ${watch_image}
+%{ if self_hosted_redis ~}
+  - path: /etc/automaintainer/run-redis.sh
+    permissions: "0644"
+    owner: root
+    encoding: b64
+    content: ${run_redis}
+  - path: /etc/systemd/system/automaintainer-redis.service
+    permissions: "0644"
+    owner: root
+    content: |
+      [Unit]
+      Description=Redis for AutoMaintainer (Celery broker)
+      Wants=network-online.target docker.service
+      After=network-online.target docker.service
+
+      [Service]
+      ExecStart=/bin/bash /etc/automaintainer/run-redis.sh
+      ExecStop=/usr/bin/docker stop -t 30 automaintainer-redis
+      Restart=always
+      RestartSec=10
+%{ endif ~}
+  - path: /etc/systemd/system/automaintainer-worker.service
+    permissions: "0644"
+    owner: root
+    content: |
+      [Unit]
+      Description=AutoMaintainer Celery worker and beat
+      Wants=network-online.target docker.service
+      After=network-online.target docker.service%{ if self_hosted_redis } automaintainer-redis.service%{ endif }
+
+      [Service]
+      Environment=HOME=/var/lib/automaintainer-home
+      ExecStartPre=/bin/mkdir -p /var/lib/automaintainer-home
+      ExecStart=/bin/bash /etc/automaintainer/run-worker.sh
+      ExecStop=/usr/bin/docker stop -t ${stop_timeout} automaintainer-worker
+      TimeoutStopSec=${stop_timeout + 30}
+      Restart=always
+      RestartSec=30
+  - path: /etc/systemd/system/automaintainer-image-watch.service
+    permissions: "0644"
+    owner: root
+    content: |
+      [Unit]
+      Description=Restart the AutoMaintainer worker when its image changes
+      After=automaintainer-worker.service
+
+      [Service]
+      ExecStart=/bin/bash /etc/automaintainer/watch-image.sh
+      Restart=always
+      RestartSec=30
+
+runcmd:
+  - systemctl daemon-reload
+%{ if self_hosted_redis ~}
+  - systemctl start automaintainer-redis.service
+%{ endif ~}
+  - systemctl start automaintainer-worker.service
+  - systemctl start automaintainer-image-watch.service

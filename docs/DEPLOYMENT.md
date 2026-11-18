@@ -368,6 +368,213 @@ needs a beat process. On a single container, add `CELERY_QUEUES=agent_runs,maint
 and run `celery -A celery_app beat -s /tmp/celerybeat-schedule` somewhere, for
 example as a second Space.
 
+## Option D: Google Cloud (Terraform)
+
+[`infra/terraform`](../infra/terraform) describes a production deployment on
+Google Cloud, in the project `automaintainer-prod` by default (#527). Its
+[README](../infra/terraform/README.md) explains each resource and the design
+choices. Supabase stays the database.
+
+| Piece | Runs on |
+|---|---|
+| API | Cloud Run service `automaintainer-api`: always 1 instance or more (GitHub allows a webhook 10 seconds), at most `api_max_instances`, public ingress with unauthenticated invocation (GitHub webhooks and the dashboard call it; the app checks Supabase JWTs and webhook signatures itself), startup and liveness probes on `/healthz` |
+| Agent, maintenance and sync workers, beat | One Compute Engine VM (Container-Optimized OS, no public IP, egress through Cloud NAT) running the same image as `celery worker -B` on every queue. One VM, so exactly one beat |
+| Redis | `redis_mode = "vm"` (default): a Redis container on the worker VM. `"memorystore"`: Memorystore basic tier. Cloud Run reaches either over Direct VPC egress |
+| Secrets | Secret Manager, one secret per variable. Cloud Run mounts them as environment variables; on the VM, the container reads them at start with the VM's service account (`modules/worker/secrets_exec.py`) |
+| Images | Artifact Registry, pushed by `.github/workflows/deploy-gcp.yml` through Workload Identity Federation (no key) |
+| Traces | Cloud Trace, when `cloud_trace_enabled = true` (sets `OTEL_CLOUD_TRACE_ENABLED`, below). Only the API emits traces |
+| Cost control | A billing budget with alerts at 50 %, 90 % and 100 % of actual spend and at 100 % of forecast spend |
+
+Service accounts: `automaintainer-api` reads only the API's secrets (and
+writes traces if enabled); `automaintainer-worker` reads only the worker's
+secrets, pulls images and writes logs and metrics; `automaintainer-deployer`
+pushes images, deploys new API revisions and sets the worker VM's metadata
+(the deploy changes only `automaintainer-image`, but the permission covers
+every key, including `user-data`, which is about the same power as choosing
+the image). The deployer cannot read secrets or change IAM. Google lets a
+GitHub Actions job impersonate it only if the token is for
+`PxA-Labs/AutoMaintainer` (name and numeric repository and owner ids), the
+`production` environment, and the ref `main` or a `v*` tag. That check does
+not depend on GitHub settings; the environment's required reviewers (step 4)
+add a human approval on top, and a tag ruleset on `v*` limits who can push a
+release tag.
+
+**Redis: why the VM by default.** The Redis container costs nothing extra.
+It shares the VM's memory (capped at `redis_vm_maxmemory`, `noeviction`) and
+is down while the VM restarts, when the worker is down too. Queued tasks
+survive restarts (append-only file on the VM disk). Memorystore is managed
+and keeps the queue up while the worker restarts, but its basic tier has no
+replica either and it costs more than the VM (see the cost table). Neither
+uses AUTH or TLS: only the subnet can reach them (VPC firewall rules, and the
+VM's own firewall for the container), and Celery accepts only JSON messages,
+so a write to the broker cannot become a pickle payload. The subnet includes
+every Cloud Run instance, so a server-side request forgery in the API could
+still reach Redis; a password from Secret Manager (`requirepass`) would be
+cheap defence in depth and is not set up yet.
+
+**Limitation: the IDE has no clones.** The API on Cloud Run and the agent
+worker on the VM do not share `AUTOMAINTAINER_WORKSPACE_DIR`, so this
+deployment breaks the [topology invariant](#topology) in the same way as the
+Hugging Face Space in Option C: agent runs work, but the IDE routes answer
+`404 Repository not cloned yet` and the terminal has no repository (it is
+also off: Terraform refuses `ENABLE_TERMINAL`). The fix is the API cloning on
+demand or reading through the GitHub API (epic #418). Running the agent
+worker inside the Cloud Run service, as Render does, was not chosen:
+Cloud Run bills and scales by request and may stop an instance that serves
+none, which does not suit agent runs that last many minutes.
+
+**Verification stays off for untrusted repositories.** Until verification is
+sandboxed (gVisor or one Cloud Run Job per verification, #158), install the
+GitHub App only on the owner's own repositories. Terraform refuses
+`VERIFY_ALLOW_LOCAL` in `app_env`, and the worker has no Docker daemon for
+`SANDBOX_BACKEND`, so each agent change's verification reports an error
+(`MERGE_POLICY=ci` then never merges). Keep `MERGE_POLICY=human`. The worker
+container uses the VM's host network and can reach the metadata server, so
+any code it runs can obtain the worker service account's token and its
+secrets: #158 must run verification somewhere else, not on this VM's network.
+
+### Owner steps
+
+Prerequisites: rotate the keys leaked in #60, restore the Supabase project
+and apply the migrations ([Database](#database)). Install Terraform 1.9 or
+later and the gcloud CLI, then `gcloud auth application-default login` with
+an account that owns the project and can create budgets on its billing
+account (Billing Account Administrator, or Costs Manager on it).
+
+1. **Create the state bucket** (once):
+
+   ```bash
+   gcloud storage buckets create gs://automaintainer-prod-tfstate \
+     --project automaintainer-prod --location us-central1 \
+     --uniform-bucket-level-access --public-access-prevention
+   gcloud storage buckets update gs://automaintainer-prod-tfstate --versioning
+   ```
+
+2. **Init, plan, apply.** Fill in `terraform.tfvars` (git-ignored) from the
+   example; `gcloud billing projects describe automaintainer-prod` prints the
+   billing account. Leave `mount_secrets = false` for now.
+
+   ```bash
+   cd infra/terraform
+   cp backend.tf.example backend.tf            # git-ignored; state goes to the bucket
+   cp terraform.tfvars.example terraform.tfvars
+   terraform init -backend-config="bucket=automaintainer-prod-tfstate"
+   terraform plan -out=tfplan
+   terraform apply tfplan
+   ```
+
+   The first apply enables the APIs, then creates everything else; if a
+   resource fails because an API it just enabled has not propagated yet,
+   run `plan` and `apply` again. The API starts with Google's public "hello"
+   placeholder image and the worker waits for its first image.
+   `terraform output api_url` prints the API URL.
+
+   Enabling the Compute Engine API creates the project's default compute
+   service account, which Google normally grants `roles/editor`. Nothing here
+   uses it; remove the grant (or enforce the organization policy
+   `iam.automaticIamGrantsForDefaultServiceAccounts` before the first apply):
+
+   ```bash
+   P=automaintainer-prod
+   N=$(gcloud projects describe $P --format='value(projectNumber)')
+   gcloud projects remove-iam-policy-binding $P \
+     --member="serviceAccount:$N-compute@developer.gserviceaccount.com" --role=roles/editor
+   ```
+
+3. **Add the secret versions.** Terraform created empty secrets
+   (`terraform output secret_ids`). Add a version to each one that is
+   mounted, i.e. every entry of `var.secrets` with `api` or `worker` true
+   (by default all but `github-token`):
+
+   ```bash
+   P=automaintainer-prod
+   printf '%s' '<service-role key>' | gcloud secrets versions add supabase-service-key --data-file=- --project $P
+   printf '%s' '<groq key>'         | gcloud secrets versions add groq-api-key --data-file=- --project $P
+   gcloud secrets versions add github-app-private-key --data-file=<app>.private-key.pem --project $P
+   printf '%s' '<webhook secret>'   | gcloud secrets versions add github-webhook-secret --data-file=- --project $P
+   printf '%s' '<client secret>'    | gcloud secrets versions add github-app-client-secret --data-file=- --project $P
+   ```
+
+   Do not put the values in shell history on a shared machine (`read -rs`
+   into a variable first). Then set `mount_secrets = true`, set
+   `ALLOWED_ORIGINS` and `DASHBOARD_URL` in `app_env` to the API URL (it also
+   serves the dashboard), and run `terraform plan -out=tfplan` and
+   `terraform apply tfplan` again.
+
+4. **Set the repository variables and the environment.**
+   `terraform output -json github_repository_variables` prints the eight
+   `GCP_*` variables the deploy workflow reads; set each with
+   `gh variable set <NAME> --body '<value>' -R PxA-Labs/AutoMaintainer`. Also
+   set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` (the anon
+   key, never the service key) and `NEXT_PUBLIC_BACKEND_URL` (the API URL),
+   which are public build values. None is a secret. Under Settings >
+   Environments, create `production` with required reviewers and deployment
+   branches and tags limited to `main` and `v*.*.*`. Until
+   `GCP_WORKLOAD_IDENTITY_PROVIDER` is set, the workflow is skipped.
+
+5. **First deploy.** Actions > "Deploy to Google Cloud" > Run workflow on
+   `main`, and approve the `production` deployment. It builds the image,
+   pushes it to Artifact Registry, deploys it to Cloud Run by digest, checks
+   `/healthz`, and sets the worker VM's `automaintainer-image` metadata; the
+   VM restarts its container within about 20 seconds. Release tags
+   (`v*.*.*`) deploy the same way. Check the worker in Logs Explorer
+   (resource "VM Instance", `automaintainer-worker`): `POST /start` answers
+   `503 AGENT_WORKER_UNAVAILABLE` until it is up. The deployer holds
+   `roles/run.developer` on the one service only, with no project-level Run
+   role; this has not been exercised by a real deploy yet, so if
+   `gcloud run deploy` is denied, the error names the missing permission.
+
+6. **Point the GitHub App at the new URL.** Webhook URL
+   `<api_url>/webhooks/github` (secret: the `github-webhook-secret` value);
+   Callback URL and Setup URL `<api_url>/github/app/setup`
+   ([Install flow](#install-flow-setup-url)). Add
+   `<api_url>/auth/callback/` to the Supabase Auth redirect URLs. Then send a
+   test delivery from the App's *Advanced* tab: it should get `2xx`.
+
+**Changing configuration later.** `app_env`, `var.secrets` and the scaling
+settings are applied with `terraform apply`. Cloud Run picks them up in a new
+revision at once. The VM rewrites its configuration only at boot, so after a
+change that touches the worker, run
+`gcloud compute instances reset automaintainer-worker --zone us-central1-a`;
+running tasks are requeued (`acks_late`). A new secret version is read when
+a Cloud Run instance or the worker container starts: redeploy (or reset the
+VM) after rotating a key.
+
+### Cloud Trace
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OTEL_CLOUD_TRACE_ENABLED` | unset (off) | `true`, `1`, `yes` or `on` adds a Cloud Trace span exporter to the API's existing OpenTelemetry tracer, next to the console and OTLP exporters (`backend/observability.py`). It authenticates with application default credentials, which on Cloud Run is the service's account (needs `roles/cloudtrace.agent`; Terraform grants it when `cloud_trace_enabled = true`). |
+| `GOOGLE_CLOUD_PROJECT` | unset | Project the traces go to. Unset: the project of the credentials. Terraform sets it. |
+
+A failure to set up the exporter (no credentials, package missing) is logged
+and does not stop the API. Metrics are not sent to Google.
+
+### Estimated monthly cost
+
+Approximate us-central1 list prices for the default settings, in USD. They
+were not checked against the current price list, and items marked
+*uncertain* depend on usage or on a pricing detail that should be confirmed
+in the [pricing calculator](https://cloud.google.com/products/calculator)
+before relying on them.
+
+| Item | Assumption | USD / month |
+|---|---|---|
+| Cloud Run API | 1 always-on instance, 1 vCPU and 1 GiB, request-based billing, mostly idle | ~10-20 (*uncertain*: idle rate of a minimum instance, request volume) |
+| Worker VM | e2-medium, on demand, all month | ~25 |
+| Worker disk | 30 GB balanced persistent disk | ~3 |
+| Cloud NAT | one VM, low traffic | ~1-5 (*uncertain*: data processed) |
+| Redis, `vm` mode | on the worker VM | 0 |
+| Redis, `memorystore` mode (instead) | basic tier, 1 GB | ~35 (*uncertain*) |
+| Artifact Registry | 20 kept images of about 1-2 GB each (Node build, Node tools, Python venv), 30-day cleanup | ~2-4 (*uncertain*: image size, layers shared between versions) |
+| Secret Manager | 6 secrets, accesses at instance start | <1 |
+| Logging, Monitoring, Trace | low volume, within the free allotments | 0 (*uncertain*: log volume) |
+| Internet egress | API responses, GitHub, Groq and Supabase traffic | *uncertain* |
+| **Total** | `vm` mode / `memorystore` mode | **~40-60 / ~75-95** |
+
+Groq and Supabase are billed by their providers. The budget
+(`budget_amount`, 100 by default) alerts but never stops spending.
+
 ## The image
 
 - Multi-stage build: the Next.js export, Node tools, the Python venv and the

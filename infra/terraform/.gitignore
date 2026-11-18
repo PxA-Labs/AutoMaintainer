@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+crash.log
+# Local choice of remote state (copied from backend.tf.example).
+backend.tf

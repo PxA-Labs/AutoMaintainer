@@ -1,0 +1,3 @@
+# The worker's cloud-init and scripts are embedded byte-for-byte in the VM's
+# metadata; LF everywhere keeps a plan from Windows and Linux identical.
+* text=auto eol=lf
