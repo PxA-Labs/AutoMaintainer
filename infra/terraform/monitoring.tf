@@ -107,9 +107,10 @@ resource "google_monitoring_alert_policy" "run_failure_rate" {
   combiner     = "OR"
 
   conditions {
-    display_name = "failed / all finished runs, last hour"
+    display_name = "failed or timed out / all finished runs, last hour"
     condition_threshold {
-      filter             = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\" AND metric.label.outcome=\"failed\""
+      # A run stopped by the 30-minute limit has outcome "timeout" (tasks.py).
+      filter             = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\" AND metric.label.outcome=monitoring.regex.full_match(\"failed|timeout\")"
       denominator_filter = "metric.type=\"workload.googleapis.com/agent_runs_total\" AND resource.type=\"generic_task\""
       comparison         = "COMPARISON_GT"
       threshold_value    = var.alert_run_failure_rate
@@ -129,7 +130,7 @@ resource "google_monitoring_alert_policy" "run_failure_rate" {
 
   documentation {
     mime_type = "text/markdown"
-    content   = "More than ${var.alert_run_failure_rate * 100} % of the agent runs that finished in the last hour failed. With few runs one failure can cross the threshold. Check the failed runs in the dashboard and the worker logs (Logs Explorer, VM instance ${var.name_prefix}-worker)."
+    content   = "More than ${var.alert_run_failure_rate * 100} % of the agent runs that finished in the last hour failed or timed out. With few runs one failure can cross the threshold. Check the failed runs in the dashboard and the worker logs (Logs Explorer, VM instance ${var.name_prefix}-worker)."
   }
 
   notification_channels = google_monitoring_notification_channel.alert_email[*].id

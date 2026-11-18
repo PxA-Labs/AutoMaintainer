@@ -26,7 +26,8 @@ Two mechanisms enforce this:
 1. The `record_*` helpers build their labels themselves and normalize values
    that can come from a request. `mode` must be one of `autonomous`,
    `targeted_issue`, `code_review`, `refactor`, and a run `outcome` one of
-   `completed`, `failed`, `cancelled`; anything else is recorded as `other`.
+   `completed`, `failed`, `cancelled`, `timeout`; anything else is recorded
+   as `other`.
    `model`, `operation`, `queue` and `task_name` must look like an identifier
    (letters, digits, `_ . : -`, at most 64 characters, so no `/`, spaces or
    sentences); anything else is recorded as `other`.
@@ -45,7 +46,7 @@ Recorded through the helpers in `observability.py`.
 
 | Metric | Type | Labels | Values |
 | --- | --- | --- | --- |
-| `agent_runs_total` | counter | `mode`, `outcome` | mode as above; outcome `completed` / `failed` / `cancelled` / `other` |
+| `agent_runs_total` | counter | `mode`, `outcome` | mode as above; outcome `completed` / `failed` / `cancelled` / `timeout` / `other`. `timeout` is a run stopped by the 30-minute soft time limit, stored with status `failed` (`runs.status` has no timeout value) |
 | `agent_run_duration_seconds` | histogram (s) | `mode`, `outcome` | as above |
 | `agent_runs_active` | up-down counter | `mode` | as above |
 | `llm_tokens_total` | counter | `model` | configured model name |

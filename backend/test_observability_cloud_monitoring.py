@@ -337,6 +337,17 @@ def test_run_outcome_and_duration_by_final_status(sdk):
     assert duration.count == 1 and duration.sum == 42.0
 
 
+def test_a_timed_out_run_keeps_its_own_outcome(sdk):
+    # tasks.py writes status "failed" for a run stopped by the soft time
+    # limit; the metric keeps "timeout" apart instead of folding it into
+    # "other", which the failure-rate alert would not count.
+    reader, _ = sdk
+    observability.record_agent_run_complete("autonomous", "timeout", 1800.0)
+    labels = {"mode": "autonomous", "outcome": "timeout"}
+    assert _value(reader, "agent_runs_total", labels) == 1
+    assert _value(reader, "agent_run_duration_seconds", labels).count == 1
+
+
 def test_run_duration_buckets_resolve_long_runs(sdk):
     reader, _ = sdk
     observability.record_agent_run_complete("autonomous", "completed", 1700.0)

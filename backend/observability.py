@@ -201,7 +201,11 @@ def all_metric_labels() -> dict[str, frozenset[str]]:
 
 # Bounded values for labels whose input can come from a request.
 AGENT_MODES = frozenset({"autonomous", "targeted_issue", "code_review", "refactor"})
-RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled"})
+# The terminal runs.status values, plus "timeout": a run stopped by the
+# Celery soft time limit is stored as "failed" (runs.status has no timeout
+# value) but recorded as "timeout", so it can be told apart and still counted
+# as a failure by the failure-rate alert (monitoring.tf).
+RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled", "timeout"})
 # events.AgentPhase values (not imported: this module must stay importable
 # without the engine).
 LLM_PHASES = frozenset(

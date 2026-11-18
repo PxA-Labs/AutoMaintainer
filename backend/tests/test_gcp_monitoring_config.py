@@ -61,7 +61,15 @@ def _metric_types(text: str) -> list[str]:
 
 
 def _label_filters(text: str) -> list[tuple[str, str]]:
-    return re.findall(r'metric\.label\.([a-z_]+)\s*=\s*\\"([^"\\]+)\\"', text)
+    """(label, value) for every ``metric.label.X="v"`` and, one pair per
+    alternative, every ``metric.label.X=monitoring.regex.full_match("a|b")``."""
+    pairs = re.findall(r'metric\.label\.([a-z_]+)\s*=\s*\\"([^"\\]+)\\"', text)
+    for label, pattern in re.findall(
+        r'metric\.label\.([a-z_]+)\s*=\s*monitoring\.regex\.full_match\(\\"([^"\\]+)\\"\)',
+        text,
+    ):
+        pairs.extend((label, value) for value in pattern.split("|"))
+    return pairs
 
 
 # --- APIs and IAM -------------------------------------------------------------
@@ -152,9 +160,15 @@ def test_app_alerts_wait_until_the_metrics_exist(monitoring):
         assert bool(gated) == bool(metric), name
 
 
-def test_failure_rate_is_failed_runs_over_all_runs(monitoring):
+def test_failure_rate_counts_failed_and_timed_out_runs_over_all_runs(monitoring):
     body = _alert(monitoring, "run_failure_rate")
-    assert 'metric.label.outcome=\\"failed\\"' in body
+    numerator = re.search(r'\n\s*filter\s*=\s*"([^\n]+)"', body)
+    assert numerator
+    outcomes = {v for k, v in _label_filters(numerator.group(1)) if k == "outcome"}
+    # A run stopped by the 30-minute limit is recorded as "timeout" (tasks.py)
+    # and must count as a failure, not vanish from the numerator.
+    assert outcomes == {"failed", "timeout"}
+    assert outcomes <= observability.RUN_OUTCOMES
     denominator = re.search(r'denominator_filter\s*=\s*"([^\n]+)"', body)
     assert denominator and "outcome" not in denominator.group(1)
     assert "var.alert_run_failure_rate" in body
