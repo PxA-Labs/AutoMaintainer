@@ -729,6 +729,8 @@ NOT_COVERED = {
     "OTEL_EXPORTER_OTLP_ENDPOINT": "observability exporter of the API process",
     "OTEL_CLOUD_TRACE_ENABLED": "Cloud Trace exporter switch of the API process",
     "GOOGLE_CLOUD_PROJECT": "project the Cloud Trace exporter writes to",
+    "OTEL_CLOUD_MONITORING_ENABLED": "Cloud Monitoring metrics exporter switch",
+    "LLM_PRICES_JSON": "price table of the estimated LLM cost metric",
     # API server, authentication and dashboard.
     "ENVIRONMENT": "deployment-wide production gates of the API",
     "AUTH_DEV_BYPASS": "API authentication (local development only)",
