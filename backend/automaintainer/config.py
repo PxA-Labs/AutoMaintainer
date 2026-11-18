@@ -75,7 +75,7 @@ MERGE_POLICIES = ("human", "ci", "auto")
 # runners: LocalRunner and SandboxRunner.
 RUNNER_TYPES = ("local", "sandbox")
 # The Maintainer's review (#525): the single-shot LangGraph prompt, or the
-# ADK Reviewer specialist (automaintainer/_runtime/specialists).
+# ADK Reviewer specialist (automaintainer/_specialists).
 REVIEWER_BACKENDS = ("langgraph", "adk")
 # What the ``adk`` extra installs and the ADK Reviewer imports.
 _ADK_MODULES = ("google.adk", "litellm")

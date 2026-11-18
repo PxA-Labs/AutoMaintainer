@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 import agents
-from automaintainer._runtime.specialists.reviewer_adk import (
+from automaintainer._specialists.reviewer_adk import (
     CheckoutError,
     checkout_head,
 )

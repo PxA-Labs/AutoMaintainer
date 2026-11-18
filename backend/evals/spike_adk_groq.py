@@ -81,9 +81,9 @@ async def one_run(model_name: str, api_key, index: int) -> dict:
     from google.genai import types
 
     import agents
-    from automaintainer._runtime.specialists import reviewer_adk
-    from automaintainer._runtime.specialists.contracts import ReviewRequest
-    from automaintainer._runtime.specialists.tools import ReviewTools
+    from automaintainer._specialists import reviewer_adk
+    from automaintainer._specialists.contracts import ReviewRequest
+    from automaintainer._specialists.tools import ReviewTools
 
     with tempfile.TemporaryDirectory(prefix="spike-adk-") as tmp:
         root = Path(tmp)
@@ -188,7 +188,7 @@ async def spike(model_name: str, api_key, repeats: int) -> bool:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from automaintainer._runtime.specialists import reviewer_adk
+    from automaintainer._specialists import reviewer_adk
 
     api_key = None
     if not reviewer_adk._is_gemini(args.model):

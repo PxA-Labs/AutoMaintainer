@@ -13,8 +13,8 @@ import subprocess
 
 import pytest
 
-from automaintainer._runtime.specialists import tools
-from automaintainer._runtime.specialists.tools import (
+from automaintainer._specialists import tools
+from automaintainer._specialists.tools import (
     ReviewTools,
     ToolLimits,
     ToolRefused,

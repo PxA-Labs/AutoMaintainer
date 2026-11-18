@@ -46,6 +46,7 @@ class Turn:
     tools: list[str]
     api_key: Any = None
     model: str = ""
+    max_output_tokens: Any = None
 
     @property
     def everything(self) -> str:
@@ -77,6 +78,7 @@ def _fake_model_class():
         policy: Callable[..., Any]
         api_key: Any = None
         tokens_per_turn: int = 100
+        report_usage: bool = True
         delay: float = 0.0
         turns: list = Field(default_factory=list)
 
@@ -96,7 +98,15 @@ def _fake_model_class():
                 for t in (llm_request.config.tools or [])
                 for d in (t.function_declarations or [])
             ]
-            turn = Turn(system, user, results, tools, self.api_key, self.model)
+            turn = Turn(
+                system,
+                user,
+                results,
+                tools,
+                self.api_key,
+                self.model,
+                llm_request.config.max_output_tokens,
+            )
             self.turns.append(turn)
             if self.delay:
                 await asyncio.sleep(self.delay)
@@ -112,13 +122,16 @@ def _fake_model_class():
                 ]
             else:
                 parts = [types.Part(text=answer)]
-            yield LlmResponse(
-                content=types.Content(role="model", parts=parts),
-                usage_metadata=types.GenerateContentResponseUsageMetadata(
+            usage = None
+            if self.report_usage:
+                usage = types.GenerateContentResponseUsageMetadata(
                     prompt_token_count=self.tokens_per_turn - 10,
                     candidates_token_count=10,
                     total_token_count=self.tokens_per_turn,
-                ),
+                )
+            yield LlmResponse(
+                content=types.Content(role="model", parts=parts),
+                usage_metadata=usage,
             )
 
     return FakeModel
@@ -132,6 +145,7 @@ class ModelFactory:
     policy: Callable[..., Any]
     delay: float = 0.0
     tokens_per_turn: int = 100
+    report_usage: bool = True
     built: list = field(default_factory=list)
 
     def __call__(self, model_name, api_key):
@@ -141,6 +155,7 @@ class ModelFactory:
             api_key=api_key,
             delay=self.delay,
             tokens_per_turn=self.tokens_per_turn,
+            report_usage=self.report_usage,
         )
         self.built.append(model)
         return model

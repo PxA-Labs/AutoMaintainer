@@ -29,7 +29,7 @@ import agents  # noqa: E402
 from adk_fakes import APPROVE, REJECT, ModelFactory, calls, needs_adk  # noqa: E402
 from automaintainer.config import ModelRouting  # noqa: E402
 from automaintainer.engine import AutoMaintainerEngine  # noqa: E402
-from automaintainer._runtime.specialists import reviewer_adk  # noqa: E402
+from automaintainer._specialists import reviewer_adk  # noqa: E402
 from events import TelemetryEvent  # noqa: E402
 
 from concurrency_world import (  # noqa: E402

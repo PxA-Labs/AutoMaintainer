@@ -32,9 +32,10 @@ return a rejection whose reason says why. Cancelling the run's task
 CancelledError propagates, so no decision at all is produced.
 
 Accounting and tracing: the review's tokens are added to the run as one
-TelemetryEvent (and the ``llm_tokens`` metric); the review is a
+TelemetryEvent, as the LangGraph review's are; the review is a
 ``specialist.reviewer`` span under the run's trace and every tool call a
-``specialist.tool`` child span, both from observability's ``get_tracer``.
+``specialist.tool`` child span, both from the OpenTelemetry API's global
+tracer (this package never imports the server's ``observability`` module).
 
 ADK is imported inside functions only, so importing this module needs no
 ``adk`` extra.
@@ -53,7 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .. import agents
+from .._runtime import agents
 from .contracts import ReviewRequest
 from .tools import ReviewTools, ToolRefused, ToolUnavailable
 
@@ -97,14 +98,18 @@ class ReviewBudget:
     ``max_tool_calls`` counts every call the model makes (refused ones too);
     ``max_model_calls`` leaves room for one answer after the last tool call
     plus the corrective retry; ``max_tokens`` is the sum of the provider's
-    reported usage over the review; ``timeout_seconds`` covers the whole
-    review, retry included. ``estimated_tokens`` is what the rate limiter
-    reserves for the review when it hands out a key.
+    reported usage over the review (a model call whose response reports no
+    usage counts an estimate of its prompt and answer instead, so a route
+    without usage cannot disable the cap); ``max_output_tokens`` caps each
+    answer; ``timeout_seconds`` covers the whole review, retry included.
+    ``estimated_tokens`` is what the rate limiter reserves for the review
+    when it hands out a key (the actual usage is not fed back to it).
     """
 
     max_tool_calls: int = 8
     max_model_calls: int = 11
     max_tokens: int = 60_000
+    max_output_tokens: int = 4096
     timeout_seconds: float = 180.0
     estimated_tokens: int = 3000
 
@@ -194,14 +199,20 @@ def _task_cancelling() -> bool:
 
 @contextmanager
 def _span(name: str, attributes: dict):
-    """A span from observability's tracer (no-op where it is not installed:
-    the SDK wheel does not ship observability.py)."""
+    """A span from the OpenTelemetry API's global tracer provider.
+
+    The package never imports the server's ``observability`` module (the
+    SDK wheel does not ship it): in the server, ``init_observability``
+    installs the global provider, so these spans join the run's trace; an
+    SDK host gets its own provider's spans, or the API's no-op tracer. No
+    span at all where the OpenTelemetry API is not installed.
+    """
     try:
-        from observability import get_tracer
+        from opentelemetry import trace
     except ImportError:
         yield None
         return
-    with get_tracer("automaintainer.specialists").start_as_current_span(
+    with trace.get_tracer("automaintainer.specialists").start_as_current_span(
         name, attributes=attributes
     ) as span:
         yield span
@@ -212,14 +223,6 @@ def _set(span, **attributes) -> None:
         return
     for key, value in attributes.items():
         span.set_attribute(f"reviewer.{key}", value)
-
-
-def _record_tokens(model: str, tokens: int) -> None:
-    try:
-        from observability import record_llm_tokens
-    except ImportError:
-        return
-    record_llm_tokens(model, tokens)
 
 
 # --- model and credentials ----------------------------------------------------------
@@ -251,13 +254,23 @@ def build_model(model_name: str, api_key: Optional[str]):
     return LiteLlm(model=routed, api_key=api_key)
 
 
-async def _acquire_key(model_name: str):
+async def _acquire_key(model_name: str, estimated_tokens: int):
     """A key from the running engine's rate limiter (else the process one),
-    or None for a model that takes no key."""
+    reserving ``estimated_tokens``, or None for a model that takes no key.
+
+    The limiter's own wait timeout is a rejection that says so, not a
+    review timeout (the review's deadline cancels the wait instead, which
+    the caller reports as the review timing out).
+    """
     if _is_gemini(model_name):
         return None
     manager = await agents.get_rate_limit_manager()
-    return await manager.acquire(ReviewBudget.estimated_tokens)
+    try:
+        return await manager.acquire(estimated_tokens)
+    except TimeoutError:
+        raise ReviewAborted(
+            "no model key was available within the rate limit"
+        ) from None
 
 
 # --- the review --------------------------------------------------------------------
@@ -363,6 +376,31 @@ def _check_event(event, usage: _Usage) -> None:
     usage.abort(f"the model returned an error ({safe})")
 
 
+def _estimate_tokens(chars: int) -> int:
+    """About four characters per token, rounded up (at least one token)."""
+    return max(1, -(-chars // 4))
+
+
+def _content_chars(content) -> int:
+    total = 0
+    for part in (getattr(content, "parts", None) or []) if content else []:
+        total += len(part.text or "")
+        if part.function_call is not None:
+            total += len(str(part.function_call.args or "")) + len(
+                part.function_call.name or ""
+            )
+        if part.function_response is not None:
+            total += len(str(part.function_response.response or ""))
+    return total
+
+
+def _request_chars(llm_request) -> int:
+    """The size of what one model call sends: instruction and history."""
+    system = getattr(llm_request.config, "system_instruction", None) or ""
+    total = len(system) if isinstance(system, str) else _content_chars(system)
+    return total + sum(_content_chars(c) for c in llm_request.contents or [])
+
+
 def _final_text(events: list) -> str:
     texts = []
     for event in events:
@@ -383,8 +421,11 @@ async def _converse(request: ReviewRequest, tools: ReviewTools, usage: _Usage, m
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
 
+    prompt_chars = [0]
+
     def before_model(callback_context, llm_request):
         usage.model_call()
+        prompt_chars[0] = _request_chars(llm_request)
         return None
 
     def after_model(callback_context, llm_response):
@@ -393,6 +434,10 @@ async def _converse(request: ReviewRequest, tools: ReviewTools, usage: _Usage, m
         if meta is not None:
             tokens = meta.total_token_count or (meta.prompt_token_count or 0) + (
                 meta.candidates_token_count or 0
+            )
+        if not tokens:
+            tokens = _estimate_tokens(
+                prompt_chars[0] + _content_chars(llm_response.content)
             )
         usage.model_returned(tokens)
         content = llm_response.content
@@ -411,6 +456,9 @@ async def _converse(request: ReviewRequest, tools: ReviewTools, usage: _Usage, m
         tools=_adk_tools(tools, usage),
         before_model_callback=before_model,
         after_model_callback=after_model,
+        generate_content_config=types.GenerateContentConfig(
+            max_output_tokens=usage.budget.max_output_tokens
+        ),
         disallow_transfer_to_parent=True,
         disallow_transfer_to_peers=True,
     )
@@ -485,7 +533,7 @@ async def review(
     ``agents._llm_decision``. Never raises, except CancelledError when the
     calling task itself is cancelled.
     """
-    from ..events import AgentPhase, ErrorEvent, TelemetryEvent
+    from .._runtime.events import AgentPhase, ErrorEvent, TelemetryEvent
 
     model_name = agents._routed_model("maintainer")
     usage = _Usage(budget)
@@ -503,7 +551,7 @@ async def review(
         key = None
         try:
             async with asyncio.timeout(budget.timeout_seconds):
-                key = await _acquire_key(model_name)
+                key = await _acquire_key(model_name, budget.estimated_tokens)
                 model = build_model(model_name, getattr(key, "key", None))
                 decision, parse_error = await _converse(request, tools, usage, model)
         except TimeoutError:
@@ -513,7 +561,6 @@ async def review(
         except asyncio.CancelledError:
             if _task_cancelling():
                 _set(span, outcome="cancelled", tokens=usage.tokens)
-                _record_tokens(model_name, usage.tokens)
                 raise
             failure = "the review was cancelled"
         except Exception as e:  # fail closed on anything else
@@ -534,7 +581,6 @@ async def review(
             model_calls=usage.model_calls,
             tokens=usage.tokens,
         )
-    _record_tokens(model_name, usage.tokens)
     run_id = agents.current_run_id.get(None)
     if run_id:
         await _emit(
@@ -575,8 +621,8 @@ async def checkout_head(clone_url: str, branch: str, head_sha: str):
     are not fetched. A branch that moved since the head was read is an
     error, so the review never reads another commit than the one it judges.
     """
-    from .. import verification
-    from ..workspace import git_auth_env
+    from .._runtime import verification
+    from .._runtime.workspace import git_auth_env
 
     if not isinstance(clone_url, str) or not clone_url:
         raise CheckoutError("the repository clone URL is unknown")
@@ -628,8 +674,8 @@ async def review_pull_request(state: dict, gh_repo: Any, pr: Any, diff_text):
     extra (REVIEWER_BACKEND=adk; an engine's config refuses it at
     validation) ends the run: it never falls back to the other review.
     """
-    from ... import config as config_module
-    from ..events import AgentPhase
+    from .. import config as config_module
+    from .._runtime.events import AgentPhase
 
     missing = config_module._adk_missing()
     if missing is not None:

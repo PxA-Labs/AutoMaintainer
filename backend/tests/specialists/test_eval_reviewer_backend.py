@@ -15,7 +15,7 @@ import pytest
 
 from adk_fakes import APPROVE, ModelFactory, calls, needs_adk, scripted
 from automaintainer import config as config_module
-from automaintainer._runtime.specialists import reviewer_adk
+from automaintainer._specialists import reviewer_adk
 from evals.e2e import run, runner
 from evals.e2e.policies import ScriptedTransport, noop_reviewer
 from evals.e2e.taskset import load_review_cases

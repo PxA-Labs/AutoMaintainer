@@ -5,7 +5,7 @@ manual step (it calls Groq); nothing here does."""
 import pytest
 
 from adk_fakes import REJECT, ModelFactory, calls, needs_adk, scripted
-from automaintainer._runtime.specialists import reviewer_adk
+from automaintainer._specialists import reviewer_adk
 from evals import spike_adk_groq as spike
 
 

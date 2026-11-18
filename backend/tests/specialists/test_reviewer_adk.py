@@ -14,15 +14,16 @@ import pytest
 
 import agents
 from adk_fakes import APPROVE, REJECT, ModelFactory, calls, needs_adk, scripted
-from automaintainer._runtime.specialists import reviewer_adk
-from automaintainer._runtime.specialists.contracts import ReviewRequest
-from automaintainer._runtime.specialists.reviewer_adk import ReviewBudget
-from automaintainer._runtime.specialists.tools import ReviewTools
+from automaintainer._specialists import reviewer_adk
+from automaintainer._specialists.contracts import ReviewRequest
+from automaintainer._specialists.reviewer_adk import ReviewBudget
+from automaintainer._specialists.tools import ReviewTools
 from events import ErrorEvent, TelemetryEvent
 
 pytestmark = needs_adk
 
 SHA = "b" * 40
+ACQUIRE_KEY = reviewer_adk._acquire_key  # before any fixture replaces it
 TOOL_NAMES = {"get_diff", "read_file", "search_code", "get_verification_log"}
 
 
@@ -50,7 +51,7 @@ def factory(monkeypatch):
     made = ModelFactory(policy=scripted(APPROVE))
     monkeypatch.setattr(reviewer_adk, "build_model", made)
 
-    async def no_key(model_name):
+    async def no_key(model_name, estimated_tokens):
         return None
 
     monkeypatch.setattr(reviewer_adk, "_acquire_key", no_key)
@@ -189,6 +190,89 @@ async def test_timeout_rejects(factory, review_tools):
     factory.delay = 5
     decision, _ = await run_review(review_tools, ReviewBudget(timeout_seconds=0.2))
     assert_rejected(decision, "timed out after 0.2s")
+
+
+async def test_missing_usage_is_estimated_against_the_token_budget(
+    factory, review_tools
+):
+    """A provider route that reports no usage must not disable the cap."""
+    factory.report_usage = False
+    factory.policy = scripted(calls(("get_diff", {})), APPROVE)
+
+    decision, _ = await run_review(review_tools, ReviewBudget(max_tokens=200))
+
+    assert_rejected(decision, "token budget")
+
+
+async def test_missing_usage_still_counts_toward_the_run(factory, review_tools, events):
+    factory.report_usage = False
+
+    decision, _ = await run_review(review_tools)
+
+    assert decision.approved
+    (telemetry,) = [e for e in events.events if isinstance(e, TelemetryEvent)]
+    assert telemetry.tokens_used > 0
+
+
+async def test_model_output_is_capped(factory, review_tools):
+    await run_review(review_tools, ReviewBudget(max_output_tokens=1234))
+    assert {t.max_output_tokens for t in factory.turns} == {1234}
+
+
+class FakeKeys:
+    def __init__(self, error=None):
+        self.error = error
+        self.reserved = []
+
+    async def acquire(self, estimated_tokens):
+        self.reserved.append(estimated_tokens)
+        if self.error is not None:
+            raise self.error
+        return FakeKey()
+
+
+class FakeKey:
+    key = "gsk_fake"
+
+    def record_success(self):
+        pass
+
+    def record_error(self, error):
+        pass
+
+
+def use_keys(monkeypatch, keys):
+    async def manager():
+        return keys
+
+    monkeypatch.setattr(reviewer_adk, "_acquire_key", ACQUIRE_KEY)
+    monkeypatch.setattr(agents, "get_rate_limit_manager", manager)
+    monkeypatch.setattr(agents, "_routed_model", lambda role: "llama-3.3-70b")
+
+
+async def test_rate_limiter_reserves_this_reviews_estimate(
+    factory, review_tools, monkeypatch
+):
+    keys = FakeKeys()
+    use_keys(monkeypatch, keys)
+
+    decision, _ = await run_review(review_tools, ReviewBudget(estimated_tokens=4321))
+
+    assert decision.approved
+    assert keys.reserved == [4321]
+    assert factory.built[0].api_key == "gsk_fake"
+
+
+async def test_rate_limit_wait_timeout_is_not_reported_as_a_review_timeout(
+    factory, review_tools, monkeypatch
+):
+    use_keys(monkeypatch, FakeKeys(TimeoutError("Rate limit timeout after 60.0s")))
+
+    decision, _ = await run_review(review_tools)
+
+    assert_rejected(decision, "no model key was available within the rate limit")
+    assert not any("timed out" in r for r in decision.reasons)
+    assert factory.turns == []
 
 
 async def test_model_exception_rejects_without_echoing_it(factory, review_tools):
@@ -366,16 +450,18 @@ async def test_review_and_tool_calls_are_spans(factory, review_tools, monkeypatc
         InMemorySpanExporter,
     )
 
-    import observability
+    from opentelemetry import trace
 
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # The package uses the OpenTelemetry API directly (never the server's
+    # observability module), so the spans go to the global provider.
     monkeypatch.setattr(
-        observability,
-        "get_tracer",
-        lambda name="automaintainer": provider.get_tracer(name),
+        trace, "get_tracer", lambda *a, **k: provider.get_tracer(*a, **k)
     )
+    # As in the SDK wheel: the server's observability module does not exist.
+    monkeypatch.setitem(sys.modules, "observability", None)
     factory.policy = scripted(
         calls(("read_file", {"path": "app.py"}), ("get_diff", {})), APPROVE
     )
@@ -417,7 +503,7 @@ def test_build_model_uses_gemini_natively():
 
 def test_importing_the_reviewer_does_not_import_adk():
     code = (
-        "import sys, automaintainer._runtime.specialists.reviewer_adk as r; "
+        "import sys, automaintainer._specialists.reviewer_adk as r; "
         "print(any(m.startswith('google.adk') for m in sys.modules))"
     )
     out = subprocess.run(

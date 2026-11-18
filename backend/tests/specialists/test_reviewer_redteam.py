@@ -26,7 +26,7 @@ import pytest
 import agents
 import test_redteam_injection as fixtures
 from adk_fakes import ModelFactory, calls, needs_adk
-from automaintainer._runtime.specialists import reviewer_adk
+from automaintainer._specialists import reviewer_adk
 from redteam_world import MARKER, WORKFLOW
 
 # Collect every red-team test again in this module, under the fixture below.
@@ -75,7 +75,7 @@ def _adk_reviewer(monkeypatch, tmp_path):
         checkouts.append((branch, head_sha))
         yield Path(root)
 
-    async def no_key(model_name):
+    async def no_key(model_name, estimated_tokens):
         return None
 
     factory = ModelFactory(policy=obedient)

@@ -12,7 +12,7 @@ from adk_fakes import APPROVE, REJECT, ModelFactory, calls, needs_adk, scripted
 from automaintainer import config as config_module
 from automaintainer.config import AutoMaintainerConfig
 from automaintainer.context import EngineContext, current_engine
-from automaintainer._runtime.specialists import reviewer_adk
+from automaintainer._specialists import reviewer_adk
 from test_agent_merge_policy import _setup, _state
 
 
@@ -145,7 +145,7 @@ def head(tmp_path, monkeypatch):
 
     monkeypatch.setattr(reviewer_adk, "checkout_head", checkout)
 
-    async def no_key(model_name):
+    async def no_key(model_name, estimated_tokens):
         return None
 
     monkeypatch.setattr(reviewer_adk, "_acquire_key", no_key)

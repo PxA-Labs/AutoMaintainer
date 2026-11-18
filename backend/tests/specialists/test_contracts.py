@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from automaintainer._runtime.specialists.contracts import ReviewRequest
+from automaintainer._specialists.contracts import ReviewRequest
 
 SHA = "a" * 40
 

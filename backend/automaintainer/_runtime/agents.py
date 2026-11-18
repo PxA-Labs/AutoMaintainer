@@ -3500,13 +3500,13 @@ async def maintainer_node(state: AgentState):
     # REVIEWER_BACKEND without an engine. "adk" asks the read-only ADK
     # Reviewer (specialists/reviewer_adk.py) for the same MaintainerDecision;
     # everything below is unchanged whichever backend reviewed.
-    from .specialists import uses_adk_reviewer
+    from .._specialists import uses_adk_reviewer
 
     config = active_config()
     if uses_adk_reviewer(
         config.reviewer_backend if config else os.getenv("REVIEWER_BACKEND")
     ):
-        from .specialists import reviewer_adk
+        from .._specialists import reviewer_adk
 
         parsed, parse_error = await reviewer_adk.review_pull_request(
             state, gh_repo, pr, diff_text
