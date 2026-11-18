@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **rag**: Add engine retriever injection and a Terraform switch to deploy code retrieval ([#541](https://github.com/PxA-Labs/AutoMaintainer/pull/541)) - @purvanshjoshi
 - **observability**: Record run, token and cost metrics from the worker and require Redis AUTH ([#540](https://github.com/PxA-Labs/AutoMaintainer/pull/540)) - @purvanshjoshi
 - **rag**: Wire code retrieval into the PM and the ADK Reviewer behind a flag ([#539](https://github.com/PxA-Labs/AutoMaintainer/pull/539)) - @purvanshjoshi
 - **runners**: Add a Cloud Run Jobs sandbox backend for verification ([#537](https://github.com/PxA-Labs/AutoMaintainer/pull/537)) - @purvanshjoshi
