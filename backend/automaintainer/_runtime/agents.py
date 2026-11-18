@@ -3496,12 +3496,28 @@ async def maintainer_node(state: AgentState):
         + " "
         + UNTRUSTED_DATA_NOTICE
     )
-    parsed, parse_error = await _llm_decision(
-        AgentPhase.MAINTAINER,
-        system_prompt,
-        "\n\n".join(review_sections),
-        MaintainerDecision,
-    )
+    # The review backend (#525): the engine's reviewer_backend, or
+    # REVIEWER_BACKEND without an engine. "adk" asks the read-only ADK
+    # Reviewer (specialists/reviewer_adk.py) for the same MaintainerDecision;
+    # everything below is unchanged whichever backend reviewed.
+    from .._specialists import uses_adk_reviewer
+
+    config = active_config()
+    if uses_adk_reviewer(
+        config.reviewer_backend if config else os.getenv("REVIEWER_BACKEND")
+    ):
+        from .._specialists import reviewer_adk
+
+        parsed, parse_error = await reviewer_adk.review_pull_request(
+            state, gh_repo, pr, diff_text
+        )
+    else:
+        parsed, parse_error = await _llm_decision(
+            AgentPhase.MAINTAINER,
+            system_prompt,
+            "\n\n".join(review_sections),
+            MaintainerDecision,
+        )
     # The validated JSON is what routing (should_iterate), the checkpoint and
     # the next Implementer iteration (as its feedback) see.
     review = parsed.model_dump_json()

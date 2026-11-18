@@ -63,6 +63,7 @@ def make_config(
     max_iterations: int = 3,
     requests_per_minute: int = OFFLINE_BUDGET["requests_per_minute"],
     tokens_per_minute: int = OFFLINE_BUDGET["tokens_per_minute"],
+    reviewer_backend: str = "langgraph",
 ) -> AutoMaintainerConfig:
     routing = ModelRouting()
     if model:
@@ -84,6 +85,8 @@ def make_config(
         model_routing=routing,
         groq_requests_per_minute=requests_per_minute,
         groq_tokens_per_minute=tokens_per_minute,
+        # --reviewer-backend (#525): who reviews in the maintainer node.
+        reviewer_backend=reviewer_backend,
     )
 
 
