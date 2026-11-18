@@ -3,3 +3,6 @@
 # False positives (#531): a price-table line in the eval docs and a fake Groq key in a redaction test.
 d2027836127935593dccbe250601ca2611fff399:docs/EVALS.md:generic-api-key:502
 46bcb63914fd859cb0ecf3080526f98704e373cc:backend/evals/e2e/tests/test_e2e_cli.py:generic-api-key:215
+# The same two false positives in the squash commit of #531.
+d013c73e62f463693fd60dd999e9225cc2a94cc8:docs/EVALS.md:generic-api-key:509
+d013c73e62f463693fd60dd999e9225cc2a94cc8:backend/evals/e2e/tests/test_e2e_cli.py:generic-api-key:215

@@ -125,6 +125,7 @@ Backend dependencies are managed with [uv](https://docs.astral.sh/uv/) (`backend
 ```bash
 cd backend
 uv sync --extra server       # creates backend/.venv from uv.lock (incl. test deps)
+# optional: --extra adk (google-adk + litellm), --extra rag (google-genai, Vertex AI embeddings)
 uv run uvicorn main:app --reload --port 8000
 ```
 
