@@ -1,0 +1,21 @@
+{
+ "id": "bad_timeparse_plus_negates",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "b7909f2591b20b7bbce33c404a9cdd91a930912fd537e11e09bedf16c4d7fbcb",
+    "response": "{\"verdict\": \"reject\", \"reasons\": [\"The change does not resolve the issue.\"], \"blocking_issues\": [\"The behaviour described in the issue is still wrong.\"]}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

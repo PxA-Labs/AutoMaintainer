@@ -1,0 +1,23 @@
+{
+  "id": "inflection_underscore_acronym",
+  "title": "underscore() does not split an acronym from the following word",
+  "body": "`underscore` in `inflection/__init__.py` loses the word boundary after\na run of capitals:\n\n```python\n>>> inflection.underscore(\"HTTPServer\")\n'httpserver'      # expected 'http_server'\n>>> inflection.tableize(\"XMLHttpRequest\")\n'xmlhttp_requests'  # expected 'xml_http_requests'\n```\n\nExpected: an uppercase run followed by a capitalized word is split\nbefore the last capital of the run (\"IOError\" -> \"io_error\",\n\"HTTPServer\" -> \"http_server\"), as Rails' underscore does. Simple\nCamelCase is unchanged (\"DeviceType\" -> \"device_type\").\n",
+  "target_file": "inflection/__init__.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "inflection",
+    "repository": "https://github.com/jpvanhal/inflection",
+    "commit": "b00d4d348b32ef5823221b20ee4cbd1d2d924462",
+    "path": "inflection/__init__.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The substitution that splits an acronym from the next word was removed.",
+  "harness_files": [
+    "tests/test_inflection_basic.py"
+  ]
+}

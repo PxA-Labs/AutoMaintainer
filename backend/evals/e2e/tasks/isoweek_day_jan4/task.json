@@ -1,0 +1,23 @@
+{
+  "id": "isoweek_day_jan4",
+  "title": "Week.monday() is a week early for years that start on Friday to Sunday",
+  "body": "`Week(year, week).day(n)` in `isoweek.py` returns the wrong date for\nsome years. ISO 8601 defines week 1 as the week that contains January\n4th, but for years whose January 1st is a Friday, Saturday or Sunday\nthe result is one week too early:\n\n```python\n>>> from isoweek import Week\n>>> Week(2021, 1).monday()\ndatetime.date(2020, 12, 28)   # expected datetime.date(2021, 1, 4)\n>>> Week(2022, 1).sunday()\ndatetime.date(2022, 1, 2)     # expected datetime.date(2022, 1, 9)\n```\n\nBecause `toordinal()`, `contains()`, `days()` and week arithmetic are\nbuilt on `day()`, they are off by a week in those years too, e.g.\n`Week.withdate(d).contains(d)` is False for some dates. Every\n`Week.withdate(d)` must contain `d`, and `day(0)` to `day(6)` must be\nthe Monday to Sunday of the ISO week.\n",
+  "target_file": "isoweek.py",
+  "kind": "bugfix",
+  "category": "logic",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "isoweek",
+    "repository": "https://github.com/gisle/isoweek",
+    "commit": "4848cc22350568b0a5e5a9c3bf4fe4f03331f888",
+    "path": "isoweek.py",
+    "license": "BSD-2-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "day() anchors week 1 on January 1st instead of January 4th.",
+  "harness_files": [
+    "tests/test_isoweek_basic.py"
+  ]
+}

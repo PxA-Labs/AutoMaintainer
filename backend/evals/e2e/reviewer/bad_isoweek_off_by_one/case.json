@@ -1,0 +1,11 @@
+{
+  "id": "bad_isoweek_off_by_one",
+  "task_id": "isoweek_day_jan4",
+  "expected_verdict": "reject",
+  "defect_class": "wrong-logic",
+  "description": "Anchors on January 4th but shifts every day by one.",
+  "changed_files": [
+    "isoweek.py"
+  ],
+  "deleted_files": []
+}

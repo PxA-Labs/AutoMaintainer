@@ -1,0 +1,11 @@
+{
+  "id": "bad_hashids_nonempty_check",
+  "task_id": "hashids_decode_salt",
+  "expected_verdict": "reject",
+  "defect_class": "wrong-logic",
+  "description": "Rejects only empty results instead of re-encoding to verify.",
+  "changed_files": [
+    "hashids.py"
+  ],
+  "deleted_files": []
+}

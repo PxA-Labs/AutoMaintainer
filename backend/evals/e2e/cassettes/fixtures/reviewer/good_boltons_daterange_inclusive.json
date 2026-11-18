@@ -1,0 +1,21 @@
+{
+ "id": "good_boltons_daterange_inclusive",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 2,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "210b6913c5be87549de12bbf72add5b620eb7127e2a8ee226b81bd5ed5f2a56f",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

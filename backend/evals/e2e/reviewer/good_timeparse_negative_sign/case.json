@@ -1,0 +1,10 @@
+{
+  "id": "good_timeparse_negative_sign",
+  "task_id": "timeparse_negative_sign",
+  "expected_verdict": "approve",
+  "defect_class": null,
+  "description": "The task's oracle fix (the unmodified upstream file).",
+  "changed_files": [],
+  "deleted_files": [],
+  "use_solution": true
+}

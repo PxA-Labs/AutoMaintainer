@@ -1,0 +1,24 @@
+{
+  "id": "boltons_ceil_unsorted_options",
+  "title": "ceil(x, options) gives wrong results unless options are sorted",
+  "body": "`ceil` in `boltons/mathutils.py` accepts any iterable of options, but\nit only works when they are already sorted ascending:\n\n```python\n>>> ceil(3, options=[10, 4, 6])\n10    # expected 4\n>>> ceil(3, options=iter([6, 4]))\nTypeError   # expected 4\n```\n\nExpected: the smallest option greater than or equal to x, whatever\nthe order or type of the iterable (list, tuple, set, generator), as\n`floor` already does.\n",
+  "target_file": "boltons/mathutils.py",
+  "kind": "bugfix",
+  "category": "input-validation",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "boltons",
+    "repository": "https://github.com/mahmoud/boltons",
+    "commit": "4332b35a278d694f30c99881faa61cde695c7a96",
+    "path": "boltons/mathutils.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "ceil() no longer sorts its options before bisecting.",
+  "harness_files": [
+    "boltons/__init__.py",
+    "tests/test_mathutils_basic.py"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+ "id": "bad_hashids_hex_partial_guard",
+ "kind": "reviewer",
+ "model": "oracle-policy",
+ "note": "synthetic: scripted oracle agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "df3821e649b20ce2ec42b188cd2a6d01b7c406d445f2a509ad4c3a9b69179333",
+    "response": "{\"verdict\": \"reject\", \"reasons\": [\"The change does not resolve the issue.\"], \"blocking_issues\": [\"The behaviour described in the issue is still wrong.\"]}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "oracle",
+ "synthetic": true
+}

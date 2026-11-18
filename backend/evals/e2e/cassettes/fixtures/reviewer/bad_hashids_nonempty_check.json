@@ -1,0 +1,21 @@
+{
+ "id": "bad_hashids_nonempty_check",
+ "kind": "reviewer",
+ "model": "noop-policy",
+ "note": "synthetic: scripted noop agent, recorded by python -m evals.e2e.make_fixtures (no model output)",
+ "runs": [
+  [
+   {
+    "finish_reason": "stop",
+    "latency_ms": 1,
+    "model": "llama-3.3-70b-versatile",
+    "prompt_sha256": "46eec963790dc9d2ffab428daf8ce42a14505085a6dbd153a8ad4a6c681dd240",
+    "response": "{\"verdict\": \"approve\", \"reasons\": [\"The change implements the issue.\"], \"blocking_issues\": []}",
+    "role": "maintainer",
+    "usage": null
+   }
+  ]
+ ],
+ "source": "noop",
+ "synthetic": true
+}

@@ -1,0 +1,23 @@
+{
+  "id": "xmltodict_force_list_callable",
+  "title": "force_list given as a callable raises TypeError",
+  "body": "The `parse` docstring in `xmltodict.py` says `force_list` can be a\ncallable taking `(path, key, value)`, but passing one fails:\n\n```python\n>>> xmltodict.parse(\"<a><b>1</b></a>\", force_list=lambda path, key, value: key == \"b\")\nTypeError: argument of type 'function' is not iterable\n```\n\nExpected: a callable `force_list` is called for each element with the\npath of its parent, the element name and its value, and the element\nis wrapped in a list when it returns True. Tuples/sets of names and\n`force_list=True` keep working.\n",
+  "target_file": "xmltodict.py",
+  "kind": "bugfix",
+  "category": "error-handling",
+  "difficulty": "medium",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "xmltodict",
+    "repository": "https://github.com/martinblech/xmltodict",
+    "commit": "8d7f1fdb2251b5dc3b98df447850cb8229defc32",
+    "path": "xmltodict.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "The callable form of force_list is no longer supported.",
+  "harness_files": [
+    "tests/test_xmltodict_basic.py"
+  ]
+}

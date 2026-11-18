@@ -1,0 +1,23 @@
+{
+  "id": "inflection_parameterize_trailing",
+  "title": "parameterize() leaves separators at the start and end of the slug",
+  "body": "`parameterize` in `inflection/__init__.py` produces slugs with a\nleading or trailing separator when the text starts or ends with\npunctuation:\n\n```python\n>>> inflection.parameterize(\"Hello, World!\")\n'hello-world-'   # expected 'hello-world'\n>>> inflection.parameterize(\"  (draft) notes\", separator=\"_\")\n'_draft_notes'   # expected 'draft_notes'\n```\n\nExpected: no leading or trailing separator, for the default \"-\" and\nfor a custom separator. Runs of separators inside the slug are still\ncollapsed to one.\n",
+  "target_file": "inflection/__init__.py",
+  "kind": "bugfix",
+  "category": "edge-case",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "inflection",
+    "repository": "https://github.com/jpvanhal/inflection",
+    "commit": "b00d4d348b32ef5823221b20ee4cbd1d2d924462",
+    "path": "inflection/__init__.py",
+    "license": "MIT",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "Stripping of a leading or trailing separator was removed.",
+  "harness_files": [
+    "tests/test_inflection_basic.py"
+  ]
+}

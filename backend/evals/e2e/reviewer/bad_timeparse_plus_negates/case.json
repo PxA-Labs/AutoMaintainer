@@ -1,0 +1,11 @@
+{
+  "id": "bad_timeparse_plus_negates",
+  "task_id": "timeparse_negative_sign",
+  "expected_verdict": "reject",
+  "defect_class": "wrong-logic",
+  "description": "Negates for any sign, so '+ 1 minute' becomes -60.",
+  "changed_files": [
+    "pytimeparse/timeparse.py"
+  ],
+  "deleted_files": []
+}

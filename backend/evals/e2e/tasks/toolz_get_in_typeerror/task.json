@@ -1,0 +1,24 @@
+{
+  "id": "toolz_get_in_typeerror",
+  "title": "get_in() raises TypeError when a path goes through a non-container",
+  "body": "`get_in` in `toolz/dicttoolz.py` returns `default` when the path\ncannot be followed, but a path that runs into a value that cannot be\nindexed with that key raises instead:\n\n```python\n>>> get_in([\"a\", \"b\"], {\"a\": 1})\nTypeError: 'int' object is not subscriptable    # expected None\n>>> get_in([\"items\", \"first\"], {\"items\": [1, 2]}, default=0)\nTypeError: list indices must be integers ...      # expected 0\n```\n\nExpected: any such lookup returns `default` (None unless given), and\nwith `no_default=True` the original exception is raised as before.\n",
+  "target_file": "toolz/dicttoolz.py",
+  "kind": "bugfix",
+  "category": "error-handling",
+  "difficulty": "easy",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "toolz",
+    "repository": "https://github.com/pytoolz/toolz",
+    "commit": "451af60dec590a6010e2babdbf391ea8f815122f",
+    "path": "toolz/dicttoolz.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "TypeError is no longer treated as a missing path.",
+  "harness_files": [
+    "tests/test_dicttoolz_basic.py",
+    "toolz/__init__.py"
+  ]
+}

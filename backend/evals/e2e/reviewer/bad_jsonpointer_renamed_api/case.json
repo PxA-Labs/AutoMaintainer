@@ -1,0 +1,11 @@
+{
+  "id": "bad_jsonpointer_renamed_api",
+  "task_id": "jsonpointer_leading_zero",
+  "expected_verdict": "reject",
+  "defect_class": "broken-api",
+  "description": "Fixes the check but renames the public resolve_pointer() to resolve().",
+  "changed_files": [
+    "jsonpointer.py"
+  ],
+  "deleted_files": []
+}

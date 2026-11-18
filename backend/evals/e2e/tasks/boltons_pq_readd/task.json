@@ -1,0 +1,24 @@
+{
+  "id": "boltons_pq_readd",
+  "title": "Re-adding a task to change its priority leaves a stale entry",
+  "body": "The priority queues in `boltons/queueutils.py` document that calling\n`add(task, priority)` for a task already in the queue changes its\npriority. Instead the old entry stays in the queue, so the task comes\nout twice and the queue breaks:\n\n```python\n>>> pq = PriorityQueue()\n>>> pq.add(\"a\", 1); pq.add(\"b\", 2); pq.add(\"a\", 3)\n>>> pq.pop(), pq.pop()\n('a', 'b')\n>>> pq.pop()\nKeyError: 'a'    # expected IndexError: the queue is empty\n```\n\nExpected for both `PriorityQueue` (`SortedPriorityQueue`) and\n`HeapPriorityQueue`: re-adding replaces the task's previous entry,\neach task is popped once, `len()` counts each task once, and popping\nan empty queue raises IndexError (or returns the given default).\n",
+  "target_file": "boltons/queueutils.py",
+  "kind": "bugfix",
+  "category": "data-structure",
+  "difficulty": "hard",
+  "provenance": "upstream code at a pinned commit with an injected regression; the oracle is the unmodified upstream file",
+  "source": {
+    "project": "boltons",
+    "repository": "https://github.com/mahmoud/boltons",
+    "commit": "4332b35a278d694f30c99881faa61cde695c7a96",
+    "path": "boltons/queueutils.py",
+    "license": "BSD-3-Clause",
+    "license_file": "repo/LICENSE",
+    "modifications": "reformatted with black (layout and quote style only) to pass the repository formatting check; snapshot adds the injected defect, visible tests and empty package markers"
+  },
+  "defect": "add() no longer removes the task's previous entry.",
+  "harness_files": [
+    "boltons/__init__.py",
+    "tests/test_queueutils_basic.py"
+  ]
+}
