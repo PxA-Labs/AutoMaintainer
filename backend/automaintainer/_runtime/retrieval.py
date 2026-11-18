@@ -153,11 +153,33 @@ def _windows(path, symbol, lines, start, end) -> list[CodeChunk]:
     return chunks
 
 
-def _with_decorators(lines, start: int) -> int:
-    """Move ``start`` up over decorator lines directly above a definition."""
-    while start > 1 and lines[start - 2].lstrip().startswith("@"):
-        start -= 1
-    return start
+def _decorated_starts(text: str, suffix: str) -> dict[int, int]:
+    """Definition line -> first decorator line, for decorated Python code.
+
+    tree-sitter wraps a decorated function or class in a
+    ``decorated_definition`` node whose span starts at the first decorator,
+    so multi-line decorators (``@pytest.mark.parametrize(`` ... ``)``) and
+    comments between a decorator and its ``def`` are covered without any
+    line scanning. ast_indexer only reports the inner definition, and it is
+    reused read-only, so the file is parsed once more here with its parser's
+    grammar. (JS/TS decorators are children of the class or method node, so
+    their spans already include them.)
+    """
+    if suffix != ".py":
+        return {}
+    parser = _parser()
+    parser.parser.language = parser.language_map[suffix]
+    tree = parser.parser.parse(text.encode("utf-8"))
+    starts: dict[int, int] = {}
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "decorated_definition":
+            definition = node.child_by_field_name("definition")
+            if definition is not None:
+                starts[definition.start_point[0] + 1] = node.start_point[0] + 1
+        stack.extend(node.children)
+    return starts
 
 
 def _strip_trailing_blank(lines, start: int, end: int) -> int:
@@ -205,34 +227,44 @@ def _inside(inner, outer) -> bool:
     )
 
 
-def _definition_chunks(path: str, lines: list[str], parsed: dict) -> list[CodeChunk]:
-    classes = parsed["classes"]
+def _definition_chunks(
+    path: str, lines: list[str], parsed: dict, decorated: dict[int, int]
+) -> list[CodeChunk]:
     functions = parsed["functions"]
     chunks: list[CodeChunk] = []
 
-    # Functions nested in another function stay in their parent's chunk.
+    def start_of(item) -> int:
+        return decorated.get(item["start_line"], item["start_line"])
+
+    # Functions nested in another function stay in their parent's chunk, and
+    # so do classes defined inside a function (not embedded twice).
     top_functions = [f for f in functions if not any(_inside(f, g) for g in functions)]
+    classes = [
+        c for c in parsed["classes"] if not any(_inside(c, f) for f in top_functions)
+    ]
+
+    def qualified(item) -> str:
+        # Enclosing classes, outermost first: "Outer.Inner.method".
+        owners = sorted(
+            (c for c in classes if _inside(item, c)), key=lambda c: c["start_line"]
+        )
+        return ".".join([_name(lines, c) for c in owners] + [_name(lines, item)])
+
     for func in top_functions:
-        owners = [c for c in classes if _inside(func, c)]
-        # The innermost enclosing class names the method.
-        owner = max(owners, key=lambda c: c["start_line"], default=None)
-        name = _name(lines, func)
-        symbol = f"{_name(lines, owner)}.{name}" if owner else name
-        start = _with_decorators(lines, func["start_line"])
-        chunks += _windows(path, symbol, lines, start, func["end_line"])
+        chunks += _windows(
+            path, qualified(func), lines, start_of(func), func["end_line"]
+        )
 
     # A class contributes its header: everything before its first method
     # (docstring, attributes), so method bodies are not embedded twice.
     for cls in classes:
-        members = [
-            _with_decorators(lines, f["start_line"])
-            for f in top_functions
-            if _inside(f, cls)
-        ] + [c["start_line"] for c in classes if _inside(c, cls)]
-        start = _with_decorators(lines, cls["start_line"])
+        members = [start_of(f) for f in top_functions if _inside(f, cls)] + [
+            start_of(c) for c in classes if _inside(c, cls)
+        ]
+        start = start_of(cls)
         end = min(members) - 1 if members else cls["end_line"]
         end = _strip_trailing_blank(lines, start, end)
-        chunks += _windows(path, _name(lines, cls), lines, start, end)
+        chunks += _windows(path, qualified(cls), lines, start, end)
 
     chunks.sort(key=lambda c: (c.start_line, c.end_line, c.symbol or ""))
     return chunks
@@ -261,7 +293,8 @@ def chunk_file(repo_dir: Path | str, rel_path: str) -> list[CodeChunk]:
     if path.suffix in _parser().language_map:
         parsed = _parser().parse_file(str(path))
         if parsed and (parsed["classes"] or parsed["functions"]):
-            chunks = _definition_chunks(rel, lines, parsed)
+            decorated = _decorated_starts(text, path.suffix)
+            chunks = _definition_chunks(rel, lines, parsed, decorated)
             if chunks:
                 return chunks
     return _windows(rel, None, lines, 1, len(lines))

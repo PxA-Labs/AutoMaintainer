@@ -199,3 +199,106 @@ def test_javascript_definitions_are_named_from_their_line(tmp_path):
     (tmp_path / "b.js").write_text(source, encoding="utf-8")
     symbols = {c.symbol for c in chunk_file(tmp_path, "b.js")}
     assert symbols == {"Box", "Box.open", "wrap"}
+
+
+DECORATED = textwrap.dedent("""\
+    import functools
+
+
+    @functools.lru_cache(
+        maxsize=None,
+    )
+    def cached(x):
+        return x
+
+
+    class A:
+        x = 1
+
+        @property
+        # a comment between the decorator and its def
+        def p(self):
+            return 1
+
+        @pytest.mark.parametrize(
+            "n", [1, 2]  # a bracket ) in a comment
+        )
+        @staticmethod
+        def s(n):
+            return n
+    """)
+
+
+def test_multi_line_decorators_belong_to_the_function_they_decorate(tmp_path):
+    (tmp_path / "d.py").write_text(DECORATED, encoding="utf-8")
+    by = _by_symbol(chunk_file(tmp_path, "d.py"))
+    cached = by["cached"]
+    assert (cached.start_line, cached.end_line) == (4, 8)
+    assert cached.content.startswith("@functools.lru_cache(\n    maxsize=None,\n)")
+    s = by["A.s"]
+    assert (s.start_line, s.end_line) == (19, 24)
+    assert s.content.lstrip().startswith("@pytest.mark.parametrize(")
+
+
+def test_a_comment_between_decorator_and_def_keeps_the_decorator_on_the_method(
+    tmp_path,
+):
+    (tmp_path / "d.py").write_text(DECORATED, encoding="utf-8")
+    by = _by_symbol(chunk_file(tmp_path, "d.py"))
+    p = by["A.p"]
+    assert (p.start_line, p.end_line) == (14, 17)
+    assert p.content.lstrip().startswith("@property")
+    assert (by["A"].start_line, by["A"].end_line) == (11, 12)
+    assert "@property" not in by["A"].content
+
+
+def test_every_decorator_line_is_in_a_chunk(tmp_path):
+    (tmp_path / "d.py").write_text(DECORATED, encoding="utf-8")
+    covered = set()
+    for c in chunk_file(tmp_path, "d.py"):
+        covered.update(range(c.start_line, c.end_line + 1))
+    decorator_lines = {4, 5, 6, 14, 15, 19, 20, 21, 22}
+    assert decorator_lines <= covered, sorted(decorator_lines - covered)
+
+
+def test_decorated_classes_include_their_decorators(tmp_path):
+    source = textwrap.dedent("""\
+        @dataclasses.dataclass(
+            frozen=True,
+        )
+        class Point:
+            x: int
+
+            def norm(self):
+                return self.x
+        """)
+    (tmp_path / "p.py").write_text(source, encoding="utf-8")
+    by = _by_symbol(chunk_file(tmp_path, "p.py"))
+    assert (by["Point"].start_line, by["Point"].end_line) == (1, 5)
+    assert (by["Point.norm"].start_line, by["Point.norm"].end_line) == (7, 8)
+
+
+def test_a_class_inside_a_function_is_not_embedded_twice(tmp_path):
+    source = textwrap.dedent("""\
+        def outer():
+            class Local:
+                def m(self):
+                    return 1
+
+            return Local
+        """)
+    (tmp_path / "o.py").write_text(source, encoding="utf-8")
+    chunks = chunk_file(tmp_path, "o.py")
+    assert [(c.symbol, c.start_line, c.end_line) for c in chunks] == [("outer", 1, 6)]
+
+
+def test_nested_class_methods_carry_the_full_class_path(tmp_path):
+    source = textwrap.dedent("""\
+        class A:
+            class Inner:
+                def im(self):
+                    return 1
+        """)
+    (tmp_path / "n.py").write_text(source, encoding="utf-8")
+    symbols = {c.symbol for c in chunk_file(tmp_path, "n.py")}
+    assert "A.Inner.im" in symbols and "Inner.im" not in symbols
