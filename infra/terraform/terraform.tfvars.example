@@ -31,6 +31,12 @@ monitoring_app_alerts_enabled = false
 # monitoring_alert_email = "<alerts e-mail address>"
 monitoring_alert_email = null
 
+# Code retrieval with Vertex AI embeddings (docs/RAG.md): sends repository
+# code to Vertex AI in rag_location. Also set the repository variable
+# IMAGE_EXTRAS to "server,rag" (docs/DEPLOYMENT.md, "Code retrieval (RAG)").
+rag_enabled  = false
+rag_location = "us-central1"
+
 api_max_instances  = 3
 worker_concurrency = 2
 

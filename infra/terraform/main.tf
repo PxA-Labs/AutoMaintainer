@@ -27,6 +27,8 @@ locals {
       "sts.googleapis.com",
     ],
     var.redis_mode == "memorystore" ? ["redis.googleapis.com"] : [],
+    # Vertex AI embeddings for code retrieval (#526).
+    var.rag_enabled ? ["aiplatform.googleapis.com"] : [],
   ))
 
   registry_host    = "${var.region}-docker.pkg.dev"
@@ -43,13 +45,25 @@ locals {
   redis_url = "redis://${local.redis_host_port}/0"
 
   # Shared by the API and the worker, so MERGE_POLICY and the rest match.
-  app_env = merge(var.app_env, {
-    ENVIRONMENT          = "production"
-    GOOGLE_CLOUD_PROJECT = var.project_id
-    # Metrics come from both services: runs and LLM tokens from the worker,
-    # HTTP metrics from the API (backend/observability.py).
-    OTEL_CLOUD_MONITORING_ENABLED = var.cloud_monitoring_enabled ? "true" : "false"
-  })
+  app_env = merge(
+    var.app_env,
+    {
+      ENVIRONMENT          = "production"
+      GOOGLE_CLOUD_PROJECT = var.project_id
+      # Metrics come from both services: runs and LLM tokens from the worker,
+      # HTTP metrics from the API (backend/observability.py).
+      OTEL_CLOUD_MONITORING_ENABLED = var.cloud_monitoring_enabled ? "true" : "false"
+    },
+    # Code retrieval (#526, docs/RAG.md). Only the worker acts on these
+    # (indexing on the maintenance queue, retrieval in the agent runs); the
+    # API ignores them. Unset when off, so turning it off restores the
+    # previous environment exactly.
+    var.rag_enabled ? {
+      RAG_INDEXING_ENABLED  = "true"
+      RAG_RETRIEVAL_ENABLED = "true"
+      GOOGLE_CLOUD_LOCATION = var.rag_location
+    } : {},
+  )
 }
 
 resource "google_project_service" "services" {

@@ -29,6 +29,9 @@ output "github_repository_variables" {
     GCP_RUN_SERVICE                = google_cloud_run_v2_service.api.name
     GCP_WORKER_INSTANCE            = module.worker.instance_name
     GCP_WORKER_ZONE                = var.zone
+    # Optional (the workflow defaults to "server"); "server,rag" adds the
+    # Vertex AI client the worker needs with rag_enabled.
+    IMAGE_EXTRAS = var.rag_enabled ? "server,rag" : "server"
   }
 }
 

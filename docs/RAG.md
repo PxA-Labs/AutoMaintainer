@@ -169,12 +169,12 @@ commit_sha=None)` is called per prompt, never cached in a module global:
    taken from the run. With a `commit_sha` it is returned only when the
    index holds exactly that commit.
 
-> The engine constructor does not take a `retriever=` argument yet
-> (`engine.py` and `context.py` were outside this change): the lead's
-> follow-up adds `retriever: Optional[RetrieverFactory] = None` to
-> `EngineContext` and passes it through `AutoMaintainerEngine(...,
-> retriever=...)` like `llm=` and `github=`. The runtime reads the attribute
-> with `getattr`, so it works before and after.
+An engine takes the factory as `AutoMaintainerEngine(config, ...,
+retriever=factory)`, like `llm=` and `github=`, and publishes it on its
+`EngineContext` (`retriever`, default None). It is only consulted when the
+engine's config has `rag_retrieval_enabled=True`; two engines in one
+process each see only their own factory
+(`tests/concurrency/test_concurrency_rag_retriever.py`).
 
 **PM prompt.** `pm_node` queries with the issue text (title and body in
 targeted mode, else the proposed idea), capped at 2000 characters, asks
@@ -326,17 +326,31 @@ context; that needs a live run (an owner action). A
 ## Owner actions before this is used
 
 - Apply the migration (`supabase db push` or `python scripts/db-migrate up`).
-- Build the worker image with the `rag` extra as well
-  (`uv sync --frozen --extra server --extra rag`). The images install
-  `--extra server` only, so `google-genai` is missing there and the first
-  embedding call would fail with `ImportError` once indexing is enabled.
-- Grant the runtime service account `roles/aiplatform.user`, set
+- Build the worker image with the `rag` extra as well: the Dockerfile's
+  `EXTRAS` build arg (`docker build --build-arg EXTRAS=server,rag .`;
+  default `server`). Without it `google-genai` is missing and the first
+  embedding call fails with `ImportError` once indexing is enabled.
+- On Google Cloud (`infra/terraform`), `rag_enabled = true` does the rest:
+  it enables the Vertex AI API, grants the worker's service account
+  `roles/aiplatform.user` (the API never embeds, so it gets none) and sets
+  `RAG_INDEXING_ENABLED=true`, `RAG_RETRIEVAL_ENABLED=true` and
+  `GOOGLE_CLOUD_LOCATION` (`rag_location`, default `us-central1`;
+  `GOOGLE_CLOUD_PROJECT` is always set). Set the repository variable
+  `IMAGE_EXTRAS` to `server,rag` so the deploy workflow builds the extra in,
+  deploy, and reset the worker VM (docs/DEPLOYMENT.md, Option D, "Code
+  retrieval (RAG)"). The one switch turns indexing and retrieval on
+  together: until a repository is indexed its PM prompts get no context,
+  but each PM query is still embedded with Vertex AI (the Reviewer checks
+  the indexed commit first and does not embed).
+- Elsewhere: grant the runtime service account `roles/aiplatform.user`, set
   `GOOGLE_CLOUD_PROJECT`, then `RAG_INDEXING_ENABLED=true` (maintenance
-  worker, and the agent workers, whose run starts trigger indexing).
-- Only after the index is populated and the Vertex recall numbers are in:
-  `RAG_RETRIEVAL_ENABLED=true` on the agent workers. They then embed each
-  query with Vertex AI too, so their image needs the `rag` extra and their
-  service account `roles/aiplatform.user`; without them every query fails
-  (logged) and the prompts stay as with retrieval off.
+  worker, and the agent workers, whose run starts trigger indexing), and
+  `RAG_RETRIEVAL_ENABLED=true` on the agent workers once the index is
+  populated. They then embed each query with Vertex AI too, so their image
+  needs the `rag` extra and their service account `roles/aiplatform.user`;
+  without them every query fails (logged) and the prompts stay as with
+  retrieval off.
+- Before relying on retrieval, measure the Vertex recall numbers
+  ([Evaluation](#evaluation)).
 - Confirm the Vertex embedding price on Google's pricing page; the figure in
   [Cost](#cost) is from memory.

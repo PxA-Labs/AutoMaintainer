@@ -296,3 +296,106 @@ def test_terraform_ci_checks_format_and_validates_read_only():
     assert "terraform validate" in joined
     text = (WORKFLOWS / "ci-terraform.yml").read_text(encoding="utf-8")
     assert "id-token" not in text and "apply" not in text
+
+
+# --- Retrieval over the target repository (#526, docs/RAG.md) -----------------
+
+RAG_ENV = ("RAG_INDEXING_ENABLED", "RAG_RETRIEVAL_ENABLED", "GOOGLE_CLOUD_LOCATION")
+
+
+def test_rag_is_off_by_default():
+    variables = _strip_comments((TF / "variables.tf").read_text(encoding="utf-8"))
+    body = _block(variables, r'variable\s+"rag_enabled"')
+    assert re.search(r"type\s*=\s*bool", body)
+    assert re.search(r"default\s*=\s*false", body)
+    location = _block(variables, r'variable\s+"rag_location"')
+    assert re.search(r'default\s*=\s*"us-central1"', location)  # runtime default
+
+
+def test_rag_enables_the_vertex_ai_api_only_when_on():
+    main = _strip_comments((TF / "main.tf").read_text(encoding="utf-8"))
+    services = _block(main, r"locals")
+    assert re.search(
+        r'var\.rag_enabled\s*\?\s*\[\s*"aiplatform\.googleapis\.com"\s*\]'
+        r"\s*:\s*\[\s*\]",
+        services,
+    )
+    # Not in the unconditional list.
+    fixed = re.search(r"concat\(\s*\[(.*?)\]", services, re.S).group(1)
+    assert "aiplatform" not in fixed
+
+
+def test_rag_grants_vertex_ai_to_the_worker_only():
+    tf = _strip_comments(_all_tf())
+    grants = re.findall(r'"roles/aiplatform\.[a-zA-Z]+"', tf)
+    assert grants == ['"roles/aiplatform.user"']
+    iam = _block(tf, r'resource\s+"google_project_iam_member"\s+"worker_aiplatform"')
+    assert re.search(r"count\s*=\s*var\.rag_enabled\s*\?\s*1\s*:\s*0", iam)
+    assert '"roles/aiplatform.user"' in iam
+    assert "google_service_account.worker.member" in iam
+    # The API only enqueues runs: it never embeds a query or a chunk.
+    assert "google_service_account.api" not in iam
+
+
+def test_rag_settings_reach_the_services_through_app_env():
+    main = _strip_comments((TF / "main.tf").read_text(encoding="utf-8"))
+    app_env = re.search(r"app_env\s*=\s*merge\((.*?)\n  \)\n", main, re.S)
+    assert app_env, "local.app_env"
+    body = app_env.group(1)
+    m = re.search(r"var\.rag_enabled\s*\?\s*\{(.*?)\}\s*:\s*\{\s*\}", body, re.S)
+    assert m, "the RAG settings are set only with rag_enabled"
+    rag = m.group(1)
+    assert re.search(r'RAG_INDEXING_ENABLED\s*=\s*"true"', rag)
+    assert re.search(r'RAG_RETRIEVAL_ENABLED\s*=\s*"true"', rag)
+    assert re.search(r"GOOGLE_CLOUD_LOCATION\s*=\s*var\.rag_location", rag)
+    # The worker gets local.app_env (and the API too, harmlessly).
+    assert re.search(r"app_env\s*=\s*local\.app_env", main)
+
+
+def test_rag_settings_cannot_be_overridden_in_app_env():
+    variables = (TF / "variables.tf").read_text(encoding="utf-8")
+    body = _block(variables, r'variable\s+"app_env"')
+    m = re.search(
+        r"condition\s*=\s*alltrue\(\[\s*for k in \[([^\]]*)\]\s*:"
+        r"\s*!contains\(keys\(var\.app_env\), k\)\s*\]\)\s*\n"
+        r'\s*error_message\s*=\s*"[^"]*rag_enabled[^"]*"',
+        body,
+    )
+    assert m, "a validation refusing the RAG keys, naming rag_enabled"
+    for name in RAG_ENV:
+        assert f'"{name}"' in m.group(1), name
+
+
+def test_image_extras_default_to_server_only():
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert re.search(r'^ARG EXTRAS="server"$', dockerfile, re.M)
+    sync = [
+        line
+        for line in dockerfile.splitlines()
+        if "uv sync" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(sync) == 1
+    assert "--frozen" in sync[0] and "--no-dev" in sync[0]
+    # The server extra always; the others only when EXTRAS names them, and
+    # an unknown name fails the build.
+    assert re.search(r"--extra server \$extras$", sync[0])
+    assert re.search(r"rag\|adk\)\s*extras=", dockerfile)
+    assert "Unknown extra in EXTRAS" in dockerfile
+
+
+def test_deploy_builds_the_extras_terraform_asks_for():
+    wf = _load_workflow("deploy-gcp.yml")
+    (build,) = [
+        s
+        for job in wf["jobs"].values()
+        for s in job["steps"]
+        if s.get("uses", "").startswith("docker/build-push-action@")
+    ]
+    args = build["with"]["build-args"]
+    assert "EXTRAS=${{ vars.IMAGE_EXTRAS || 'server' }}" in args.splitlines()
+    outputs = _strip_comments((TF / "outputs.tf").read_text(encoding="utf-8"))
+    out = _block(outputs, r'output\s+"github_repository_variables"')
+    assert re.search(
+        r'IMAGE_EXTRAS\s*=\s*var\.rag_enabled\s*\?\s*"server,rag"\s*:\s*"server"',
+        out,
+    )

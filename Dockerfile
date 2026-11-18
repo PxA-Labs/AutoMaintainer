@@ -51,7 +51,7 @@ RUN npm install -g --omit=dev \
 # Stage 3: build the Python virtualenv (build-essential stays in this stage)
 # Installs exactly what backend/uv.lock pins (engine deps plus the server
 # extra: FastAPI, uvicorn, Celery, OpenTelemetry; no dev
-# group). --frozen installs the lock as-is and never re-resolves (Backend CI
+# group; other extras only through the EXTRAS build arg below). --frozen installs the lock as-is and never re-resolves (Backend CI
 # runs `uv lock --check` so the lock always matches pyproject.toml). The venv
 # is created at /opt/venv with the base image's interpreter, which sits at the
 # same path in the runtime stage.
@@ -71,7 +71,22 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_NO_CACHE=1
 WORKDIR /build
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --extra server
+# EXTRAS: comma-separated optional dependency groups of backend/pyproject.toml.
+# The server extra is always installed; "server,rag" adds the Vertex AI
+# client code retrieval needs (docs/RAG.md), "adk" the ADK Reviewer. Any
+# other name fails the build. The deploy workflow passes the repository
+# variable IMAGE_EXTRAS.
+ARG EXTRAS="server"
+RUN set -eu; \
+    extras=""; \
+    for e in $(echo "$EXTRAS" | tr ',' ' '); do \
+        case "$e" in \
+            server) ;; \
+            rag|adk) extras="$extras --extra $e" ;; \
+            *) echo "Unknown extra in EXTRAS: $e" >&2; exit 1 ;; \
+        esac; \
+    done; \
+    uv sync --frozen --no-dev --no-install-project --extra server $extras
 
 # ---------------------------------------------------------------------------
 # Stage 4: runtime

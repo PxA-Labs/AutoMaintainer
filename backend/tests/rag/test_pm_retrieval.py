@@ -258,15 +258,14 @@ async def test_a_decided_checkpoint_is_not_retrieved_again(
 
 
 def engine_context(retriever=None, **config):
-    ctx = EngineContext(
+    # The engine's injected retriever factory (see docs/RAG.md), as the
+    # engine constructor's ``retriever=`` argument publishes it.
+    return EngineContext(
         config=AutoMaintainerConfig(groq_api_keys=["gsk_test"], **config),
         engine_id="engine-rag-test",
         rate_limiter=lambda: None,
+        retriever=retriever,
     )
-    # The engine's injected retriever factory (see docs/RAG.md); the engine
-    # constructor's ``retriever=`` argument sets this attribute.
-    ctx.retriever = retriever
-    return ctx
 
 
 @pytest.fixture
