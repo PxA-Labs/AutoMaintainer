@@ -506,7 +506,7 @@ changes, `false_rejection_rate` = correct changes rejected / correct changes,
 per repeat then mean ± standard deviation, plus approvals per defect class.
 
 **Prices.** `evals/e2e/pricing.py` has a built-in table (USD per million
-tokens: `llama-3.3-70b-versatile` 0.59 in / 0.79 out, `llama-3.1-8b-instant`
+tokens: `llama-3.3-70b-versatile` 0.59 in / 0.79 out, `llama-3.1-8b-instant` <!-- gitleaks:allow -->
 0.05 / 0.08). These are Groq's earlier public list prices and **could not be
 confirmed** when the table was written (Groq's model page showed "Contact
 sales"). The report records the price source; pass `--prices FILE` with the
