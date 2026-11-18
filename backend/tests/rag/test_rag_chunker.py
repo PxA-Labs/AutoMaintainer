@@ -132,6 +132,50 @@ def test_binary_empty_and_generated_files_are_skipped(tmp_path, name, data):
     assert chunk_file(tmp_path, name) == []
 
 
+SECRET_FILES = [
+    ".env",
+    ".env.production",
+    "config/.env.local",
+    "certs/server.pem",
+    "deploy/tls.key",
+    "deploy/id_rsa",
+    ".ssh/id_ed25519",
+    "keys/store.p12",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+]
+
+
+@pytest.mark.parametrize("rel", SECRET_FILES)
+def test_secret_files_are_never_chunked(tmp_path, rel):
+    """They would be sent to Vertex and readable by every org member."""
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("API_TOKEN=do-not-index\n", encoding="utf-8")
+    assert chunk_file(tmp_path, rel) == []
+
+
+def test_secret_patterns_reuse_the_change_limits_denylist():
+    from automaintainer._runtime.change_limits import DEFAULT_DENYLIST
+
+    shared = {".env*", "*.pem", "*.key"}
+    assert shared <= set(DEFAULT_DENYLIST)
+    assert shared <= set(retrieval.SECRET_FILE_PATTERNS)
+
+
+def test_repository_walk_leaves_out_secret_files(tmp_path):
+    for rel in SECRET_FILES:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("API_TOKEN=do-not-index\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    (tmp_path / "keyboard.py").write_text("def k():\n    pass\n", encoding="utf-8")
+    chunks = chunk_repository(tmp_path)
+    assert {c.path for c in chunks} == {"app.py", "keyboard.py"}
+    assert not any("do-not-index" in c.content for c in chunks)
+
+
 def test_oversized_files_are_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(retrieval, "MAX_FILE_BYTES", 10)
     (tmp_path / "a.txt").write_text("x" * 11, encoding="utf-8")

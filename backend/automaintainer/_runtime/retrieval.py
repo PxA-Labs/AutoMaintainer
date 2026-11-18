@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Protocol, Sequence, runtime_checkable
 
 from .ast_indexer import CodebaseMapper, TreeSitterParser
+from .change_limits import DEFAULT_DENYLIST, path_matches
 
 EMBEDDING_DIMENSIONS = 768  # text-embedding-005; the code_chunks column width
 DEFAULT_EMBEDDING_MODEL = "text-embedding-005"
@@ -77,6 +78,31 @@ SKIPPED_FILE_NAMES = frozenset(
     }
 )
 SKIPPED_SUFFIXES = (".min.js", ".min.css", ".map", ".lock")
+
+# Files that hold credentials are never chunked: a chunk is sent to Vertex AI
+# and stored in code_chunks.content, where every member of the organization
+# can read it. change_limits.DEFAULT_DENYLIST's secret entries come first;
+# the rest are private keys and credential files of common tools. Matched
+# with change_limits.path_matches (a pattern without "/" matches the file
+# name in any directory, case-insensitively). A name-based list is defence
+# in depth, not secret scanning: a token pasted into app.py is still
+# indexed. ".env*" also leaves out templates such as .env.example.
+SECRET_FILE_PATTERNS = tuple(
+    p for p in DEFAULT_DENYLIST if p in (".env*", "*.pem", "*.key")
+) + (
+    "id_rsa*",
+    "id_dsa*",
+    "id_ecdsa*",
+    "id_ed25519*",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+)
 
 
 @dataclass(frozen=True)
@@ -314,6 +340,11 @@ def _skipped_name(name: str) -> bool:
     return name in SKIPPED_FILE_NAMES or name.endswith(SKIPPED_SUFFIXES)
 
 
+def is_secret_file(rel_path: str) -> bool:
+    """True for a file :data:`SECRET_FILE_PATTERNS` keeps out of the index."""
+    return any(path_matches(rel_path, p) for p in SECRET_FILE_PATTERNS)
+
+
 def chunk_file(repo_dir: Path | str, rel_path: str) -> list[CodeChunk]:
     """The chunks of one file of a checkout (``rel_path`` is POSIX-relative)."""
     root = Path(repo_dir).resolve()
@@ -321,7 +352,7 @@ def chunk_file(repo_dir: Path | str, rel_path: str) -> list[CodeChunk]:
     if not path.is_relative_to(root):
         raise ValueError(f"{rel_path!r} is outside the repository")
     rel = path.relative_to(root).as_posix()
-    if _skipped_name(path.name):
+    if _skipped_name(path.name) or is_secret_file(rel):
         return []
     text = _read_text(path)
     if text is None:
@@ -358,7 +389,9 @@ def iter_repository_files(repo_dir: Path | str) -> Iterable[str]:
             full = Path(dirpath) / name
             if full.is_symlink() or not full.is_file():
                 continue
-            found.append(full.relative_to(root).as_posix())
+            rel = full.relative_to(root).as_posix()
+            if not is_secret_file(rel):
+                found.append(rel)
     return sorted(found)
 
 
