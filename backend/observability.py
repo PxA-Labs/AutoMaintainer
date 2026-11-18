@@ -4,8 +4,10 @@ Provides distributed tracing, metrics, and structured logging.
 """
 
 import os
+import json
 import logging
 import re
+from functools import lru_cache
 from typing import Optional, Any
 from contextlib import contextmanager
 
@@ -179,9 +181,43 @@ METRIC_LABELS: dict[str, frozenset[str]] = {
     "http.client.request.duration": _HTTP_CLIENT_LABELS,
 }
 
+# Metrics added for Cloud Monitoring dashboards and alerts
+# (infra/terraform/monitoring.tf). Kept apart from METRIC_LABELS only so the
+# existing catalogue test (test_metric_labels.py) and docs/OBSERVABILITY.md
+# can absorb them in a separate change; metric_views() and
+# all_metric_labels() treat both catalogues as one allowlist.
+ALERTING_METRIC_LABELS: dict[str, frozenset[str]] = {
+    "llm_phase_tokens_total": frozenset({"model", "phase", "kind"}),
+    "llm_estimated_cost_usd_total": frozenset({"model", "phase"}),
+    # One series per worker process; absent when no worker runs.
+    "celery_worker_heartbeat": frozenset(),
+}
+
+
+def all_metric_labels() -> dict[str, frozenset[str]]:
+    """Every exported metric and its complete label set."""
+    return {**METRIC_LABELS, **ALERTING_METRIC_LABELS}
+
+
 # Bounded values for labels whose input can come from a request.
 AGENT_MODES = frozenset({"autonomous", "targeted_issue", "code_review", "refactor"})
 RUN_OUTCOMES = frozenset({"completed", "failed", "cancelled"})
+# events.AgentPhase values (not imported: this module must stay importable
+# without the engine).
+LLM_PHASES = frozenset(
+    {
+        "architect",
+        "brainstormer",
+        "visionary",
+        "pm",
+        "reviewer",
+        "implementer",
+        "maintainer",
+        "system",
+    }
+)
+# "total" is a count that was not split into prompt and completion tokens.
+LLM_TOKEN_KINDS = frozenset({"input", "output", "total"})
 OTHER = "other"
 # operation, task_name, queue and model must be code constants or
 # configuration (e.g. "get_pull", "agents.run", "llama-3.3-70b-versatile").
@@ -210,12 +246,95 @@ def metric_views() -> list:
     Requires the OpenTelemetry SDK (imported here so the catalogue can be
     used and tested without it).
     """
-    from opentelemetry.sdk.metrics.view import View
+    from opentelemetry.sdk.metrics.view import (
+        ExplicitBucketHistogramAggregation,
+        View,
+    )
 
-    return [
-        View(instrument_name=name, attribute_keys=set(labels))
-        for name, labels in METRIC_LABELS.items()
-    ]
+    views = []
+    for name, labels in all_metric_labels().items():
+        kwargs = {}
+        if name == "agent_run_duration_seconds":
+            kwargs["aggregation"] = ExplicitBucketHistogramAggregation(
+                boundaries=RUN_DURATION_BUCKETS_SECONDS
+            )
+        views.append(View(instrument_name=name, attribute_keys=set(labels), **kwargs))
+    return views
+
+
+# Agent runs last minutes, up to the 30-minute soft time limit. The SDK's
+# default buckets jump from 1000 s to 2500 s, too coarse for a p95 alert.
+RUN_DURATION_BUCKETS_SECONDS = (
+    10.0,
+    30.0,
+    60.0,
+    120.0,
+    300.0,
+    600.0,
+    900.0,
+    1200.0,
+    1500.0,
+    1800.0,
+    2400.0,
+    3600.0,
+)
+
+
+# --- Estimated LLM cost (an ESTIMATE, not a bill) ------------------------------
+# USD per million tokens. The same figures as evals/e2e/pricing.py: Groq's
+# earlier public on-demand list prices, which could not be confirmed on
+# 2026-11-18 (the model page showed "Contact sales"). LLM_PRICES_JSON (a JSON
+# object of the same shape) adds or replaces entries per model. A model in
+# neither table adds tokens but no cost, so the cost metric undercounts
+# rather than invents a price.
+DEFAULT_LLM_PRICES_PER_MTOK = {
+    "llama-3.3-70b-versatile": {"input_per_mtok": 0.59, "output_per_mtok": 0.79},
+    "llama-3.1-8b-instant": {"input_per_mtok": 0.05, "output_per_mtok": 0.08},
+}
+LLM_PRICES_ENV = "LLM_PRICES_JSON"
+_PRICE_KEYS = ("input_per_mtok", "output_per_mtok")
+
+
+def _valid_price(value) -> bool:
+    return (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    )
+
+
+@lru_cache(maxsize=4)
+def _parse_llm_prices(raw: str) -> dict:
+    """The default table merged with ``raw``.
+
+    Cached per value, so an invalid override is logged once and then ignored
+    (the defaults apply) instead of failing or logging on every LLM call.
+    """
+    prices = dict(DEFAULT_LLM_PRICES_PER_MTOK)
+    if not raw.strip():
+        return prices
+    try:
+        table = json.loads(raw)
+        if not isinstance(table, dict):
+            raise ValueError("must be a JSON object")
+        for model, entry in table.items():
+            if not isinstance(entry, dict) or not all(
+                _valid_price(entry.get(k)) for k in _PRICE_KEYS
+            ):
+                raise ValueError(f"{model}: needs {' and '.join(_PRICE_KEYS)} >= 0")
+    except ValueError as e:  # json.JSONDecodeError is a ValueError
+        logger.warning(f"Ignoring {LLM_PRICES_ENV}: {e}")
+        return prices
+    prices.update(table)
+    return prices
+
+
+def estimated_llm_cost_usd(model: str, tokens: int, kind: str) -> Optional[float]:
+    """Estimated USD cost of ``tokens`` input or output tokens; None if unpriced."""
+    if kind not in ("input", "output"):
+        return None
+    entry = _parse_llm_prices(os.getenv(LLM_PRICES_ENV, "")).get(model)
+    if entry is None:
+        return None
+    return tokens * entry[f"{kind}_per_mtok"] / 1_000_000
 
 
 # --- Cloud Trace (#527) ---
@@ -224,7 +343,8 @@ def metric_views() -> list:
 # exporters. Off by default. The exporter authenticates with application
 # default credentials (on Cloud Run: the service's own service account, which
 # needs roles/cloudtrace.agent) and uses GOOGLE_CLOUD_PROJECT when set, else
-# the project those credentials belong to. Metrics are not sent to Google.
+# the project those credentials belong to. Metrics have their own switch
+# (OTEL_CLOUD_MONITORING_ENABLED, below).
 CLOUD_TRACE_ENV = "OTEL_CLOUD_TRACE_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -256,6 +376,61 @@ def _configure_cloud_trace(tracer_provider) -> bool:
     return True
 
 
+# --- Cloud Monitoring ---
+# OTEL_CLOUD_MONITORING_ENABLED=true adds a metric reader that sends the
+# metrics above to Google Cloud Monitoring every 60 s, next to Prometheus and
+# OTLP: in the API (init_observability) and, once celery_app calls
+# install_celery_worker_hooks, in each Celery worker process. Off by default.
+# Credentials and project as for Cloud Trace; the account needs
+# roles/monitoring.metricWriter. Each metric becomes the metric type
+# workload.googleapis.com/<name>, which infra/terraform/monitoring.tf alerts on.
+CLOUD_MONITORING_ENV = "OTEL_CLOUD_MONITORING_ENABLED"
+CLOUD_MONITORING_METRIC_PREFIX = "workload.googleapis.com"
+# Cloud Monitoring accepts one point per series every 5 s at most; 60 s keeps
+# the number of points written (billed past the free allotment) low.
+CLOUD_MONITORING_EXPORT_INTERVAL_MILLIS = 60_000
+
+
+def cloud_monitoring_enabled() -> bool:
+    """True only when OTEL_CLOUD_MONITORING_ENABLED is 1, true, yes or on."""
+    return os.getenv(CLOUD_MONITORING_ENV, "").strip().lower() in _TRUTHY
+
+
+def _cloud_monitoring_reader():
+    """A periodic reader exporting to Cloud Monitoring, or None; never raises.
+
+    The exporter is imported here, like the Cloud Trace one, so a missing
+    package or missing credentials disable only this reader (logged once:
+    init_observability runs once per process).
+
+    Each process must write its own series: several Cloud Run instances or
+    the worker's child processes writing one series would have their points
+    rejected. The SDK's random ``service.instance.id`` already maps to the
+    ``task_id`` of the ``generic_task`` monitored resource (``job`` is the
+    service name); ``add_unique_identifier`` adds an ``opentelemetry_id``
+    label as well, so this holds even if the resource changes. The price: a
+    restarted process starts new series, so alerts and charts sum across
+    them.
+    """
+    try:
+        from opentelemetry.exporter.cloud_monitoring import (
+            CloudMonitoringMetricsExporter,
+        )
+
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        kwargs = {"project_id": project_id} if project_id else {}
+        exporter = CloudMonitoringMetricsExporter(add_unique_identifier=True, **kwargs)
+        reader = PeriodicExportingMetricReader(
+            exporter,
+            export_interval_millis=CLOUD_MONITORING_EXPORT_INTERVAL_MILLIS,
+        )
+    except Exception as e:  # ImportError, or no application default credentials
+        logger.error(f"Failed to configure the Cloud Monitoring exporter: {e}")
+        return None
+    logger.info("Cloud Monitoring metric exporter configured")
+    return reader
+
+
 # Global state
 _tracer_provider = None
 _meter_provider = None
@@ -270,11 +445,13 @@ def init_observability(
     enable_console_export: bool = True,
     enable_prometheus: bool = True,
     enable_cloud_trace: Optional[bool] = None,
+    enable_cloud_monitoring: Optional[bool] = None,
 ) -> None:
     """
     Initialize OpenTelemetry observability stack.
 
-    ``enable_cloud_trace`` defaults to the OTEL_CLOUD_TRACE_ENABLED switch.
+    ``enable_cloud_trace`` defaults to the OTEL_CLOUD_TRACE_ENABLED switch,
+    ``enable_cloud_monitoring`` to OTEL_CLOUD_MONITORING_ENABLED.
     """
     global _tracer_provider, _meter_provider, _initialized
 
@@ -346,6 +523,13 @@ def init_observability(
                 logger.info(f"OTLP metric exporter configured: {otlp_endpoint}")
             except Exception as e:
                 logger.error(f"Failed to configure OTLP metric exporter: {e}")
+
+        if enable_cloud_monitoring is None:
+            enable_cloud_monitoring = cloud_monitoring_enabled()
+        if enable_cloud_monitoring:
+            cloud_reader = _cloud_monitoring_reader()
+            if cloud_reader is not None:
+                readers.append(cloud_reader)
 
         if readers:
             _meter_provider = MeterProvider(
@@ -424,19 +608,36 @@ llm_request_duration = _NoOpMetric()
 github_api_calls_total = _NoOpMetric()
 celery_queue_depth = _NoOpMetric()
 celery_task_duration = _NoOpMetric()
+llm_phase_tokens_total = _NoOpMetric()
+llm_estimated_cost_usd_total = _NoOpMetric()
+
+# Module attributes that hold an instrument (create_custom_metrics sets them).
+_INSTRUMENT_GLOBALS = (
+    "agent_runs_total",
+    "agent_run_duration",
+    "agent_run_active",
+    "llm_tokens_total",
+    "llm_request_duration",
+    "github_api_calls_total",
+    "celery_queue_depth",
+    "celery_task_duration",
+    "llm_phase_tokens_total",
+    "llm_estimated_cost_usd_total",
+)
 
 
-def create_custom_metrics():
-    """Create custom application metrics."""
+def create_custom_metrics(meter=None):
+    """Create custom application metrics (on ``meter``, default the global one)."""
     global agent_runs_total, agent_run_duration, agent_run_active
     global llm_tokens_total, llm_request_duration
     global github_api_calls_total, celery_queue_depth, celery_task_duration
+    global llm_phase_tokens_total, llm_estimated_cost_usd_total
 
     if not OPENTELEMETRY_AVAILABLE or metrics is None:
         return
 
     try:
-        meter = get_custom_meter()
+        meter = meter or get_custom_meter()
 
         agent_runs_total = meter.create_counter(
             "agent_runs_total",
@@ -485,12 +686,103 @@ def create_custom_metrics():
             description="Duration of Celery tasks",
             unit="s",
         )
+
+        llm_phase_tokens_total = meter.create_counter(
+            "llm_phase_tokens_total",
+            description="LLM tokens by agent phase and kind (input, output, total)",
+            unit="1",
+        )
+
+        # "{USD}" is a UCUM annotation: Cloud Monitoring rejects a bare "USD".
+        llm_estimated_cost_usd_total = meter.create_counter(
+            "llm_estimated_cost_usd_total",
+            description=(
+                "ESTIMATED LLM cost from a built-in price table "
+                "(LLM_PRICES_JSON overrides it); not a bill"
+            ),
+            unit="{USD}",
+        )
     except Exception as e:
         logger.warning(f"Could not create custom metrics: {e}")
 
 
 # Initialize metrics on import
 create_custom_metrics()
+
+
+# --- Celery worker processes ---
+# The worker never runs init_observability on its own: celery_app has to call
+# install_celery_worker_hooks() once at import. Each prefork child process
+# then sets up its own providers after the fork (a reader's export thread
+# does not survive a fork) and flushes them when it exits. The hooks use
+# worker_process_init, which only the prefork pool (the default, and what
+# the GCP worker runs) sends; a solo or thread pool exports no metrics.
+_WORKER_INIT_UID = "automaintainer.observability.worker_process_init"
+_WORKER_SHUTDOWN_UID = "automaintainer.observability.worker_process_shutdown"
+
+
+def _heartbeat_callback(options):
+    yield Observation(1)
+
+
+def register_worker_heartbeat(meter=None):
+    """Report celery_worker_heartbeat = 1 at every export of this process.
+
+    The series is absent when no worker process runs, which is what the
+    "worker heartbeat absent" alert in monitoring.tf watches.
+    """
+    if not OPENTELEMETRY_AVAILABLE or metrics is None:
+        return None
+    try:
+        return (meter or get_custom_meter()).create_observable_gauge(
+            "celery_worker_heartbeat",
+            callbacks=[_heartbeat_callback],
+            description="1 per live Celery worker process",
+            unit="1",
+        )
+    except Exception as e:
+        logger.warning(f"Could not create the worker heartbeat metric: {e}")
+        return None
+
+
+def init_worker_observability() -> None:
+    """init_observability for a Celery worker process, plus its heartbeat.
+
+    No Prometheus reader (a worker serves no /metrics endpoint) and no
+    console span exporter; OTLP, Cloud Trace and Cloud Monitoring follow the
+    same environment switches as the API.
+    """
+    init_observability(
+        service_name="automaintainer-worker",
+        environment=os.getenv("ENVIRONMENT", "development"),
+        otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        enable_console_export=False,
+        enable_prometheus=False,
+    )
+    register_worker_heartbeat()
+
+
+def _on_worker_process_init(**kwargs):
+    init_worker_observability()
+
+
+def _on_worker_process_shutdown(**kwargs):
+    shutdown_observability()
+
+
+def install_celery_worker_hooks() -> bool:
+    """Set up observability in every Celery worker child process; idempotent."""
+    try:
+        from celery.signals import worker_process_init, worker_process_shutdown
+    except ImportError:
+        return False
+    worker_process_init.connect(
+        _on_worker_process_init, weak=False, dispatch_uid=_WORKER_INIT_UID
+    )
+    worker_process_shutdown.connect(
+        _on_worker_process_shutdown, weak=False, dispatch_uid=_WORKER_SHUTDOWN_UID
+    )
+    return True
 
 
 # --- Context Managers for Tracing ---
@@ -602,9 +894,27 @@ def record_agent_run_complete(mode: str, status: str, duration: float):
     agent_run_duration.record(duration, labels)
 
 
-def record_llm_tokens(model: str, tokens: int):
-    """Record LLM token usage (per model, not per run)."""
-    llm_tokens_total.add(tokens, {"model": _identifier(model)})
+def record_llm_tokens(
+    model: str, tokens: int, phase: Optional[str] = None, kind: str = "total"
+):
+    """Record LLM token usage (per model, phase and kind, not per run).
+
+    ``phase`` is the calling node's AgentPhase value; ``kind`` is "input"
+    (prompt), "output" (completion) or "total" (not split). Input and output
+    tokens of a priced model also add their estimated cost.
+    """
+    model_label = _identifier(model)
+    phase_label = _one_of(phase, LLM_PHASES)
+    kind_label = _one_of(kind, LLM_TOKEN_KINDS)
+    llm_tokens_total.add(tokens, {"model": model_label})
+    llm_phase_tokens_total.add(
+        tokens, {"model": model_label, "phase": phase_label, "kind": kind_label}
+    )
+    cost = estimated_llm_cost_usd(model, tokens, kind_label)
+    if cost is not None:
+        llm_estimated_cost_usd_total.add(
+            cost, {"model": model_label, "phase": phase_label}
+        )
 
 
 def record_llm_request(model: str, duration: float, success: bool):

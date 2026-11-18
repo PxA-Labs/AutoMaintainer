@@ -112,6 +112,33 @@ with deployer credentials, as any deploy pipeline does.
 `AUTH_DEV_BYPASS`, `ENABLE_TERMINAL` or `VERIFY_ALLOW_LOCAL`, nor the values
 Terraform owns (`ENVIRONMENT=production`, `REDIS_URL`, `PORT`).
 
+## Monitoring
+
+`monitoring.tf` holds the Cloud Monitoring side of the backend's metrics
+(docs/DEPLOYMENT.md, "Metrics and alerts"): `roles/monitoring.metricWriter`
+for the API account (the worker has it in `iam.tf`; the Monitoring API is
+enabled in `main.tf`), an e-mail notification channel from
+`monitoring_alert_email` (no default; `null` for none), five alert policies
+and an operations dashboard. The backend exports only with
+`OTEL_CLOUD_MONITORING_ENABLED=true` in `app_env`; nothing in `run.tf` or the
+worker module changes.
+
+- The API 5xx ratio alert uses Cloud Run's built-in `request_count` and
+  exists from the first apply.
+- The run failure rate, p95 run duration, estimated LLM cost per day and
+  worker heartbeat alerts filter on `workload.googleapis.com/<metric>`.
+  Cloud Monitoring refuses (404) a policy on a metric type that has never
+  been written, so they are created only with
+  `monitoring_app_alerts_enabled = true`, after the first runs have exported
+  each metric. `backend/tests/test_gcp_monitoring_config.py` checks that each
+  filter names a metric and labels from the catalogue in
+  `backend/observability.py`.
+- Every application series is per process (`generic_task`, one `task_id` per
+  process, plus an `opentelemetry_id` label), so alerts and charts sum across
+  series; a restarted process starts new ones.
+- The cost alert sums 24 hours (`86400s`, within the 25-hour limit of
+  alerting alignment periods) of an *estimated* cost, not the bill.
+
 ## Checks
 
 ```bash
