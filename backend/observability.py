@@ -343,7 +343,8 @@ def estimated_llm_cost_usd(model: str, tokens: int, kind: str) -> Optional[float
 # exporters. Off by default. The exporter authenticates with application
 # default credentials (on Cloud Run: the service's own service account, which
 # needs roles/cloudtrace.agent) and uses GOOGLE_CLOUD_PROJECT when set, else
-# the project those credentials belong to. Metrics are not sent to Google.
+# the project those credentials belong to. Metrics have their own switch
+# (OTEL_CLOUD_MONITORING_ENABLED, below).
 CLOUD_TRACE_ENV = "OTEL_CLOUD_TRACE_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -402,11 +403,14 @@ def _cloud_monitoring_reader():
     package or missing credentials disable only this reader (logged once:
     init_observability runs once per process).
 
-    ``add_unique_identifier`` labels each process's series with a random
-    ``opentelemetry_id``. Without it, several Cloud Run instances or the
-    worker's child processes would write the same series and Cloud
-    Monitoring would reject their points. The price: a restarted process
-    starts new series, so alerts and charts sum across them.
+    Each process must write its own series: several Cloud Run instances or
+    the worker's child processes writing one series would have their points
+    rejected. The SDK's random ``service.instance.id`` already maps to the
+    ``task_id`` of the ``generic_task`` monitored resource (``job`` is the
+    service name); ``add_unique_identifier`` adds an ``opentelemetry_id``
+    label as well, so this holds even if the resource changes. The price: a
+    restarted process starts new series, so alerts and charts sum across
+    them.
     """
     try:
         from opentelemetry.exporter.cloud_monitoring import (
