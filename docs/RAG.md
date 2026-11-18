@@ -1,16 +1,20 @@
 # Retrieval over the target repository (RAG)
 
-Issue [#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526). This round
-adds the storage, indexing and retrieval pieces. **Nothing is wired into the
-agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
+Issue [#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526). Storage,
+indexing and retrieval, and (round 18) their use by the agents: the PM
+prompt and the ADK Reviewer's `search_code`, both **off by default** behind
+`RAG_RETRIEVAL_ENABLED` (see [Retrieval in the agents](#retrieval-in-the-agents)).
 
 | Piece | Where |
 | --- | --- |
 | Table, index, RLS, search function | `supabase/migrations/20261118120000_code_chunks_pgvector.sql` |
+| Chunks follow their repository's org | `supabase/migrations/20261118183000_code_chunks_org_transfer.sql` |
 | Chunker, embedders, retrievers, prompt formatting | `backend/automaintainer/_runtime/retrieval.py` |
-| Indexing task (Celery, `maintenance` queue) | `backend/rag_tasks.py` |
+| PM prompt wiring, retriever resolution | `backend/automaintainer/_runtime/agents.py` (`retrieved_context`, `resolve_retriever`) |
+| Reviewer `search_code` over the index | `backend/automaintainer/_specialists/tools.py`, `reviewer_adk.py` |
+| Indexing task and its trigger (Celery, `maintenance` queue) | `backend/rag_tasks.py` |
 | Offline recall eval | `backend/evals/rag_recall.py` |
-| Tests | `backend/tests/rag/`, `backend/tests/rls/test_code_chunks_rls.py`, `backend/tests/redteam/test_retrieved_text_injection.py`, `backend/evals/tests/test_rag_recall.py` |
+| Tests | `backend/tests/rag/`, `backend/tests/rls/test_code_chunks_rls.py`, `backend/tests/redteam/test_retrieved_text_injection.py`, `backend/tests/specialists/test_search_code_*.py`, `backend/evals/tests/test_rag_recall.py` |
 
 ## How it works
 
@@ -76,6 +80,14 @@ agents' prompts yet**: round 18 does that behind the `Retriever` protocol.
   caller cannot file chunks under another org.
 - Chunks are deleted with their repository and their organization
   (`ON DELETE CASCADE`).
+- A chunk's `org_id` is always its repository's: a composite foreign key
+  `(repository_id, org_id) -> repositories (id, org_id)` with `ON UPDATE
+  CASCADE` moves the chunks in the same statement when a repository row
+  moves to another org (which `repositories_org_immutable` only allows to an
+  operator who disables it), so the old org cannot read them afterwards, and
+  refuses an insert filed under another org (the indexer reading the org
+  just before a move). The migration deletes rows that already disagreed;
+  they are written again on the next index run.
 
 `backend/tests/rls/test_code_chunks_rls.py` checks these against a real
 PostgreSQL with pgvector, including the cross-org case: org A's member asking
@@ -114,29 +126,97 @@ either case, and is stored lower-case). It does nothing unless `RAG_INDEXING_ENA
   20000) chunks is skipped, not partly indexed. The variable is read when
   indexing; a value that is not a positive integer falls back to the default
   with a warning (workers import the module, so it must not fail at import).
-- Nothing enqueues the task yet; round 18 does (e.g. when a PR merges).
+- **Trigger.** Every worker loads `rag_tasks` (celery_app's include list),
+  which connects a Celery `task_prerun` handler. When an agent run starts
+  (`tasks.run_agent_loop_task`) and `RAG_INDEXING_ENABLED` is on, it enqueues
+  `ensure_repository_indexed_task(repository_id)` on the `maintenance`
+  queue, at most once per repository every 10 minutes (a Redis key; a
+  failed enqueue releases it). Failures are logged by type and never reach
+  the run. The task reads the repository row, asks `git ls-remote` (with the
+  installation's token, through git's environment) for the default branch
+  head, and returns `fresh` when the index already holds that commit under
+  the repository's org. Otherwise it shallow-clones the branch into a
+  throwaway directory, indexes the commit actually cloned under the lock
+  above (`busy` instead of retrying when another run holds it) and deletes
+  the clone. The run's own clone is not used: maintenance workers do not
+  share the agent workers' workspace, and later runs update that clone
+  while indexing would read it. The run that triggered indexing does not
+  wait for it; its prompts use what is already indexed, or nothing.
 
 Known limits: commit order is not checked (indexing an older commit after a
-newer one leaves the older one until the next run). A chunk's `org_id` is
-copied from the repository when it is indexed: if a repository row moves to
-another organization, its chunks stay readable by the **old** organization's
-members until the repository is indexed again. Any index run (the same
-commit or a new one) first deletes the repository's rows filed under
-another organization, reusing their embeddings, and writes them again under
-the current one. Between the transfer and that run the exposure remains, so
-whoever transfers a repository between organizations should delete its
-`code_chunks` rows (service role) in the same change, or enqueue an index
-run; round 18 can enforce this with a trigger on `repositories.org_id`. HNSW is searched before
+newer one leaves the older one until the next run). Only default branches
+are indexed, so pull request heads are not (see the Reviewer below). HNSW is searched before
 the org/repository filter is applied, so with many repositories in one table
 fewer than k rows can come back (pgvector's `hnsw.ef_search`, 40 by default,
 bounds the candidates; raising it, or pgvector 0.8's iterative scans, are the
 fixes if this shows up).
 
+## Retrieval in the agents
+
+Off unless `rag_retrieval_enabled` (an engine's config) or, without an
+engine, `RAG_RETRIEVAL_ENABLED` is on, and only for runs that carry a
+repository id (every run queued through the API or a webhook does).
+
+**Resolving the retriever.** `agents.resolve_retriever(repository_id,
+commit_sha=None)` is called per prompt, never cached in a module global:
+
+1. an engine's injected factory, the `retriever` attribute of its
+   `EngineContext`, called with a `RetrievalScope(repository_id,
+   commit_sha)` and returning a `Retriever` or None;
+2. otherwise a `PgvectorRetriever` over `get_supabase()` (inside an engine,
+   the engine's own client; an engine without a database has none) with
+   the `VertexEmbedder`; the org is read from the `repositories` row, never
+   taken from the run. With a `commit_sha` it is returned only when the
+   index holds exactly that commit.
+
+> The engine constructor does not take a `retriever=` argument yet
+> (`engine.py` and `context.py` were outside this change): the lead's
+> follow-up adds `retriever: Optional[RetrieverFactory] = None` to
+> `EngineContext` and passes it through `AutoMaintainerEngine(...,
+> retriever=...)` like `llm=` and `github=`. The runtime reads the attribute
+> with `getattr`, so it works before and after.
+
+**PM prompt.** `pm_node` queries with the issue text (title and body in
+targeted mode, else the proposed idea), capped at 2000 characters, asks
+for `rag_top_k` chunks and appends them after the directive and idea
+blocks, under their own header, formatted by `format_untrusted_chunks`
+(the untrusted-data notice, one block per chunk) and capped at 12000
+characters in total (best chunks first; the first that does not fit is
+cut, the rest dropped). The system prompt is unchanged. Building the
+retriever, embedding the query and the RPC run in a thread under a 10 s
+timeout; any error or the timeout is logged by exception type and the PM
+gets exactly the prompt it would get with retrieval off. With the flag
+off the prompt is byte-for-byte the previous one (a test pins it). A run
+resumed after the PM decided does not query again.
+
+**ADK Reviewer.** `review_pull_request` asks for a retriever scoped to the
+run's repository **and the PR head commit**. `search_code` then returns
+the nearest chunks (path, lines, symbol, numbered code; k bounded by the
+tool's result limit, output by its character cap). Everything else is
+ripgrep exactly as before: flag off, no repository id, the index at
+another commit, resolving or querying the index failing, an empty result,
+or a regex search. Since only default branches are indexed, a PR head is
+rarely indexed and the Reviewer mostly keeps using ripgrep; serving the
+base branch's chunks for a head review was rejected as misleading.
+Arguments are validated before either path, the call costs one of the
+review's tool calls and its result reaches the model in an untrusted-data
+block; the budgets are unchanged.
+
+**Red-team.** The epic #411 fixtures run with retrieval on and an index
+whose code carries the payload (forged closing tags included): through the
+PM prompt (`tests/redteam/test_retrieved_text_injection.py`) and through
+the ADK Reviewer's `search_code` (`tests/specialists/test_search_code_redteam.py`).
+The payload stays inside untrusted-data blocks, and every outcome (held
+for an untrusted trigger, rejected by a well-behaved PM, merged for a
+writer) and `merge_decisions` row is the one without retrieval.
+
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RAG_INDEXING_ENABLED` | unset (off) | Turns the indexing task on. |
+| `RAG_INDEXING_ENABLED` | unset (off) | Turns the indexing task and its run-start trigger on. |
+| `RAG_RETRIEVAL_ENABLED` | unset (off) | Retrieved code in the PM prompt and the Reviewer's `search_code`. Engine: `rag_retrieval_enabled`. Accepts 1/true/yes/on and 0/false/no/off; `from_env` refuses anything else, the runtime logs it and stays off. |
+| `RAG_TOP_K` | `8` | Chunks per query, 1..50 (the RPC's bound). Engine: `rag_top_k`. |
 | `GOOGLE_CLOUD_PROJECT` | none (required for Vertex) | Project billed for embeddings. |
 | `GOOGLE_CLOUD_LOCATION` | `us-central1` | Vertex AI region the code is sent to. |
 | `RAG_EMBEDDING_MODEL` | `text-embedding-005` | Must return 768 dimensions (the column width). |
@@ -151,7 +231,8 @@ account needs `roles/aiplatform.user`.
 With the Vertex embedder enabled, **the target repository's code leaves the
 deployment**: every chunk (its path, symbol name and source text) is sent to
 Vertex AI in `GOOGLE_CLOUD_LOCATION` of `GOOGLE_CLOUD_PROJECT`, and at query
-time so is the query (issue text). The chunks are also stored in Supabase
+time so is the query (issue text, from the agent workers when
+`RAG_RETRIEVAL_ENABLED` is on). The chunks are also stored in Supabase
 (`code_chunks.content`), next to the embeddings. Before turning indexing on
 for a repository, the owner must be allowed to send that code to Google
 Cloud in that region; Google's terms for Vertex AI (including whether
@@ -220,7 +301,25 @@ How to read them:
       --out rag_recall_vertex.json
   ```
 
-  Report the Vertex numbers next to the hashing baseline above. A
+  Report the Vertex numbers next to the hashing baseline above.
+
+**With retrieval wired in (round 18).** The recall numbers above are
+unchanged (re-run at k = 1, 3, 5, 10; the chunker and embedders did not
+change). The end-to-end suite (`python -m evals.e2e.run`) was run in
+`oracle` and `replay` modes twice, retrieval off and on, the "on" runs
+with each engine's config set to `rag_retrieval_enabled=True` and an
+injected retriever factory serving an `InMemoryRetriever` with the
+`HashingEmbedder` over the task's `repo/` snapshot (a wrapper script
+around the CLI; the harness itself was not changed). Every one of the 24
+PM prompts got a retrieved section (190 chunks in all). Per-run records
+(status, verdicts, resolved, merged without help, fix iterations, changed
+files) were identical off and on: oracle 24/24 resolved and 27/27 Reviewer
+cases correct both ways; replay 16/24 resolved and merged without help,
+27/27 Reviewer cases, both ways. In replay with retrieval on, the 24 PM
+calls are counted stale (their prompt hash differs from the cassette's, as
+expected) and answered with the recorded answer, so replay shows the
+pipeline is unaffected, not whether a model decides better with the
+context; that needs a live run (an owner action). A
   hand-labelled query set on a real repository and the end-to-end effect
   (file localization, merged PRs, cost per run) are still open in #526.
 
@@ -232,6 +331,12 @@ How to read them:
   `--extra server` only, so `google-genai` is missing there and the first
   embedding call would fail with `ImportError` once indexing is enabled.
 - Grant the runtime service account `roles/aiplatform.user`, set
-  `GOOGLE_CLOUD_PROJECT`, then `RAG_INDEXING_ENABLED=true`.
+  `GOOGLE_CLOUD_PROJECT`, then `RAG_INDEXING_ENABLED=true` (maintenance
+  worker, and the agent workers, whose run starts trigger indexing).
+- Only after the index is populated and the Vertex recall numbers are in:
+  `RAG_RETRIEVAL_ENABLED=true` on the agent workers. They then embed each
+  query with Vertex AI too, so their image needs the `rag` extra and their
+  service account `roles/aiplatform.user`; without them every query fails
+  (logged) and the prompts stay as with retrieval off.
 - Confirm the Vertex embedding price on Google's pricing page; the figure in
   [Cost](#cost) is from memory.

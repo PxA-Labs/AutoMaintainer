@@ -45,6 +45,7 @@ from pydantic import (
     PositiveInt,
     SecretStr,
     ValidationError,
+    ValidationInfo,
     computed_field,
     field_validator,
     model_validator,
@@ -77,6 +78,10 @@ RUNNER_TYPES = ("local", "sandbox")
 # The Maintainer's review (#525): the single-shot LangGraph prompt, or the
 # ADK Reviewer specialist (automaintainer/_specialists).
 REVIEWER_BACKENDS = ("langgraph", "adk")
+# Retrieval over the target repository (#526): retrieval.DEFAULT_TOP_K and
+# retrieval.MAX_K (match_code_chunks returns at most 50 rows).
+DEFAULT_RAG_TOP_K = 8
+MAX_RAG_TOP_K = 50
 # What the ``adk`` extra installs and the ADK Reviewer imports.
 _ADK_MODULES = ("google.adk", "litellm")
 
@@ -112,6 +117,8 @@ ENV_VARS: Mapping[str, str] = {
     "implementer_min_size_ratio": "IMPLEMENTER_MIN_SIZE_RATIO",
     "implementer_shrink_guard_min_bytes": "IMPLEMENTER_SHRINK_GUARD_MIN_BYTES",
     "reviewer_backend": "REVIEWER_BACKEND",
+    "rag_retrieval_enabled": "RAG_RETRIEVAL_ENABLED",
+    "rag_top_k": "RAG_TOP_K",
 }
 _ALLOW_LOCAL_ENV = "VERIFY_ALLOW_LOCAL"
 
@@ -286,6 +293,12 @@ class AutoMaintainerConfig(BaseModel):
     # Reviewer specialist, which needs the ``adk`` extra. Selecting ``adk``
     # without it is a validation error, never a silent fallback.
     reviewer_backend: Literal["langgraph", "adk"] = "langgraph"
+    # Retrieval over the target repository (#526, docs/RAG.md): when on, the
+    # PM prompt gets the ``rag_top_k`` code chunks nearest to the issue, and
+    # the ADK Reviewer's search_code asks the index when it holds the PR
+    # head. Off by default: the query (issue text) is sent to the embedder.
+    rag_retrieval_enabled: bool = False
+    rag_top_k: int = Field(DEFAULT_RAG_TOP_K, ge=1, le=MAX_RAG_TOP_K)
     groq_requests_per_minute: PositiveInt = 30
     groq_tokens_per_minute: PositiveInt = 6000
 
@@ -367,9 +380,9 @@ class AutoMaintainerConfig(BaseModel):
             return tuple(keys)
         return value
 
-    @field_validator("verify_changes", mode="before")
+    @field_validator("verify_changes", "rag_retrieval_enabled", mode="before")
     @classmethod
-    def _runtime_flag(cls, value: Any) -> Any:
+    def _runtime_flag(cls, value: Any, info: ValidationInfo) -> Any:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -380,8 +393,8 @@ class AutoMaintainerConfig(BaseModel):
                 return False
         raise PydanticCustomError(
             _CONFIG_ERROR,
-            "verify_changes (VERIFY_CHANGES) must be a bool or one of "
-            f"{_FLAG_SPELLINGS}",
+            f"{info.field_name} ({ENV_VARS[info.field_name]}) must be a bool or "
+            f"one of {_FLAG_SPELLINGS}",
         )
 
     @field_validator(

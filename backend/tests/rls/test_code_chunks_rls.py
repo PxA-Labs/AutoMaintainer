@@ -357,3 +357,134 @@ def test_service_role_writes_and_deletes_chunks(db):
             )
             == 1
         )
+
+
+# --------------------------------------------------------------------------
+# Org transfer: chunks follow their repository (round 18)
+# --------------------------------------------------------------------------
+
+REPO_MOVED = 3001
+ORG_TRANSFER = next(m for m in MIGRATIONS if m.name == "code_chunks_org_transfer")
+
+
+def _add_repository(cur, repo, org=ORG_A, installation=1001, slug="org-aaaa"):
+    cur.execute(
+        "INSERT INTO repositories (id, org_id, github_installation_id,"
+        " full_name, name, owner_login, owner_type)"
+        " VALUES (%s, %s, %s, %s, %s, %s, 'Organization')",
+        (repo, org, installation, f"{slug}/r{repo}", f"r{repo}", slug),
+    )
+
+
+def test_chunks_reference_their_repository_and_its_org_with_cascades(db):
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT pg_get_constraintdef(oid), confupdtype, confdeltype"
+            " FROM pg_constraint WHERE conname = 'code_chunks_repository_org_fkey'"
+        )
+        ((definition, on_update, on_delete),) = cur.fetchall()
+    db.rollback()
+    assert "(repository_id, org_id)" in definition
+    assert "repositories(id, org_id)" in definition
+    assert (on_update, on_delete) == ("c", "c")  # CASCADE, CASCADE
+
+
+def test_a_moved_repository_takes_its_chunks_and_the_old_org_loses_them(db):
+    """An operator moves a repository row to org B (deliberately, with the
+    immutability trigger off): its chunks move in the same statement, org A's
+    members cannot read them any more, through the table or the RPC, and the
+    service role asking with org A's scope gets nothing either."""
+    try:
+        with db.cursor() as cur:
+            _add_repository(cur, REPO_MOVED)
+            _insert_chunk(cur, ORG_A, REPO_MOVED, "moved.py", "def m(): 1", vec(0))
+            cur.execute(
+                "ALTER TABLE repositories DISABLE TRIGGER repositories_org_immutable"
+            )
+            cur.execute(
+                "UPDATE repositories SET org_id = %s, github_installation_id = 2001"
+                " WHERE id = %s",
+                (ORG_B, REPO_MOVED),
+            )
+            cur.execute(
+                "ALTER TABLE repositories ENABLE TRIGGER repositories_org_immutable"
+            )
+            cur.execute(
+                "SELECT org_id::text FROM code_chunks WHERE repository_id = %s",
+                (REPO_MOVED,),
+            )
+            assert [r[0] for r in cur.fetchall()] == [ORG_B]
+
+            cur.execute("SET LOCAL ROLE authenticated")
+            _set_user(cur, USER_A)
+            cur.execute(
+                "SELECT count(*) FROM code_chunks WHERE repository_id = %s",
+                (REPO_MOVED,),
+            )
+            assert cur.fetchone()[0] == 0
+            assert match(cur, ORG_A, REPO_MOVED, vec(0)) == []
+            assert match(cur, ORG_B, REPO_MOVED, vec(0)) == []
+            _set_user(cur, USER_B)
+            assert [r[0] for r in match(cur, ORG_B, REPO_MOVED, vec(0))] == ["moved.py"]
+            cur.execute("RESET ROLE")
+            cur.execute("SET LOCAL ROLE service_role")
+            assert match(cur, ORG_A, REPO_MOVED, vec(0)) == []
+    finally:
+        db.rollback()
+
+
+def test_the_immutability_trigger_still_refuses_a_plain_move(db):
+    try:
+        with db.cursor() as cur:
+            cur.execute("SAVEPOINT move")
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                cur.execute(
+                    "UPDATE repositories SET org_id = %s WHERE id = %s",
+                    (ORG_B, REPO_A),
+                )
+            cur.execute("ROLLBACK TO SAVEPOINT move")
+            cur.execute(
+                "SELECT DISTINCT org_id::text FROM code_chunks WHERE repository_id = %s",
+                (REPO_A,),
+            )
+            assert [r[0] for r in cur.fetchall()] == [ORG_A]
+    finally:
+        db.rollback()
+
+
+@pytest.mark.parametrize("org, repo", [(ORG_B, REPO_A), (ORG_A, REPO_B)])
+def test_a_chunk_filed_under_another_org_than_its_repository_is_refused(db, org, repo):
+    """The indexer's read-then-write race: the write fails, it never leaks."""
+    with session(db, "service_role") as cur:
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            _insert_chunk(cur, org, repo, "stale.py", "def s(): 1", vec(0), "c7")
+
+
+def test_the_migration_drops_stale_rows_and_is_re_runnable(db):
+    """Rows written before the migration under the wrong org are deleted
+    when it runs (they are re-indexed later); running it twice is a no-op."""
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "ALTER TABLE code_chunks DROP CONSTRAINT code_chunks_repository_org_fkey"
+            )
+            _insert_chunk(cur, ORG_B, REPO_A, "stale.py", "def s(): 1", vec(0), "c8")
+            cur.execute(ORG_TRANSFER.sql)
+            cur.execute(ORG_TRANSFER.sql)
+            cur.execute(
+                "SELECT count(*) FROM code_chunks WHERE org_id = %s"
+                " AND repository_id = %s",
+                (ORG_B, REPO_A),
+            )
+            assert cur.fetchone()[0] == 0
+            cur.execute(
+                "SELECT count(*) FROM code_chunks WHERE repository_id = %s", (REPO_A,)
+            )
+            assert cur.fetchone()[0] > 0  # the repository's own rows stay
+            cur.execute(
+                "SELECT count(*) FROM pg_constraint"
+                " WHERE conname = 'code_chunks_repository_org_fkey'"
+            )
+            assert cur.fetchone()[0] == 1
+    finally:
+        db.rollback()
