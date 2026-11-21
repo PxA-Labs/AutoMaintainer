@@ -15,7 +15,7 @@
     "@supabase/supabase-js": "^2.119.0",
     "@xterm/addon-fit": "^0.11.0",
     "framer-motion": "^14.14.0",
-    "lucide-react": "^1.73.0",
+    "lucide-react": "^1.75.0",
     "next": "16.4.6",
     "react": "19.3.1",
     "react-dom": "19.3.1",
