@@ -77,13 +77,18 @@ described in [Running the live baseline](#running-the-live-baseline).
 | `--temperature`, `--seed` | 0, 1234 | Sampling settings for `live`. |
 | `--requests-per-minute`, `--tokens-per-minute` | 30, 6000 in `live` | The engine's client-side rate budget. |
 | `--prices` | built-in table | JSON price table ([Price table](#price-table-estimate)). |
-| `--timeout` | 120 | Seconds per pytest run. |
+| `--timeout` | 120 | Seconds for each hidden-test scoring run in the `pipeline` suite. The `reviewer` suite ignores it. The engine's own verification inside a run uses `AutoMaintainerConfig.timeout_seconds` (300), not this value. |
 | `--reviewer-backend` | `langgraph` | `langgraph` or `adk`; `adk` needs `--mode live` ([Comparing Reviewer backends](#comparing-reviewer-backends-525)). |
 | `--fail-on-stale` | off | Exit 1 if any replayed call's prompt changed since recording. |
 
 Gates (each exits 1 when it fails): `--min-resolve-rate`,
 `--max-resolve-rate`, `--min-merged-rate`, `--max-false-approval-rate`,
 `--min-false-approval-rate`, `--max-false-rejection-rate`.
+
+A gate on a suite that did not run is skipped silently: for example,
+`--suite pipeline --max-false-approval-rate 0` exits 0 because there is no
+Reviewer summary to check. Run `--suite all`, or the suite the gate belongs
+to, when you rely on a gate.
 
 Exit codes: 0 success; 1 a gate failed or `--fail-on-stale` found a stale
 call; 2 a harness error (missing key or cassette, or a run that could not be
@@ -341,13 +346,16 @@ Owner procedure:
      fixture baseline of 3/14 (0.214). The fixture figure is synthetic; it is
      the harness's reference, not a model's.
    - `false_rejection_rate` over the 13 correct cases.
-   - `latency_s` per run. For fix iterations, run `--suite pipeline` with
-     each backend and compare `fix_iterations`.
+   - `latency_s`: mean and standard deviation pooled over every run of
+     every repeat, not computed per repeat. For fix iterations, run
+     `--suite pipeline` with each backend and compare `fix_iterations`.
    - Cost: the token and cost columns count only calls made through the
      harness transport. With `adk` they leave out the Reviewer's own calls
      (its runs show `llm_calls` 0). Take those tokens from the provider's
      usage page for the evaluation key. For a Gemini fallback, pass
-     `--prices` with its prices.
+     `--prices` with its prices. `cost_usd` is one total over all repeats
+     (its `std` is 0), not a mean per repeat; divide by `repeats` for a
+     per-repeat figure.
 
 With 14 defective cases, one approval moves the rate by 0.071, so treat a
 difference smaller than the two spreads as no difference. The decision rule
@@ -411,7 +419,8 @@ python -m evals.compare before.json after.json
 python -m pytest -q evals --ignore=evals/e2e
 ```
 
-Other options: `--tasks a,b`, `--jobs N` (tasks evaluated in parallel,
+Other options: `--tasks a,b`, `--tasks-dir DIR` (default
+`backend/evals/tasks`), `--jobs N` (tasks evaluated in parallel,
 default 1), `--timeout S` (seconds per pytest run, default 60), `--model`
 (default `llama-3.3-70b-versatile`), `--temperature` (default 0), `--seed`
 (default 1234), `--cassettes DIR`, `--fail-on-stale` (replay: exit 1 if any
@@ -685,10 +694,18 @@ sorted by task id, so `--jobs` does not change them.
 
 ### Comparing two versions fairly
 
-This applies to both harnesses.
+The principles apply to both harnesses, but `python -m evals.compare`
+reads only Implementer results (`evals.run`): it expects a top-level
+`tasks` list, which end-to-end reports do not have (they use
+`pipeline.runs` and `reviewer.runs`), and fails on one. For the end-to-end
+harness, pair the runs yourself, as in
+[Comparing Reviewer backends](#comparing-reviewer-backends-525).
 
 1. Use the same tasks. `python -m evals.compare` refuses to compare when the
-   `taskset_hash` values differ.
+   `taskset_hash` values differ, and exits 2. In an end-to-end report,
+   `taskset_hash` covers only the tasks used, not the Reviewer cases, so
+   two Reviewer runs on different `--cases` get the same hash; check
+   `--cases` yourself.
 2. Change one thing at a time. The comparison lists any differences in mode,
    model, temperature, seed or timeout as `uncontrolled_settings`.
 3. Compare paired outcomes, task by task, not two separate rates. Only the
