@@ -98,7 +98,7 @@ Label values:
 | `outcome` (other metrics) | `success`, `failure` |
 | `phase` | `architect`, `brainstormer`, `visionary`, `pm`, `reviewer`, `implementer`, `maintainer`, `system`; anything else is `other` |
 | `kind` | `input`, `output`, `total`; anything else is `other`. Today always `total` (see below) |
-| `model`, `operation`, `queue`, `task_name` | must look like an identifier: letters, digits and `_ . : -`, at most 64 characters, so no `/`, spaces or sentences; anything else is `other` |
+| `model`, `operation`, `queue`, `task_name` | must look like an identifier: a letter or digit first, then letters, digits and `_ . : -`, at most 64 characters in all, so no `/`, spaces or sentences; anything else is `other` |
 
 `agent_run_duration_seconds` uses explicit buckets suited to runs of up to
 30 minutes: 10, 30, 60, 120, 300, 600, 900, 1200, 1500, 1800, 2400 and

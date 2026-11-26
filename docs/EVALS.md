@@ -77,13 +77,18 @@ described in [Running the live baseline](#running-the-live-baseline).
 | `--temperature`, `--seed` | 0, 1234 | Sampling settings for `live`. |
 | `--requests-per-minute`, `--tokens-per-minute` | 30, 6000 in `live` | The engine's client-side rate budget. |
 | `--prices` | built-in table | JSON price table ([Price table](#price-table-estimate)). |
-| `--timeout` | 120 | Seconds per pytest run. |
+| `--timeout` | 120 | Seconds for each hidden-test scoring run in the `pipeline` suite. The `reviewer` suite ignores it. The engine's own verification inside a run uses `AutoMaintainerConfig.timeout_seconds` (300), not this value. |
 | `--reviewer-backend` | `langgraph` | `langgraph` or `adk`; `adk` needs `--mode live` ([Comparing Reviewer backends](#comparing-reviewer-backends-525)). |
 | `--fail-on-stale` | off | Exit 1 if any replayed call's prompt changed since recording. |
 
 Gates (each exits 1 when it fails): `--min-resolve-rate`,
 `--max-resolve-rate`, `--min-merged-rate`, `--max-false-approval-rate`,
 `--min-false-approval-rate`, `--max-false-rejection-rate`.
+
+A gate on a suite that did not run is skipped silently: for example,
+`--suite pipeline --max-false-approval-rate 0` exits 0 because there is no
+Reviewer summary to check. Run `--suite all`, or the suite the gate belongs
+to, when you rely on a gate.
 
 Exit codes: 0 success; 1 a gate failed or `--fail-on-stale` found a stale
 call; 2 a harness error (missing key or cassette, or a run that could not be
@@ -341,19 +346,180 @@ Owner procedure:
      fixture baseline of 3/14 (0.214). The fixture figure is synthetic; it is
      the harness's reference, not a model's.
    - `false_rejection_rate` over the 13 correct cases.
-   - `latency_s` per run. For fix iterations, run `--suite pipeline` with
-     each backend and compare `fix_iterations`.
+   - `latency_s`: mean and standard deviation pooled over every run of
+     every repeat, not computed per repeat. For fix iterations, run
+     `--suite pipeline` with each backend and compare `fix_iterations`.
    - Cost: the token and cost columns count only calls made through the
      harness transport. With `adk` they leave out the Reviewer's own calls
      (its runs show `llm_calls` 0). Take those tokens from the provider's
      usage page for the evaluation key. For a Gemini fallback, pass
-     `--prices` with its prices.
+     `--prices` with its prices. `cost_usd` is one total over all repeats
+     (its `std` is 0), not a mean per repeat; divide by `repeats` for a
+     per-repeat figure.
 
-With 14 defective cases, one approval moves the rate by 0.071, so treat a
-difference smaller than the two spreads as no difference. The decision rule
-from the design note: enable `adk` only if its false-approval mean is not
-worse than the `langgraph` live mean and at least one other figure improves.
-Otherwise keep `REVIEWER_BACKEND=langgraph` and record the numbers in #525.
+The decision rule from the design note: enable `adk` only if its
+false-approval rate is not worse than the `langgraph` live rate and at least
+one other figure improves. Otherwise keep `REVIEWER_BACKEND=langgraph` and
+record the numbers in #525.
+
+#### How much the comparison can show
+
+Read the result with these limits in mind before deciding.
+
+- **The unit is the case, not the repeat.** The 14 defective cases are the
+  sample. Repeats measure the model's run-to-run noise on the same cases;
+  they do not add cases. At temperature 0 with a fixed seed, repeats can be
+  nearly identical, so their standard deviation can be close to 0 and make
+  a one-case difference (0.071) look real. Do not compare the two
+  standard deviations to decide.
+- **Pair by case.** Both backends review the same cases, so compare them
+  case by case. A case carries information only when the backends differ
+  on it.
+- **The smallest detectable change is large.** With an exact two-sided sign
+  test (McNemar's test on paired cases), p < 0.05 needs at least 6 cases
+  that differ, all in the same direction: 6–0 gives p = 0.031, 5–0 gives
+  p = 0.0625. With 14 defective cases that is a change of about
+  6/14 ≈ 0.43 in the false-approval rate. A realistic improvement, such as
+  3/14 to 1/14, cannot reach significance on this set.
+- **What follows.** A "no significant difference" result here does not show
+  that the backends are equivalent. Treat the comparison as a check that
+  the ADK Reviewer is not clearly worse, read the cases that differ one by
+  one, and grow the defective set
+  ([Adding an end-to-end task or Reviewer case](#adding-an-end-to-end-task-or-reviewer-case))
+  before relying on smaller differences.
+- **Fix the rule before the runs.** Write down in #525, before the live
+  runs, what "not worse" means in numbers (for example: the upper end of
+  the case-bootstrap interval for B − A is at most one case, 0.071) and
+  which other figure must improve and by how much. Deciding after seeing
+  the numbers invites reading noise as signal.
+
+This script pairs two reports by case, using `reviewer.summary.per_case`.
+It prints both rates, the number of cases where B approved a defective
+change less or more often than A, the exact sign-test p-value, and a 95 %
+bootstrap interval for B − A that resamples cases (repeats stay inside
+their case). Save it outside `backend/evals` and run it with the `langgraph`
+report as A and the `adk` report as B:
+
+```python
+import json, random, sys
+from math import comb
+
+def rates(path):
+    pc = json.load(open(path))["reviewer"]["summary"]["per_case"]
+    if any(c["errors"] for c in pc.values()):
+        sys.exit(f"{path}: runs with errors; fix them before comparing")
+    return {k: c["approvals"] / c["runs"] for k, c in pc.items()
+            if c["expected_verdict"] == "reject"}   # defective cases only
+
+a, b = rates(sys.argv[1]), rates(sys.argv[2])
+assert a.keys() == b.keys(), "run both backends on the same cases"
+cases = sorted(a)
+better = sum(b[c] < a[c] for c in cases)   # B approved this bad change less
+worse = sum(b[c] > a[c] for c in cases)
+n = better + worse
+p = min(1.0, 2 * sum(comb(n, i) for i in range(min(better, worse) + 1)) / 2**n) if n else 1.0
+diffs = [b[c] - a[c] for c in cases]
+rng = random.Random(0)
+boot = sorted(sum(rng.choice(diffs) for _ in cases) / len(cases) for _ in range(10_000))
+print(f"false-approval rate A={sum(a.values())/len(cases):.3f} B={sum(b.values())/len(cases):.3f}")
+print(f"cases where B is better/worse: {better}/{worse}, exact sign test p={p:.3f}")
+print(f"B-A, 95% case-bootstrap interval: [{boot[250]:.3f}, {boot[9749]:.3f}]")
+```
+
+```bash
+python3 paired.py e2e-reviewer-langgraph.json e2e-reviewer-adk.json
+```
+
+It was checked on replay-mode reports only; it computes nothing that
+depends on the backend. The same pairing applies to `--suite pipeline`
+(`pipeline.summary.per_task`) when you compare resolve rates.
+
+### Adding an end-to-end task or Reviewer case
+
+`evals/e2e/tests/test_e2e_data.py` holds the rules below and fails on a
+task or case that breaks them. Run it after every change:
+`uv run --frozen python -m pytest -q evals/e2e` from `backend/`.
+
+**A task** goes in `evals/e2e/tasks/<id>/` with the Implementer layout plus
+the end-to-end fields ([Task set](#task-set)):
+
+1. Pick one Python file from a project under MIT, BSD-2-Clause,
+   BSD-3-Clause or Apache-2.0 (`ALLOWED_LICENSES` in `evals/e2e/taskset.py`)
+   and pin a 40-character commit SHA in `task.json` `source`. Copy the
+   upstream `LICENSE` into `repo/`.
+2. Put the upstream file, reformatted with black, in `solution/`, and the
+   same file with one injected regression in `repo/`. Describe the
+   regression in `defect`; it must not appear in the issue body.
+3. Write the issue (`title`, `body`) as a bug report that names the target
+   file: the harness extracts `target_file` from it and the test checks
+   they match.
+4. Write hidden tests in `hidden_tests/test_hidden_*.py`, at least two
+   `def test_` functions each, that pass on the oracle and fail on the
+   snapshot. Visible tests in `repo/tests/` must still pass on the
+   snapshot. Neither may read files or introspect code (`open(`, `Path(`,
+   `inspect`, `importlib`, `subprocess`, `exec(`/`eval(` and similar are
+   refused).
+5. List every file you wrote for the evaluation (visible tests, empty
+   package markers) in `harness_files`.
+
+The set must stay between 20 and 30 tasks and under 5 MB.
+
+**A Reviewer case** goes in `evals/e2e/reviewer/<id>/`: a `case.json` and a
+`files/` tree with each changed file at its repository path. `case.json`
+holds `id`, `task_id` (an existing task), `expected_verdict` (`reject` or
+`approve`), `defect_class` (one of `DEFECT_CLASSES` in `taskset.py`) for a
+defective change, a `description`, `changed_files` and `deleted_files`.
+
+- A defective case must be caught by the hidden tests (they must fail on
+  it). A correct case must resolve the task.
+- A `deleted-test` case must also change the target file, so that it
+  measures whether the Reviewer notices the test change rather than an
+  untouched regression.
+- The set must keep 10 to 20 defective cases, at least 10 correct ones, at
+  least five defect classes, and a correct case for every task that has a
+  defective one.
+
+The 20-case ceiling limits the statistics: with 20 defective cases a
+paired comparison can detect a change of about 6/20 = 0.3 in the
+false-approval rate at best (see
+[How much the comparison can show](#how-much-the-comparison-can-show)).
+
+**After adding either**, the fixture baseline changes, because
+`make_fixtures.py` picks the replayed no-op tasks (`index % 3 == 2`) and
+rubber-stamped cases (`index % 4 == 3`) by position in the sorted ids:
+
+1. Regenerate the fixtures: `uv run --frozen python -m evals.e2e.make_fixtures`.
+2. Update the pinned rates in `evals/e2e/tests/test_e2e_fixtures.py`
+   (`16 / 24`, `3 / 14`).
+3. Update the replay bands in `.github/workflows/evals.yml` and the figures
+   in [Cassettes and the fixture baseline](#cassettes-and-the-fixture-baseline),
+   [CI gates](#ci-gates) and [Reviewer change set](#reviewer-change-set).
+
+### Reading an end-to-end report
+
+Each suite in the report has `summary` and `runs`. Start with the summary,
+then go to the runs behind any figure you do not expect.
+
+- `reviewer.summary.per_case[<id>]`: `expected_verdict`, `defect_class`,
+  `runs`, `approvals` and `errors` for one case over all repeats. A
+  defective case with `approvals > 0` is a false approval; a correct case
+  with `approvals < runs` is a false rejection. This is what the paired
+  comparison reads.
+- `reviewer.summary.overall`: the rates, each a mean and spread over
+  repeats ([Metrics](#metrics)).
+- `pipeline.summary.per_task[<id>]`: the same per task for the pipeline
+  suite.
+- `runs`: one record per task or case and repeat: `verdict`, `correct`,
+  `error` and `error_code`, `verification`, `test_output`, `latency_s`,
+  `llm_calls`, `prompt_tokens`, `completion_tokens`, `cost_usd` and
+  `stale_calls`.
+
+For failure analysis, group false approvals by `defect_class`: a backend
+that misses every `injected-instruction` case has a different problem from
+one that misses a `wrong-logic` case. The report does not keep the review
+text; run with `--record DIR` and read the Reviewer's answers in the
+cassettes for those cases. A run with an `error` is a harness problem, not a verdict, and voids
+the rates until it is fixed.
 
 ### Limitations of the end-to-end evaluation
 
@@ -411,7 +577,8 @@ python -m evals.compare before.json after.json
 python -m pytest -q evals --ignore=evals/e2e
 ```
 
-Other options: `--tasks a,b`, `--jobs N` (tasks evaluated in parallel,
+Other options: `--tasks a,b`, `--tasks-dir DIR` (default
+`backend/evals/tasks`), `--jobs N` (tasks evaluated in parallel,
 default 1), `--timeout S` (seconds per pytest run, default 60), `--model`
 (default `llama-3.3-70b-versatile`), `--temperature` (default 0), `--seed`
 (default 1234), `--cassettes DIR`, `--fail-on-stale` (replay: exit 1 if any
@@ -685,10 +852,18 @@ sorted by task id, so `--jobs` does not change them.
 
 ### Comparing two versions fairly
 
-This applies to both harnesses.
+The principles apply to both harnesses, but `python -m evals.compare`
+reads only Implementer results (`evals.run`): it expects a top-level
+`tasks` list, which end-to-end reports do not have (they use
+`pipeline.runs` and `reviewer.runs`), and fails on one. For the end-to-end
+harness, pair the runs yourself, as in
+[Comparing Reviewer backends](#comparing-reviewer-backends-525).
 
 1. Use the same tasks. `python -m evals.compare` refuses to compare when the
-   `taskset_hash` values differ.
+   `taskset_hash` values differ, and exits 2. In an end-to-end report,
+   `taskset_hash` covers only the tasks used, not the Reviewer cases, so
+   two Reviewer runs on different `--cases` get the same hash; check
+   `--cases` yourself.
 2. Change one thing at a time. The comparison lists any differences in mode,
    model, temperature, seed or timeout as `uncontrolled_settings`.
 3. Compare paired outcomes, task by task, not two separate rates. Only the
