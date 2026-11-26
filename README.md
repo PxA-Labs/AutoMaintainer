@@ -39,7 +39,7 @@ for how the pieces fit together.
 > Auth and Realtime). Provision your own project:
 > * Create a project at [supabase.com](https://supabase.com).
 > * Apply the migrations in [`supabase/migrations`](./supabase/migrations)
->   with `supabase db push` or `uv run --project backend python scripts/db-migrate up`, or paste the
+>   with `supabase db push` or `uv run --project backend --extra server python scripts/db-migrate up`, or paste the
 >   generated [`supabase_schema.sql`](./supabase_schema.sql) into the
 >   **Supabase SQL Editor**. They create `organizations`,
 >   `organization_members`, `github_installations`, `repositories`,
@@ -116,7 +116,7 @@ cd AutoMaintainer
 
 **Database Migration:** apply [`supabase/migrations`](./supabase/migrations)
 with the Supabase CLI (`supabase link`, then `supabase db push`) or with
-`DATABASE_URL=... uv run --project backend python scripts/db-migrate up`.
+`DATABASE_URL=... uv run --project backend --extra server python scripts/db-migrate up`.
 Without either tool, open your [Supabase SQL Editor](https://database.new)
 and run the entire generated [`supabase_schema.sql`](./supabase_schema.sql).
 Use the same method for every upgrade. See

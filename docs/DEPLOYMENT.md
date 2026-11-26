@@ -107,12 +107,14 @@ Use one of these:
   `auth` schema with `auth.uid()` and `auth.users` (the tests use the
   stand-in `backend/tests/rls/supabase_shim.sql`). The migrations do not
   create them, so on a plain PostgreSQL server the first `up` fails. It needs
-  only psycopg2, which is a backend dependency:
+  only psycopg2, which comes with the backend's `server` extra; without
+  `--extra server`, `uv run` does not install it and the script stops with
+  `psycopg2 is required`:
 
   ```bash
   export DATABASE_URL='postgresql://postgres:<password>@<host>:5432/postgres'
-  uv run --project backend python scripts/db-migrate up      # apply pending migrations
-  uv run --project backend python scripts/db-migrate status  # applied / pending
+  uv run --project backend --extra server python scripts/db-migrate up      # apply pending migrations
+  uv run --project backend --extra server python scripts/db-migrate status  # applied / pending
   ```
 
   It applies each pending file in its own transaction, together with a row in
@@ -132,7 +134,7 @@ it is confusing.
 
 Apply pending migrations before you roll out the new API and worker image:
 `supabase db push` or
-`uv run --project backend python scripts/db-migrate up`. If you use the SQL Editor,
+`uv run --project backend --extra server python scripts/db-migrate up`. If you use the SQL Editor,
 paste the new `supabase_schema.sql` again.
 
 **A database created from the old single-file `supabase_schema.sql`** (before
@@ -191,7 +193,7 @@ Two cases need preparation:
 Running the baseline takes short exclusive locks on the tables while it
 replaces their policies and triggers. To record it as applied without running
 it, use `supabase migration repair 20261116000000 --status applied` or
-`uv run --project backend python scripts/db-migrate up --baseline`. Do that only for a database that already
+`uv run --project backend --extra server python scripts/db-migrate up --baseline`. Do that only for a database that already
 has the complete current schema. Otherwise the missing pieces stay missing:
 without `runs.repo_name`, for example, every `POST /start` fails.
 

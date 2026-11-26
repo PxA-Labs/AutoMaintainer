@@ -392,7 +392,7 @@ These steps need credentials or cost money; the code does not perform them.
 
    Report the Vertex AI numbers next to the hashing baseline above.
 2. **Apply the migrations** (`supabase db push` or
-   `python scripts/db-migrate up`), including both `code_chunks` migrations.
+   `uv run --project backend --extra server python scripts/db-migrate up`), including both `code_chunks` migrations.
    See [DEPLOYMENT.md, Database](DEPLOYMENT.md#database).
 3. **Build the worker image with the `rag` extra.** The `Dockerfile`'s
    `EXTRAS` build argument chooses the extras (default `server`), for example
