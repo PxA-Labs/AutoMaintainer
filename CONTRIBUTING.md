@@ -18,7 +18,8 @@ Report security vulnerabilities privately, as described in
 
 ### Prerequisites
 
-- **Python** 3.11 or 3.12 (the versions the backend CI tests).
+- **Python** 3.11 or later (`requires-python = ">=3.11"`). The backend CI
+  tests 3.11 and 3.12, so newer versions are not checked.
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/)** for the
   backend. CI uses uv 0.13.8, the same version as the Dockerfile.
 - **Node.js** 22.18 or later in the 22 line, or 24.11 or later, for the
@@ -177,8 +178,16 @@ PRs change `pyproject.toml` and `uv.lock` directly and need no extra steps.
 
 ## 5. CI checks
 
-Each workflow runs only when the paths it watches change. A pull request is
-expected to pass every check that runs on it.
+Most workflows run only when the paths they watch change. These have no path
+filter and run on every pull request: `secret-scanning.yml` and
+`codeql-analysis.yml` (pull requests into `main` only), and
+`lint-pr-title.yml`. A pull request is expected to pass every check that
+runs on it.
+
+**Stacked pull requests.** `secret-scanning.yml` and `codeql-analysis.yml`
+filter on `branches: [main]`, so they do not run on a pull request whose
+base is another branch. They run once the pull request is retargeted to
+`main`, after the one below it merges. Wait for them before merging.
 
 | Workflow | Job | Fails when |
 | --- | --- | --- |
@@ -199,6 +208,12 @@ expected to pass every check that runs on it.
 | `codeql-analysis.yml` | Analyze | The analysis fails. Findings for Python and JavaScript/TypeScript appear as code-scanning alerts |
 | `security-audit.yml` | Python Bandit & Pip-Audit; Node NPM Audit | Bandit or pip-audit report an issue, or `npm audit` finds a critical vulnerability |
 | `lint-pr-title.yml` | Validate Conventional PR Title | The title breaks the rules in [section 6](#6-pull-request-titles) |
+
+These workflows also appear on pull requests but never fail one:
+`release-drafter.yml` updates the draft release, `pr-size-labeler.yml`
+labels the pull request by size, and `auto-changelog.yml` runs when a pull
+request into `main` is merged (see [section 6](#6-pull-request-titles)).
+`scorecard.yml` runs on pushes to `main` and on a schedule.
 
 `deploy-gcp.yml`, `publish-sdk.yml`, `release.yml`, the image push in
 `docker-publish.yml` and the live evaluation jobs run only on `main`, on tags
@@ -235,6 +250,14 @@ every title against [Conventional Commits](https://www.conventionalcommits.org/)
 - **Scope:** optional, for example `engine`, `rag`, `dashboard`.
 - **Subject:** must not start with an uppercase letter. Write it in the
   imperative mood, for example "add", not "Added".
+
+When a pull request into `main` is merged, `auto-changelog.yml` parses its
+title with `scripts/changelog_manager.py` and adds the entry to
+`CHANGELOG.md` under the category of its type. On a `v*.*.*` tag,
+`release.yml` extracts that version's section with
+`python scripts/changelog_manager.py extract-notes --tag <tag>` as the
+release notes. A title that does not follow the format still fails
+`lint-pr-title.yml` before it can reach the changelog.
 
 Examples:
 - `feat(engine): add a retriever factory to AutoMaintainerEngine`
