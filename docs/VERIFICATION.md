@@ -151,7 +151,10 @@ both the normal path and the redelivery-resume path):
   `command` (the argv as a JSON array), `exit_code`, `duration_ms`,
   `output_tail` (the last 4000 characters, `AUDIT_OUTPUT_TAIL_CHARS`, with NUL
   bytes removed; a `CHECK` enforces the cap), `output_truncated` and
-  `backend` (`local`, or the `SANDBOX_BACKEND` factory for sandboxed runs).
+  `backend`: `local`, or for a sandboxed run the setting as written, not
+  the resolved factory. That is the raw `SANDBOX_BACKEND` value (so the
+  short alias is recorded as `cloud_run_job`), or inside an engine run
+  `AutoMaintainerConfig.sandbox_backend`; `sandbox` when neither is set.
 
 The row is written right after the tests ran, before anything is posted to
 GitHub, so it exists even when posting the status then stops the run. Writing
@@ -269,12 +272,12 @@ Without the file, the command is detected, first match wins:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `VERIFY_CHANGES` | on | `false` turns verification off. The result is then `skipped`, which still blocks `MERGE_POLICY=ci`. |
+| `VERIFY_CHANGES` | on | `0`, `false`, `no` or `off` turn verification off; any other value, including an unrecognised one, leaves it on. The result is then `skipped`, which still blocks `MERGE_POLICY=ci`. |
 | `SANDBOX_BACKEND` | unset | `package.module:factory`, or `cloud_run_job` (short for `automaintainer.runners.cloud_run_job_sandbox:create`; the engine's `AutoMaintainerConfig.sandbox_backend` takes only the long form). The factory is called with the host path of the working copy and returns a `runners.sandbox.SandboxBackend`. A set but unloadable value is an `error`; it never falls back to local execution. |
 | `VERIFY_ALLOW_LOCAL` | unset | `true` allows running repository tests on the API/worker host without a sandbox, in any environment. Only for a developer machine running repositories you trust. |
 | `VERIFY_TIMEOUT_SECONDS` | `300` | Default wall-clock limit for the test command. |
 | `VERIFY_MAX_TIMEOUT_SECONDS` | `900` | Upper bound for a repository's `timeout_seconds`. Keep it well below the agent task's Celery `soft_time_limit` (1800 s in `tasks.py`): verification shares that budget with the clone (up to 300 s) and the LLM calls of every iteration, and a run that hits the limit ends before any result is posted. |
-| `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail). The PR body shows the last 3000 characters. |
+| `VERIFY_MAX_OUTPUT_BYTES` | `65536` | Output kept (the tail), at least 1024: a smaller value is raised to 1024. The PR body shows the last 3000 characters. |
 | `VERIFY_PYTHON` | `python` | Interpreter used by the detected pytest command. Must be Python 3.11 or later (`-P`); with an older one the detected command fails. |
 
 ## Security model
@@ -291,8 +294,9 @@ agent just wrote from an untrusted issue. Treat it as hostile.
   follows the same opt-in rule (`ENABLE_TERMINAL`).
 - **The local runner is defense in depth, not isolation.** It runs an
   argument list (no shell) in the temporary clone, with stdin closed, an
-  environment reduced to `PATH` and a few OS variables (no API keys, database
-  URLs or tokens), `HOME`/`TMP` pointed at an empty scratch directory, a
+  environment reduced to `PATH`, `LANG`, `LC_ALL`, `TZ` and, on Windows,
+  `PATHEXT`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR` and `COMSPEC` (no API
+  keys, database URLs or tokens), `HOME`/`TMP` pointed at an empty scratch directory, a
   wall-clock timeout that kills the whole process tree, and an output cap. It
   does **not** stop the tests from reading files the server user can read,
   using the network, or consuming CPU and memory up to the timeout. Use it for
@@ -350,8 +354,13 @@ run's marker, before the run or after a crash that lost the checkpoint
 (#490); with a writer as the trigger, picking it up would merge the
 payload's change under `ci`/`auto`. The tests assert the payload reaches no
 prompt, the planted issue is left untouched and only the legitimate change is
-committed. The `.github/workflows/redteam.yml` workflow runs them on
-every pull request that touches `backend/`.
+committed. These four vectors are in `test_redteam_injection.py`. A fifth
+vector, in `backend/tests/redteam/test_retrieved_text_injection.py`, plants the
+payload in code that code retrieval returns to the PM (#526) and asserts
+the same outcomes as without retrieval
+([docs/RAG.md, Red-team coverage](./RAG.md#red-team-coverage)). The
+`.github/workflows/redteam.yml` workflow runs them on every pull request
+that touches `backend/`.
 
 ## Sandbox backends
 
