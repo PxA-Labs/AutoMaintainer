@@ -464,6 +464,13 @@ with a clear reason, for example `NO_TARGET_FILE`, `TARGET_FILE_TOO_LARGE`,
 `ErrorEvent` and a `failed` run. Any other exception ends the run as `failed`
 with `RUN_FAILED`.
 
+Some steps report a problem without ending the run, as a non-fatal
+`ErrorEvent` (`fatal=False`). The ADK Reviewer emits
+`SPECIALIST_REVIEW_FAILED` for every fail-closed rejection (a budget, the
+timeout, an invalid answer after the retry, a checkout failure), with the
+reason in the message; the rejection then goes through the normal retry
+loop.
+
 ## Idempotent side effects
 
 Celery delivers tasks at least once, so a run can execute again after a
@@ -734,7 +741,10 @@ Google's Agent Development Kit. It is **off by default**:
   with `specialist.tool` children, from the OpenTelemetry API's global tracer,
   and one `TelemetryEvent` for its tokens.
 - **Transport.** It calls the provider through ADK (LiteLLM for Groq, or the
-  Gemini client), not through an engine's injected `llm` transport.
+  Gemini client), not through an engine's injected `llm` transport. A host
+  that injects a transport, including the evaluation harness's recording
+  and replay, does not see these calls, so ADK reviews can only be
+  evaluated live.
 
 What is still open before anyone enables it (the Groq spike, the live
 comparison) is listed in the design note's Status section.
@@ -1154,8 +1164,17 @@ committed fixture cassettes measures the harness, not a model.
 - The ADK Reviewer reserves a fixed token estimate from the rate limiter and
   does not report its real usage back, so it can exceed a key's per-minute
   budget.
+- The ADK Reviewer's `search_code` falls back to ripgrep, which the runtime
+  image does not install; see
+  [docs/DEPLOYMENT.md, ADK Reviewer](./docs/DEPLOYMENT.md#adk-reviewer).
+- The ADK Reviewer's `read_file` and ripgrep do not apply the chunker's
+  credential-name list, so a credential file committed in a PR can reach the
+  model provider through the Reviewer even though indexing skips it.
 - On Google Cloud, the API and the worker do not share clones, so the IDE
   routes answer `404` (epic #418).
+- On Google Cloud, every Celery queue, beat and (by default) Redis run on one
+  VM in one zone, with no autohealing; see
+  [docs/DEPLOYMENT.md, Limitations](./docs/DEPLOYMENT.md#limitations).
 - Redis traffic is not encrypted inside the VPC.
 - Several catalogued metrics have no caller yet (see
   [docs/OBSERVABILITY.md](./docs/OBSERVABILITY.md#where-the-metrics-are-recorded)).

@@ -1290,6 +1290,25 @@ selects the read-only ADK Reviewer (#525), which uses tools to read the PR
 head before deciding; the trust gate and merge policy are unchanged. Design:
 [docs/design/adk-specialist-agents.md](design/adk-specialist-agents.md).
 
+**Prerequisites.**
+
+- The `adk` extra in the image (`IMAGE_EXTRAS`, step 3 below).
+- **ripgrep (`rg`) on the worker.** `search_code` falls back to ripgrep
+  whenever the code index does not hold the PR head, which is the usual
+  case (only default branches are indexed). The runtime image installs
+  `git`, `bash` and `ca-certificates` only (`Dockerfile`), not ripgrep, so
+  in the published image every fallback search answers "code search is
+  unavailable: ripgrep is not installed". The review still runs with its
+  other three tools, but it is not the Reviewer the comparison measured
+  (CI installs ripgrep). Add ripgrep to the image before you enable the
+  ADK Reviewer.
+- A Groq key pool for a Groq model, or, for a Gemini model
+  (`gemini-...` or `vertex_ai/gemini-...` in `ModelRouting.maintainer`),
+  Application Default Credentials with Vertex AI access and
+  `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`. On Google Cloud the
+  worker account has no Vertex AI role unless `rag_enabled` granted it
+  `roles/aiplatform.user`.
+
 Terraform has no switch for it. To turn it on:
 
 1. Run the ADK spike (`python -m evals.spike_adk_groq` from `backend/`),
@@ -1298,7 +1317,9 @@ Terraform has no switch for it. To turn it on:
 2. Compare the two reviewers
    ([EVALS.md, Comparing Reviewer backends](EVALS.md#comparing-reviewer-backends-525)).
    Keep `langgraph` unless the ADK Reviewer's false-approval rate is no
-   worse.
+   worse **and** at least one other figure (false-rejection rate, fix
+   iterations, cost or latency per review) improves, the rule in the
+   design note.
 3. Add `adk` to the repository variable `IMAGE_EXTRAS` (for example
    `server,adk`, or `server,rag,adk` with code retrieval) and deploy. The
    Terraform output does not know about this extra, so it keeps showing
@@ -1308,6 +1329,30 @@ Terraform has no switch for it. To turn it on:
 
 Cost: the review uses more model calls than the single-shot prompt, within
 the review budget; its tokens are counted like any other LLM call.
+
+**Check that it is active.** A typo is easy to miss: without an engine, an
+unknown `REVIEWER_BACKEND` value is logged as
+`Unknown REVIEWER_BACKEND '<value>'; using the langgraph reviewer` and the
+LangGraph review runs. Search the worker log for that line after the reset.
+Each ADK review opens a `specialist.reviewer` span with
+`reviewer.backend = adk`, but on Google Cloud the worker exports no traces
+([Cloud Trace](#cloud-trace)), so that span is visible only where the
+worker's traces are exported (an OTLP collector, or locally).
+
+**Turn it off.** Remove `REVIEWER_BACKEND` from `app_env` (or set it to
+`langgraph`), apply and reset the worker VM. The `adk` extra can stay in
+the image; it is not imported while the backend is `langgraph`.
+
+**Troubleshooting.**
+
+| Symptom | Cause |
+|---|---|
+| Runs fail with `REVIEWER_BACKEND_UNAVAILABLE` | `REVIEWER_BACKEND=adk` but the image lacks the `adk` extra. The run aborts rather than falling back |
+| Reviews reject with "code search is unavailable: ripgrep is not installed" in the tool output | ripgrep is missing from the image (see Prerequisites) |
+| `SPECIALIST_REVIEW_FAILED` events in the run log | A fail-closed rejection: a budget, the 180-second timeout, a cancelled review, an invalid answer after the retry, or a checkout problem; the message gives the reason |
+| "the branch moved since its head was read" | The PR branch changed between reading its head and cloning it. The review rejects (fail closed), and the rejection is handled like any other |
+| "there is no pull request head to review" | No GitHub client or PR for the run; the ADK backend always rejects then, where the LangGraph review would review the generated code |
+| Reviews run on more tokens than the rate limiter allows | Expected: a review reserves 3 000 tokens but may use up to 60 000 (design note, "Rate limiter") |
 
 ### Estimated monthly cost
 
