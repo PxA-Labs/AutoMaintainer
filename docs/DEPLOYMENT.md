@@ -750,6 +750,71 @@ Google owns the AUTH string; how to rotate it has not been checked for this
 guide (see the Memorystore AUTH documentation). Afterwards, update
 `redis-url` the same way.
 
+### Rolling back a deploy
+
+The deploy workflow builds a new image from the chosen ref every time; it
+has no input for an earlier image. Artifact Registry keeps the 20 newest
+images (the cleanup policy in `main.tf` deletes older ones after 30 days),
+so you can roll back to any of them by digest without rebuilding.
+
+**Before you roll back, check the database.** `scripts/db-migrate` only
+applies migrations (`up`, `status`, `schema`); there is no `down`. Rolling
+back the image does not undo a migration the new release applied. An older
+image usually runs against a newer schema, because migrations add rather
+than remove, but read the migrations applied since the target release
+(`supabase/migrations/`) before you rely on that.
+
+1. **Find the image.** List the recent digests and the git SHA each was
+   tagged with:
+
+   ```bash
+   REPO="$(terraform output -raw image_repository)"
+   gcloud artifacts docker images list "$REPO" --include-tags \
+     --sort-by=~UPDATE_TIME --limit=10
+   ```
+
+   Set `IMAGE="$REPO@sha256:<digest>"` for the release you want.
+
+2. **Roll back the API.** Deploy that digest the same way the workflow does:
+
+   ```bash
+   gcloud run deploy automaintainer-api --image "$IMAGE" \
+     --region us-central1 --project automaintainer-prod --quiet
+   curl -fsS "$(terraform output -raw api_url)/healthz"
+   ```
+
+   Terraform ignores the service's image (`ignore_changes` in `run.tf`), so
+   a later `terraform apply` keeps the image you deployed.
+
+3. **Roll back the worker.** Set the VM's metadata key; `watch-image.sh`
+   restarts the worker with that image within about 20 seconds plus the
+   stop grace period (see [Step 5](#step-5-first-deploy)):
+
+   ```bash
+   gcloud compute instances add-metadata automaintainer-worker \
+     --zone us-central1-a --project automaintainer-prod \
+     --metadata "automaintainer-image=$IMAGE"
+   ```
+
+   Roll back the API and the worker to the same image. They share Redis
+   and the Celery task signatures, so a mixed pair is untested.
+
+4. **Confirm.** `POST /start` answers `503 AGENT_WORKER_UNAVAILABLE` until
+   the worker is back. Check the worker's log in Logs Explorer (resource
+   "VM Instance", `automaintainer-worker`).
+
+Run these commands with the owner's credentials. The deployer service
+account cannot be used from a workstation: only GitHub Actions can
+impersonate it, through Workload Identity Federation.
+
+**Alternative: redeploy a release tag.** Running "Deploy to Google Cloud"
+on an earlier `v*.*.*` tag rebuilds that source and deploys it. This keeps
+the change in the workflow's history, but the rebuild resolves the same
+lock files to a new image, not the bytes that ran before.
+
+When the fix is ready, the next normal deploy replaces the rolled-back image
+on both the API and the worker.
+
 ### Sandboxed verification
 
 `infra/terraform/sandbox.tf` runs every verification command as one
