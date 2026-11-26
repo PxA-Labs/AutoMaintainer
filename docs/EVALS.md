@@ -384,7 +384,8 @@ Read the result with these limits in mind before deciding.
 - **What follows.** A "no significant difference" result here does not show
   that the backends are equivalent. Treat the comparison as a check that
   the ADK Reviewer is not clearly worse, read the cases that differ one by
-  one, and grow the defective set ([Reviewer change set](#reviewer-change-set))
+  one, and grow the defective set
+  ([Adding an end-to-end task or Reviewer case](#adding-an-end-to-end-task-or-reviewer-case))
   before relying on smaller differences.
 - **Fix the rule before the runs.** Write down in #525, before the live
   runs, what "not worse" means in numbers (for example: the upper end of
@@ -432,6 +433,93 @@ python3 paired.py e2e-reviewer-langgraph.json e2e-reviewer-adk.json
 It was checked on replay-mode reports only; it computes nothing that
 depends on the backend. The same pairing applies to `--suite pipeline`
 (`pipeline.summary.per_task`) when you compare resolve rates.
+
+### Adding an end-to-end task or Reviewer case
+
+`evals/e2e/tests/test_e2e_data.py` holds the rules below and fails on a
+task or case that breaks them. Run it after every change:
+`uv run --frozen python -m pytest -q evals/e2e` from `backend/`.
+
+**A task** goes in `evals/e2e/tasks/<id>/` with the Implementer layout plus
+the end-to-end fields ([Task set](#task-set)):
+
+1. Pick one Python file from a project under MIT, BSD-2-Clause,
+   BSD-3-Clause or Apache-2.0 (`ALLOWED_LICENSES` in `evals/e2e/taskset.py`)
+   and pin a 40-character commit SHA in `task.json` `source`. Copy the
+   upstream `LICENSE` into `repo/`.
+2. Put the upstream file, reformatted with black, in `solution/`, and the
+   same file with one injected regression in `repo/`. Describe the
+   regression in `defect`; it must not appear in the issue body.
+3. Write the issue (`title`, `body`) as a bug report that names the target
+   file: the harness extracts `target_file` from it and the test checks
+   they match.
+4. Write hidden tests in `hidden_tests/test_hidden_*.py`, at least two
+   `def test_` functions each, that pass on the oracle and fail on the
+   snapshot. Visible tests in `repo/tests/` must still pass on the
+   snapshot. Neither may read files or introspect code (`open(`, `Path(`,
+   `inspect`, `importlib`, `subprocess`, `exec(`/`eval(` and similar are
+   refused).
+5. List every file you wrote for the evaluation (visible tests, empty
+   package markers) in `harness_files`.
+
+The set must stay between 20 and 30 tasks and under 5 MB.
+
+**A Reviewer case** goes in `evals/e2e/reviewer/<id>/`: a `case.json` and a
+`files/` tree with each changed file at its repository path. `case.json`
+holds `id`, `task_id` (an existing task), `expected_verdict` (`reject` or
+`approve`), `defect_class` (one of `DEFECT_CLASSES` in `taskset.py`) for a
+defective change, a `description`, `changed_files` and `deleted_files`.
+
+- A defective case must be caught by the hidden tests (they must fail on
+  it). A correct case must resolve the task.
+- A `deleted-test` case must also change the target file, so that it
+  measures whether the Reviewer notices the test change rather than an
+  untouched regression.
+- The set must keep 10 to 20 defective cases, at least 10 correct ones, at
+  least five defect classes, and a correct case for every task that has a
+  defective one.
+
+The 20-case ceiling limits the statistics: with 20 defective cases a
+paired comparison can detect a change of about 6/20 = 0.3 in the
+false-approval rate at best (see
+[How much the comparison can show](#how-much-the-comparison-can-show)).
+
+**After adding either**, the fixture baseline changes, because
+`make_fixtures.py` picks the replayed no-op tasks (`index % 3 == 2`) and
+rubber-stamped cases (`index % 4 == 3`) by position in the sorted ids:
+
+1. Regenerate the fixtures: `uv run --frozen python -m evals.e2e.make_fixtures`.
+2. Update the pinned rates in `evals/e2e/tests/test_e2e_fixtures.py`
+   (`16 / 24`, `3 / 14`).
+3. Update the replay bands in `.github/workflows/evals.yml` and the figures
+   in [Cassettes and the fixture baseline](#cassettes-and-the-fixture-baseline),
+   [CI gates](#ci-gates) and [Reviewer change set](#reviewer-change-set).
+
+### Reading an end-to-end report
+
+Each suite in the report has `summary` and `runs`. Start with the summary,
+then go to the runs behind any figure you do not expect.
+
+- `reviewer.summary.per_case[<id>]`: `expected_verdict`, `defect_class`,
+  `runs`, `approvals` and `errors` for one case over all repeats. A
+  defective case with `approvals > 0` is a false approval; a correct case
+  with `approvals < runs` is a false rejection. This is what the paired
+  comparison reads.
+- `reviewer.summary.overall`: the rates, each a mean and spread over
+  repeats ([Metrics](#metrics)).
+- `pipeline.summary.per_task[<id>]`: the same per task for the pipeline
+  suite.
+- `runs`: one record per task or case and repeat: `verdict`, `correct`,
+  `error` and `error_code`, `verification`, `test_output`, `latency_s`,
+  `llm_calls`, `prompt_tokens`, `completion_tokens`, `cost_usd` and
+  `stale_calls`.
+
+For failure analysis, group false approvals by `defect_class`: a backend
+that misses every `injected-instruction` case has a different problem from
+one that misses a `wrong-logic` case. The report does not keep the review
+text; run with `--record DIR` and read the Reviewer's answers in the
+cassettes for those cases. A run with an `error` is a harness problem, not a verdict, and voids
+the rates until it is fixed.
 
 ### Limitations of the end-to-end evaluation
 
