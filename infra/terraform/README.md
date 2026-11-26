@@ -14,6 +14,7 @@ secret values, first deploy, optional features) and the cost estimate are in
 - [State](#state)
 - [Variables that matter](#variables-that-matter)
 - [Optional switches](#optional-switches)
+- [Monitoring](#monitoring)
 - [Design notes](#design-notes)
 - [Least privilege](#least-privilege)
 - [Checks and CI](#checks-and-ci)
