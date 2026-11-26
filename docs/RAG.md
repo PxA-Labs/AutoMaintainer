@@ -249,12 +249,20 @@ bounded by the tool's result limit and output bounded by its character cap.
 
 In every other case the tool uses ripgrep exactly as before: retrieval off,
 no repository id, an index at another commit, a failure resolving or
-querying the index, an empty result, or a regex search. Only default branches
+querying the index, or an empty result. (`ReviewTools.search_code` also
+skips the index for `regex=True`, but the tool the model calls,
+`search_code(query)`, never passes it.) Only default branches
 are indexed, so a PR head is rarely indexed and the Reviewer mostly keeps
 using ripgrep. Serving the base branch's chunks for a head review was
 rejected as misleading. Arguments are validated before either path, a call
 costs one of the review's tool calls, its result reaches the model in an
 untrusted-data block, and the budgets are unchanged.
+
+Resolving the retriever runs under the same 10-second timeout as the PM's
+query (`RAG_RETRIEVAL_TIMEOUT_SECONDS`). Each `search_code` query against
+the index has no timeout of its own: only the review's 180-second deadline
+bounds it. A slow index therefore costs review time rather than failing
+over to ripgrep.
 
 ### Red-team coverage
 
@@ -279,7 +287,7 @@ every `merge_decisions` row is the same as without retrieval.
 | `GOOGLE_CLOUD_PROJECT` | none | Project billed for embeddings. Required for Vertex AI. |
 | `GOOGLE_CLOUD_LOCATION` | `us-central1` | Vertex AI region the code is sent to. |
 | `RAG_EMBEDDING_MODEL` | `text-embedding-005` | Must return 768 dimensions (the column width). |
-| `RAG_EMBEDDING_BATCH_SIZE` | `16` | Inputs per Vertex AI request, 1 to 250. |
+| `RAG_EMBEDDING_BATCH_SIZE` | `16` | Inputs per Vertex AI request. Values outside 1 to 250 are clamped to that range; a value that is not an integer raises `ValueError` when the embedder is built, which ends an indexing task and turns retrieval off for that query (logged). |
 | `RAG_MAX_CHUNKS` | `20000` | Per-repository cost guard for indexing. |
 
 Credentials are application default credentials. The service account that
@@ -294,6 +302,10 @@ deployment:
   `GOOGLE_CLOUD_LOCATION` of `GOOGLE_CLOUD_PROJECT` when it is indexed.
 - At query time, the PM's query (issue text, capped at 2000 characters) is
   sent from the agent workers when `RAG_RETRIEVAL_ENABLED` is on.
+- With the ADK Reviewer, each `search_code` query the model writes (at most
+  200 characters) is also sent, when the index holds the PR head commit.
+  The model writes that query after reading the diff, so it can contain
+  text from the change under review.
 - The chunks are also stored in Supabase (`code_chunks.content`), next to the
   embeddings, readable by members of the repository's organization.
 
@@ -337,7 +349,9 @@ For each task:
   snapshot.
 
 Options: `--k` (default 5), `--embedder hashing|vertex` (default
-`hashing`), `--tasks`, `--out FILE`.
+`hashing`), `--tasks` (comma-separated task ids, or `all`, the default),
+`--tasks-dir` (default: the Implementer task set in `backend/evals/tasks`)
+and `--out FILE` (write the JSON report).
 
 Results with the `HashingEmbedder`, reproduced by running the command at each
 k:

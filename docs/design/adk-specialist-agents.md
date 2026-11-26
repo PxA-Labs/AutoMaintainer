@@ -106,7 +106,8 @@ log sees far more than a truncated diff.
 
 **Tools (all read-only, scoped to the run's repository and head SHA):**
 
-- `get_diff(path=None)`: the PR diff, whole or per file, paginated.
+- `get_diff(path=None, page=1)`: the PR diff, whole or per file, one page
+  per call.
 - `read_file(path, start, end)`: a file at the PR head.
 - `search_code(query)`: with retrieval on (`rag_retrieval_enabled`) and the
   RAG index holding exactly the PR head commit, the nearest code chunks of
@@ -192,12 +193,17 @@ Code: `backend/automaintainer/_specialists/` (`contracts.py`,
   `--no-config`, no symlink following, repository ignore files ignored;
   every output capped. A refused call costs a tool call and is answered as
   a refusal; it does not end the review.
-- **Budgets** (`ReviewBudget`): 8 tool calls, 11 model calls (8 tool turns,
-  the answer and the corrective retry), 60 000 tokens as reported by the
+- **Budgets** (`ReviewBudget`): 8 tool calls, 11 model calls, 60 000
+  tokens as reported by the
   provider (a response without usage counts an estimate of about four
   characters per token of its prompt and answer, so a route that reports
   no usage cannot disable the cap), 4 096 output tokens per answer, 180 s
-  for the whole review. Constants for now; the comparison should show
+  for the whole review. Of the 11 model calls, the code's own comment
+  accounts for 10: 8 turns that call tools, the answer after the last tool
+  result, and the corrective retry. The eleventh is headroom that neither
+  the code nor this note explains; the ADK runner itself is given
+  `max_llm_calls` of 12 so that the review's own counter, not ADK, ends an
+  over-budget loop. Constants for now; the comparison should show
   which values to keep before they become configuration.
 - **Rate limiter (trade-off).** A review reserves `estimated_tokens` (3 000)
   once, when it takes its key, but may use up to the 60 000-token cap, and
@@ -214,7 +220,11 @@ Code: `backend/automaintainer/_specialists/` (`contracts.py`,
 - **Fail closed.** Budgets, timeout, exceptions, a call to an unregistered
   tool, a stop requested by `engine.cancel()` (also one arriving during the
   final answer) and an invalid answer after the retry all return a
-  rejection that says why. A cancelled task (`engine.cancel(grace_seconds=)`,
+  rejection that says why. Each such rejection also emits a non-fatal
+  `ErrorEvent` with `error_code="SPECIALIST_REVIEW_FAILED"` and the reason
+  in its message, so the run log shows why the Reviewer rejected. The
+  rejection is then handled like any other Maintainer rejection (the
+  Implementer revises, at most 3 attempts). A cancelled task (`engine.cancel(grace_seconds=)`,
   `aclose()`) propagates `CancelledError`: no decision at all. ADK reports
   exceptions raised in callbacks as error events and swallows the
   cancellation of its own root task; the reviewer records the first abort
@@ -270,6 +280,10 @@ the answer parses as a `MaintainerDecision`, and the verdict:
 cd backend
 GROQ_API_KEY=... uv run --extra adk python -m evals.spike_adk_groq --repeats 5
 ```
+
+Options: `--model` (the routed model name; default Llama 3.3 70B on Groq)
+and `--repeats` (default 3, at least 1). Exit codes: 0 for GO, 1 for NO-GO,
+2 for a setup error such as a missing key or the `adk` extra not installed.
 
 **GO** (exit 0) when every repeat made at least one tool call, every call
 named a registered tool with a JSON object of arguments, and every answer
