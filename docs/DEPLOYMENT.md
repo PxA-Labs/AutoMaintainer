@@ -516,6 +516,13 @@ itself: no CI job holds Google credentials or runs `plan` or `apply`.
    triggers a production deploy, and without a ruleset anyone with write
    access can push one.
 
+The commands in this runbook use the default names: project
+`automaintainer-prod`, region `us-central1` and zone `us-central1-a`. If you
+changed `project_id`, `region` or `zone` in `terraform.tfvars`, substitute
+your values. After the first apply,
+`terraform output -json github_repository_variables` prints them
+(`GCP_PROJECT_ID`, `GCP_REGION`, `GCP_WORKER_ZONE`).
+
 ### Step 1: Create the state bucket and secure the default service account
 
 Create the state bucket once:
@@ -595,9 +602,13 @@ unset PW
 
 In `memorystore` mode, use the AUTH string Google generated instead:
 `PW="$(gcloud redis instances get-auth-string automaintainer-redis --region us-central1 --project $P --format='value(authString)')"`,
-then the same `printf` line. Then reset the worker VM
+then the same `printf` line.
+
+In both modes, then reset the worker VM
 (`gcloud compute instances reset automaintainer-worker --zone us-central1-a`)
-so Redis and the worker start with it.
+so the worker starts with the new secret. In `vm` mode the Redis container
+on the VM also restarts with it; in `memorystore` mode no Redis runs on the
+VM.
 
 Do not put the values in shell history on a shared machine (`read -rs` into
 a variable first). Then set `mount_secrets = true`, set `ALLOWED_ORIGINS` and
@@ -606,8 +617,9 @@ and run `terraform plan -out=tfplan` and `terraform apply tfplan` again.
 
 ### Step 4: Set the repository variables and the environment
 
-`terraform output -json github_repository_variables` prints the variables
-`deploy-gcp.yml` reads. Set each with
+`terraform output -json github_repository_variables` prints the `GCP_*`
+variables and `IMAGE_EXTRAS`. The three `NEXT_PUBLIC_*` variables in the
+table below are not in that output; set them yourself. Set each with
 `gh variable set <NAME> --body '<value>' -R PxA-Labs/AutoMaintainer`. None is
 a secret.
 
@@ -625,8 +637,11 @@ a secret.
 | `NEXT_PUBLIC_BACKEND_URL` | yes | The API URL |
 
 The workflow checks the seven `GCP_*` variables other than the provider and
-stops with an error that names any that is missing. The `NEXT_PUBLIC_*`
-values are inlined into the dashboard bundle at build time.
+stops with an error that names any that is missing. It does **not** check
+the `NEXT_PUBLIC_*` variables: they are inlined into the dashboard bundle at
+build time, and a missing one builds a dashboard with an empty value and no
+error. Check them before the first deploy
+(`gh variable list -R PxA-Labs/AutoMaintainer`).
 
 Under Settings > Environments, create `production` with required reviewers,
 and limit its deployment branches and tags to `main` and `v*.*.*`.
@@ -636,8 +651,14 @@ and limit its deployment branches and tags to `main` and `v*.*.*`.
 Actions > "Deploy to Google Cloud" > Run workflow on `main`, and approve the
 `production` deployment. The workflow builds the image, pushes it to Artifact
 Registry, deploys it to Cloud Run by digest, checks `/healthz`, and sets the
-worker VM's `automaintainer-image` metadata; the VM restarts its container
-within about 20 seconds. Release tags (`v*.*.*`) deploy the same way.
+worker VM's `automaintainer-image` metadata. The workflow ends there.
+
+The VM checks that metadata key every 20 seconds (`watch-image.sh`). When it
+changes, the VM stops the old worker container with a grace period of
+`worker_stop_timeout_seconds` (default 300) so running tasks can finish,
+pulls the new image and starts it. A worker restart can therefore take
+several minutes, and the workflow does not wait for it or confirm that the
+new worker is up. Release tags (`v*.*.*`) deploy the same way.
 
 Check the worker in Logs Explorer (resource "VM Instance",
 `automaintainer-worker`): `POST /start` answers
@@ -748,9 +769,9 @@ Opt-in and manual: it starts real executions (a few cents). Run it from
 `infra/terraform` with the owner's credentials.
 
 ```bash
-P=automaintainer-prod; R=us-central1; JOB=automaintainer-sandbox
+P=automaintainer-prod; R=us-central1; Z=us-central1-a; JOB=automaintainer-sandbox
 BUCKET=$(terraform output -raw sandbox_bucket)
-WORKER_IP=$(gcloud compute instances describe automaintainer-worker --zone ${R}-a \
+WORKER_IP=$(gcloud compute instances describe automaintainer-worker --zone $Z \
   --project $P --format='value(networkInterfaces[0].networkIP)')
 
 # 1. Start latency: five runs of a no-op; note each wall time.
@@ -810,7 +831,7 @@ enough without `actAs` on the sandbox account. This step does. Run it on the
 VM. It sends a throwaway directory, never a repository.
 
 ```bash
-gcloud compute ssh automaintainer-worker --zone ${R}-a --project $P -- \
+gcloud compute ssh automaintainer-worker --zone $Z --project $P -- \
   sudo docker exec -i automaintainer-worker python - <<'EOF'
 import asyncio, tempfile, time
 from pathlib import Path
@@ -1395,7 +1416,9 @@ Everything else comes from `app_env` (both services get the same values) or
 from Secret Manager. `app_env` may not set `AUTH_DEV_BYPASS`,
 `ENABLE_TERMINAL`, `VERIFY_ALLOW_LOCAL`, `ENVIRONMENT`, `REDIS_URL`, `PORT`,
 `OTEL_CLOUD_MONITORING_ENABLED`, `RAG_INDEXING_ENABLED`,
-`RAG_RETRIEVAL_ENABLED` or `GOOGLE_CLOUD_LOCATION`.
+`RAG_RETRIEVAL_ENABLED` or `GOOGLE_CLOUD_LOCATION`. It also refuses a name
+that is in `var.secrets` and any multi-line value. The full rules are in
+[infra/terraform/README.md, Design notes](../infra/terraform/README.md#design-notes).
 
 ### Dashboard (build time, public)
 
