@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **security**: State the support policy for Python SDK releases ([#565](https://github.com/PxA-Labs/AutoMaintainer/pull/565)) - @purvanshjoshi
 - **verification,observability**: Correct the audit backend column, settings, env allowlist, red-team list and label rule ([#575](https://github.com/PxA-Labs/AutoMaintainer/pull/575)) - @purvanshjoshi
 - **evals**: Explain how to add end-to-end tasks and Reviewer cases, and how to read a report ([#574](https://github.com/PxA-Labs/AutoMaintainer/pull/574)) - @purvanshjoshi
 - **evals**: Rewrite the statistical guidance for comparing Reviewer backends ([#573](https://github.com/PxA-Labs/AutoMaintainer/pull/573)) - @purvanshjoshi
