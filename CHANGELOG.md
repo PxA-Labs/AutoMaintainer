@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **deploy**: Document Google Cloud teardown and Terraform state recovery ([#560](https://github.com/PxA-Labs/AutoMaintainer/pull/560)) - @purvanshjoshi
 - **deploy**: Add a rollback runbook for the Google Cloud deployment ([#559](https://github.com/PxA-Labs/AutoMaintainer/pull/559)) - @purvanshjoshi
 - **deploy**: Add a Google Cloud architecture diagram ([#558](https://github.com/PxA-Labs/AutoMaintainer/pull/558)) - @purvanshjoshi
 - **deploy**: Correct the Google Cloud runbook's variables, worker restart and zone ([#557](https://github.com/PxA-Labs/AutoMaintainer/pull/557)) - @purvanshjoshi
