@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **rag**: Correct the fallback cases, egress, batch size and recall options ([#566](https://github.com/PxA-Labs/AutoMaintainer/pull/566)) - @purvanshjoshi
 - **contributing**: Describe workflow triggers, stacked PRs and the changelog flow ([#564](https://github.com/PxA-Labs/AutoMaintainer/pull/564)) - @purvanshjoshi
 - Install the server extra when running db-migrate ([#563](https://github.com/PxA-Labs/AutoMaintainer/pull/563)) - @purvanshjoshi
 - **deploy**: Add a troubleshooting table for the Google Cloud deployment ([#562](https://github.com/PxA-Labs/AutoMaintainer/pull/562)) - @purvanshjoshi
