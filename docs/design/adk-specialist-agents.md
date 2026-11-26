@@ -314,6 +314,18 @@ in `evals/e2e/pricing.py` does not cover it; pass `--prices`).
 - **More dependencies.** The optional extra keeps them out of the base install.
 - **A wider injection surface.** A reviewer that reads more files reads more
   untrusted text. Rule 6 applies before enabling.
+- **The Reviewer can read files that indexing never stores.** `read_file`
+  and ripgrep refuse only `.git`; ripgrep runs with `--hidden --no-ignore`.
+  Neither applies the chunker's credential-name list (`.env*`, `*.pem`,
+  `*.key` and the others in [docs/RAG.md](../RAG.md#chunking)). A
+  credential committed in the PR checkout can therefore reach the model and
+  its provider through the Reviewer, though `code_chunks` would never hold
+  it. The checkout is the PR head of a repository the run already has
+  access to, so this exposes nothing the run could not read, but it does
+  send the text to the model provider.
+- **ripgrep is not in the runtime image.** CI installs it for the tests,
+  the `Dockerfile` does not. See
+  [DEPLOYMENT.md, ADK Reviewer](../DEPLOYMENT.md#adk-reviewer).
 
 ## Open questions
 
