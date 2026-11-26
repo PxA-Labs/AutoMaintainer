@@ -99,7 +99,7 @@ measured on live models.
 
 ### 1. Prerequisites
 - [Node.js](https://nodejs.org/en/) (22.18 or later in the 22 line, or 24.11 or later; the gitnexus CLI requires `^22.18 || >=24.11`)
-- [Python](https://www.python.org/) (3.11+)
+- [Python](https://www.python.org/) (3.11+; CI tests 3.11 and 3.12)
 - [uv](https://docs.astral.sh/uv/) (backend dependencies; CI uses 0.13.8)
 - A [Groq API Key](https://console.groq.com/keys)
 - A [GitHub Token](https://github.com/settings/tokens) or GitHub App credentials
@@ -183,6 +183,38 @@ asyncio.run(main())
 ```
 See [ARCHITECTURE.md](./ARCHITECTURE.md#engine) for what an engine isolates.
 
+The optional parts are fields of the same config. This example turns on the
+ADK Reviewer and code retrieval, and injects an in-memory index instead of
+the default pgvector one (install with `uv sync --extra adk --extra rag`):
+```python
+from pathlib import Path
+from automaintainer import AutoMaintainerConfig, AutoMaintainerEngine
+# Not a stable public API: the retrieval classes live in a private module.
+from automaintainer._runtime.retrieval import (
+    HashingEmbedder, InMemoryRetriever, chunk_repository,
+)
+
+index = InMemoryRetriever(chunk_repository(Path("path/to/checkout")), HashingEmbedder())
+
+def retriever_factory(scope):
+    # scope.commit_sha is set for the ADK Reviewer (the PR head). Return None
+    # when the index does not hold that commit; search_code then uses ripgrep.
+    return index if scope.commit_sha is None else None
+
+async def main():
+    config = AutoMaintainerConfig(
+        github_token="ghp_...",
+        groq_api_keys=["gsk_..."],
+        reviewer_backend="adk",          # validation fails without the adk extra
+        rag_retrieval_enabled=True,
+    )
+    async with AutoMaintainerEngine(config, retriever=retriever_factory) as engine:
+        result = await engine.run("owner/repo", target_issue=42)
+```
+`HashingEmbedder` is an offline lexical baseline; for Vertex AI embeddings and
+the pgvector index, see [docs/RAG.md](./docs/RAG.md). The ADK Reviewer also
+needs `rg` (ripgrep) on the `PATH` for its fallback search.
+
 ### 4. Run Frontend (Next.js)
 ```bash
 cd dashboard
@@ -260,7 +292,7 @@ validation steps are:
 
 1. **First deployment** ([#527](https://github.com/PxA-Labs/AutoMaintainer/issues/527)): apply Terraform, add the secret values (including `redis-url`), run the sandbox smoke test, then turn on Cloud Monitoring and the application alerts.
 2. **Live evaluation baseline**: the first live end-to-end run against Groq.
-3. **ADK spike and Reviewer comparison** ([#525](https://github.com/PxA-Labs/AutoMaintainer/issues/525)): run `evals/spike_adk_groq.py` for a go or no-go on Groq tool calling, then compare the two Reviewer backends over at least three repeats. `REVIEWER_BACKEND` stays `langgraph` unless the false-approval rate does not get worse.
+3. **ADK spike and Reviewer comparison** ([#525](https://github.com/PxA-Labs/AutoMaintainer/issues/525)): run `backend/evals/spike_adk_groq.py` for a go or no-go on Groq tool calling, then compare the two Reviewer backends over at least three repeats. `REVIEWER_BACKEND` stays `langgraph` unless the false-approval rate does not get worse **and** at least one other figure (false rejections, fix iterations, cost or latency) improves. Before enabling it in a deployment, add ripgrep to the image ([docs/DEPLOYMENT.md, ADK Reviewer](./docs/DEPLOYMENT.md#adk-reviewer)).
 4. **Vertex recall check** ([#526](https://github.com/PxA-Labs/AutoMaintainer/issues/526)): measure recall with Vertex AI embeddings before turning on indexing or retrieval.
 
 ---
