@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **agents**: JSON-only PM/Maintainer decisions; fix(observability): bound metric labels ([#465](https://github.com/PxA-Labs/AutoMaintainer/pull/465)) (closes [#403](https://github.com/PxA-Labs/AutoMaintainer/issues/403), [#404](https://github.com/PxA-Labs/AutoMaintainer/issues/404)) - @purvanshjoshi
 ### Testing & Quality Assurance
 
+- **dashboard**: Gate e2e smoke on an axe WCAG 2.1 AA audit and fix the violations it found ([#464](https://github.com/PxA-Labs/AutoMaintainer/pull/464)) (closes [#407](https://github.com/PxA-Labs/AutoMaintainer/issues/407)) - @purvanshjoshi
 - **engine**: Add a concurrency and isolation suite for AutoMaintainerEngine ([#522](https://github.com/PxA-Labs/AutoMaintainer/pull/522)) - @purvanshjoshi
 - **redteam**: Add prompt-injection red-team fixtures and CI job ([#485](https://github.com/PxA-Labs/AutoMaintainer/pull/485)) - @purvanshjoshi
 - Add an OpenAPI contract snapshot, a dashboard-to-API contract check and RLS tests on real PostgreSQL ([#467](https://github.com/PxA-Labs/AutoMaintainer/pull/467)) - @purvanshjoshi
