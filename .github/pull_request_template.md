@@ -26,6 +26,8 @@ Closes #
 - [ ] The backend test suite passes locally (`uv run pytest` in `backend/`).
 - [ ] For dashboard changes, lint, unit tests and the build pass (`npm run lint`, `npm test`, `npm run build` in `dashboard/`).
 - [ ] I have added corresponding tests for new functionality or bug fixes.
+- [ ] For `infra/terraform` changes, `terraform fmt -check -recursive` and `terraform validate` pass (CONTRIBUTING.md, "Terraform").
+- [ ] For schema changes, I added a new file under `supabase/migrations` and regenerated `supabase_schema.sql` with `python scripts/db-migrate schema`; I did not edit a released migration.
 - [ ] My changes do not introduce security vulnerabilities or unvalidated path traversal.
 - [ ] I have updated the documentation affected by this change (see CONTRIBUTING.md, "Documentation"). I have not edited `CHANGELOG.md`.
 
