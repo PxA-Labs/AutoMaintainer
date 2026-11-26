@@ -11,6 +11,19 @@ image built from it).
 | ------- | --------- |
 | `main` (latest commit) | Yes |
 | Any tag or release, including `v0.9.0-beta` | No |
+| `automaintainer` Python SDK: the latest `sdk-v*` release | Yes |
+| `automaintainer` Python SDK: any earlier `sdk-v*` release | No |
+
+The application and the Python SDK have separate version lines. The
+application is tagged `v*.*.*` (`release.yml`, `deploy-gcp.yml`). The SDK
+wheel built from `backend/` takes its version from
+`automaintainer.__version__` (currently `0.1.0`) and is released from an
+`sdk-v<version>` tag by `publish-sdk.yml`, which refuses a tag that does not
+match `__version__`. A fix to the engine is released as a new SDK version;
+earlier SDK versions are not patched. Publishing to PyPI needs trusted
+publishing set up by the owner first
+([docs/DEPLOYMENT.md, "CI: Publishing the Python SDK"](./docs/DEPLOYMENT.md#ci-publishing-the-python-sdk));
+no `sdk-v*` tag has been pushed yet.
 
 ## Reporting a vulnerability
 
