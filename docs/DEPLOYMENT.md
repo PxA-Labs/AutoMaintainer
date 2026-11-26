@@ -405,6 +405,60 @@ what the deployment contains, the steps before and after the first
 | Metrics and alerts | Cloud Monitoring, API and worker, when `cloud_monitoring_enabled = true`; alert policies and a dashboard ([Metrics and alerts](#metrics-and-alerts)) |
 | Cost control | A billing budget with alerts at 50 %, 90 % and 100 % of actual spend and at 100 % of forecast spend |
 
+The diagram shows the default layout (`redis_mode = "vm"`). Solid arrows are
+requests; the dotted arrow is the deploy path. It is drawn from
+`infra/terraform` and has not been checked against a live project.
+
+```mermaid
+flowchart LR
+    gh[GitHub<br/>webhooks, API]
+    user[Dashboard users]
+    actions[GitHub Actions<br/>deploy-gcp.yml]
+    ext[Supabase, Groq,<br/>Vertex AI if rag_enabled]
+
+    subgraph gcp["Google Cloud project"]
+        api["Cloud Run service<br/>automaintainer-api<br/>min 1 instance"]
+        ar[(Artifact Registry)]
+        sm[(Secret Manager)]
+        mon[Cloud Monitoring<br/>and Cloud Trace]
+
+        subgraph vpc["Main VPC"]
+            vm["Worker VM, COS, no public IP<br/>celery worker -B, all queues<br/>Redis container"]
+            nat[Cloud NAT]
+        end
+
+        subgraph sbx["Sandbox VPC: no default route, no NAT"]
+            job["Cloud Run job<br/>automaintainer-sandbox<br/>service account with no roles"]
+        end
+
+        bucket[(Sandbox bucket<br/>executions/*)]
+    end
+
+    user -- HTTPS/WSS --> api
+    gh -- webhooks --> api
+    api -- "Direct VPC egress<br/>private ranges only" --> vm
+    api --> ext
+    vm --> nat --> gh
+    nat --> ext
+    vm -- "run job with overrides" --> job
+    vm -- "upload copy,<br/>sign two V4 URLs" --> bucket
+    job -- "signed URLs, port 443 to<br/>private.googleapis.com" --> bucket
+    api -. secrets at revision start .-> sm
+    vm -. secrets at container start .-> sm
+    api -- "metrics, traces" --> mon
+    vm -- metrics --> mon
+    actions -. "WIF: push image,<br/>deploy revision,<br/>set VM metadata" .-> ar
+    actions -.-> api
+    actions -.-> vm
+```
+
+The API reaches the public internet (Supabase, GitHub) through Cloud Run's
+own egress: its VPC egress setting is `PRIVATE_RANGES_ONLY` (`run.tf`), so
+only traffic to private addresses, such as Redis on the VM, goes through the
+VPC. The worker reaches the internet only through Cloud NAT. The sandbox job
+has no route to the internet at all. In `memorystore` mode Redis moves off
+the VM to a Memorystore instance in the main VPC, and nothing else changes.
+
 The deployer service account, which GitHub Actions impersonates, can push
 images, deploy new API revisions and set the worker VM's metadata. It cannot
 read secrets or change IAM. Google lets a job impersonate it only if the
