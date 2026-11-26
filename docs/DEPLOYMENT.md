@@ -107,12 +107,14 @@ Use one of these:
   `auth` schema with `auth.uid()` and `auth.users` (the tests use the
   stand-in `backend/tests/rls/supabase_shim.sql`). The migrations do not
   create them, so on a plain PostgreSQL server the first `up` fails. It needs
-  only psycopg2, which is a backend dependency:
+  only psycopg2, which comes with the backend's `server` extra; without
+  `--extra server`, `uv run` does not install it and the script stops with
+  `psycopg2 is required`:
 
   ```bash
   export DATABASE_URL='postgresql://postgres:<password>@<host>:5432/postgres'
-  uv run --project backend python scripts/db-migrate up      # apply pending migrations
-  uv run --project backend python scripts/db-migrate status  # applied / pending
+  uv run --project backend --extra server python scripts/db-migrate up      # apply pending migrations
+  uv run --project backend --extra server python scripts/db-migrate status  # applied / pending
   ```
 
   It applies each pending file in its own transaction, together with a row in
@@ -132,7 +134,7 @@ it is confusing.
 
 Apply pending migrations before you roll out the new API and worker image:
 `supabase db push` or
-`uv run --project backend python scripts/db-migrate up`. If you use the SQL Editor,
+`uv run --project backend --extra server python scripts/db-migrate up`. If you use the SQL Editor,
 paste the new `supabase_schema.sql` again.
 
 **A database created from the old single-file `supabase_schema.sql`** (before
@@ -191,7 +193,7 @@ Two cases need preparation:
 Running the baseline takes short exclusive locks on the tables while it
 replaces their policies and triggers. To record it as applied without running
 it, use `supabase migration repair 20261116000000 --status applied` or
-`uv run --project backend python scripts/db-migrate up --baseline`. Do that only for a database that already
+`uv run --project backend --extra server python scripts/db-migrate up --baseline`. Do that only for a database that already
 has the complete current schema. Otherwise the missing pieces stay missing:
 without `runs.repo_name`, for example, every `POST /start` fails.
 
@@ -902,6 +904,29 @@ What stays afterwards, and what to do with it:
 If the project exists only for AutoMaintainer, `gcloud projects delete`
 removes everything above except the GitHub settings and Supabase. A deleted
 project can be restored for 30 days.
+
+### Troubleshooting
+
+Start with the worker's log: Logs Explorer, resource "VM Instance",
+`automaintainer-worker`, or
+`gcloud compute ssh automaintainer-worker --zone us-central1-a -- sudo journalctl -u automaintainer-worker -n 200`.
+The table lists what each symptom usually means; it is drawn from the
+scripts in `infra/terraform/modules/worker` and the API, not from incidents
+on a live project.
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `automaintainer-image is not set yet; waiting for the first deploy` in the worker log, repeating | The VM is up but no deploy has set its `automaintainer-image` metadata (`run-worker.sh` exits 75 and systemd retries every 30 s) | Run the first deploy ([Step 5](#step-5-first-deploy)) |
+| `secrets_exec: <NAME>: Secret Manager answered HTTP 404` | The secret has no version yet (another HTTP code names a different problem, such as missing access) | Add the value ([Step 3](#step-3-add-the-secret-values)); systemd retries the start every 30 s |
+| `secrets_exec: REDIS_URL: the secret ...` | The `redis-url` value is not a `redis://` or `rediss://` URL with a password | Add a corrected version ([Redis](#redis)) and reset the VM |
+| `NOAUTH Authentication required` from the API | The API runs without the `redis-url` secret: `mount_secrets` is still `false` | Set `mount_secrets = true` once every mounted secret has a version, and apply |
+| `POST /start` answers `503 AGENT_WORKER_UNAVAILABLE` | No worker consumes `agent_runs`: the worker is restarting, failed to start or cannot reach Redis | Check the worker log for one of the rows above. A worker restart can take up to `worker_stop_timeout_seconds` plus the image pull |
+| The worker log shows a failed `docker pull` | The image is missing (older than the [retention](#rolling-back-a-deploy)) or the metadata names a wrong image | Deploy again, or set the metadata to an existing digest |
+| `terraform apply` fails on a role id that "already exists" or was deleted | A custom role from an earlier destroy is still soft-deleted | See the [Terraform README caveats](../infra/terraform/README.md#caveats) |
+| `terraform apply` fails while creating an alert policy on a `workload.googleapis.com/...` metric | Cloud Monitoring refuses a policy on a metric that has never been written | Leave `monitoring_app_alerts_enabled = false` until each metric has data ([Metrics and alerts](#metrics-and-alerts)) |
+| Every verification reports an error, `MERGE_POLICY=ci` never merges | `sandbox_image` is still Google's sample image, which has no `python3` | Set it to the app image by digest ([Owner steps after the first deploy](#owner-steps-after-the-first-deploy)) |
+| The dashboard loads but cannot sign in or reach the API | A `NEXT_PUBLIC_*` repository variable was empty at build time; the workflow does not check them | Set them ([Step 4](#step-4-set-the-repository-variables-and-the-environment)) and deploy again |
+| The IDE answers `404 Repository not cloned yet` | Expected on Google Cloud: the API and the worker do not share clones | See [Limitations](#limitations) |
 
 ### Sandboxed verification
 
