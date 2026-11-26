@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **deploy**: Add a troubleshooting table for the Google Cloud deployment ([#562](https://github.com/PxA-Labs/AutoMaintainer/pull/562)) - @purvanshjoshi
 - **deploy**: Document the worker VM as a single point of failure ([#561](https://github.com/PxA-Labs/AutoMaintainer/pull/561)) - @purvanshjoshi
 - **deploy**: Document Google Cloud teardown and Terraform state recovery ([#560](https://github.com/PxA-Labs/AutoMaintainer/pull/560)) - @purvanshjoshi
 - **deploy**: Add a rollback runbook for the Google Cloud deployment ([#559](https://github.com/PxA-Labs/AutoMaintainer/pull/559)) - @purvanshjoshi
