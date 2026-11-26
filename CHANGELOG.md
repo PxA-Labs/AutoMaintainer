@@ -9,8 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### CI/CD & Infrastructure
+
+- **backend**: Run the adk and rag extra tests and pin black and flake8 ([#538](https://github.com/PxA-Labs/AutoMaintainer/pull/538)) - @purvanshjoshi
+- Fix action pins, least-privilege tokens, frontend unit tests and keep-alive diagnostics ([#496](https://github.com/PxA-Labs/AutoMaintainer/pull/496)) - @purvanshjoshi
+- End-to-end docker compose smoke test (api, worker, beat, redis) ([#468](https://github.com/PxA-Labs/AutoMaintainer/pull/468)) - @purvanshjoshi
+### Refactoring
+
+- **agents**: Make importing agents free of I/O and build the graph on first use ([#515](https://github.com/PxA-Labs/AutoMaintainer/pull/515)) - @purvanshjoshi
+- **agents**: JSON-only PM/Maintainer decisions; fix(observability): bound metric labels ([#465](https://github.com/PxA-Labs/AutoMaintainer/pull/465)) (closes [#403](https://github.com/PxA-Labs/AutoMaintainer/issues/403), [#404](https://github.com/PxA-Labs/AutoMaintainer/issues/404)) - @purvanshjoshi
+### Testing & Quality Assurance
+
+- **dashboard**: Gate e2e smoke on an axe WCAG 2.1 AA audit and fix the violations it found ([#464](https://github.com/PxA-Labs/AutoMaintainer/pull/464)) (closes [#407](https://github.com/PxA-Labs/AutoMaintainer/issues/407)) - @purvanshjoshi
+- **engine**: Add a concurrency and isolation suite for AutoMaintainerEngine ([#522](https://github.com/PxA-Labs/AutoMaintainer/pull/522)) - @purvanshjoshi
+- **redteam**: Add prompt-injection red-team fixtures and CI job ([#485](https://github.com/PxA-Labs/AutoMaintainer/pull/485)) - @purvanshjoshi
+- Add an OpenAPI contract snapshot, a dashboard-to-API contract check and RLS tests on real PostgreSQL ([#467](https://github.com/PxA-Labs/AutoMaintainer/pull/467)) - @purvanshjoshi
+- **dashboard**: Enforce jsx-a11y lint rules and add a Playwright smoke suite in CI ([#461](https://github.com/PxA-Labs/AutoMaintainer/pull/461)) - @purvanshjoshi
 ### Features
 
+- **agents**: Structured JSON decisions for PM and Maintainer, validate Implementer output ([#459](https://github.com/PxA-Labs/AutoMaintainer/pull/459)) - @purvanshjoshi
+- **rag**: Add engine retriever injection and a Terraform switch to deploy code retrieval ([#541](https://github.com/PxA-Labs/AutoMaintainer/pull/541)) - @purvanshjoshi
+- **observability**: Record run, token and cost metrics from the worker and require Redis AUTH ([#540](https://github.com/PxA-Labs/AutoMaintainer/pull/540)) - @purvanshjoshi
+- **rag**: Wire code retrieval into the PM and the ADK Reviewer behind a flag ([#539](https://github.com/PxA-Labs/AutoMaintainer/pull/539)) - @purvanshjoshi
+- **runners**: Add a Cloud Run Jobs sandbox backend for verification ([#537](https://github.com/PxA-Labs/AutoMaintainer/pull/537)) - @purvanshjoshi
+- **observability**: Export metrics to Cloud Monitoring, with alerts and a dashboard ([#536](https://github.com/PxA-Labs/AutoMaintainer/pull/536)) - @purvanshjoshi
+- **rag**: Pgvector code index with org-scoped RLS, chunker, embedders and indexing task ([#535](https://github.com/PxA-Labs/AutoMaintainer/pull/535)) - @purvanshjoshi
+- **specialists**: Read-only ADK Reviewer behind reviewer_backend (default langgraph) ([#534](https://github.com/PxA-Labs/AutoMaintainer/pull/534)) - @purvanshjoshi
+- **evals**: End-to-end evaluation of the whole engine with oracle, noop, replay and live modes ([#531](https://github.com/PxA-Labs/AutoMaintainer/pull/531)) - @purvanshjoshi
+- **infra**: Deploy to Google Cloud with Terraform, keyless CI and Cloud Trace ([#530](https://github.com/PxA-Labs/AutoMaintainer/pull/530)) - @purvanshjoshi
+- **runs**: Record the run trigger and allow one active run per issue ([#523](https://github.com/PxA-Labs/AutoMaintainer/pull/523)) (closes [#518](https://github.com/PxA-Labs/AutoMaintainer/issues/518)) - @purvanshjoshi
+- **sdk**: Package the engine runtime as an installable automaintainer wheel ([#521](https://github.com/PxA-Labs/AutoMaintainer/pull/521)) - @purvanshjoshi
+- **engine**: Add AutoMaintainerEngine with per-engine context, isolated runs and cancellation ([#519](https://github.com/PxA-Labs/AutoMaintainer/pull/519)) - @purvanshjoshi
+- **webhooks**: Start a run from the trigger label and answer 401 to bad signatures ([#517](https://github.com/PxA-Labs/AutoMaintainer/pull/517)) (closes [#190](https://github.com/PxA-Labs/AutoMaintainer/issues/190)) - @purvanshjoshi
+- **engine**: Add AutoMaintainerConfig engine configuration schema ([#516](https://github.com/PxA-Labs/AutoMaintainer/pull/516)) - @purvanshjoshi
+- **db**: Import run history from pre-multi-tenant databases ([#514](https://github.com/PxA-Labs/AutoMaintainer/pull/514)) (closes [#482](https://github.com/PxA-Labs/AutoMaintainer/issues/482)) - @purvanshjoshi
+- Audit repository merge-policy changes ([#513](https://github.com/PxA-Labs/AutoMaintainer/pull/513)) - @purvanshjoshi
+- Per-repository merge policy under the MERGE_POLICY ceiling ([#495](https://github.com/PxA-Labs/AutoMaintainer/pull/495)) - @purvanshjoshi
+- **agents**: Record a merge_decisions audit row per merge decision ([#486](https://github.com/PxA-Labs/AutoMaintainer/pull/486)) - @purvanshjoshi
+- **verification**: Record an audit row per verification ([#483](https://github.com/PxA-Labs/AutoMaintainer/pull/483)) - @purvanshjoshi
+- **agents**: Show verification results to the Maintainer and hold over-limit changes for a human ([#478](https://github.com/PxA-Labs/AutoMaintainer/pull/478)) - @purvanshjoshi
+- **dashboard**: Wire the GitHub App install flow into the UI and fix IDE accessibility ([#477](https://github.com/PxA-Labs/AutoMaintainer/pull/477)) (closes [#471](https://github.com/PxA-Labs/AutoMaintainer/issues/471)) - @purvanshjoshi
+- **verification**: Add a Docker sandbox backend for change verification ([#476](https://github.com/PxA-Labs/AutoMaintainer/pull/476)) - @purvanshjoshi
+- **evals**: Grow the Implementer eval set from 10 to 30 tasks with categories and leak guards ([#469](https://github.com/PxA-Labs/AutoMaintainer/pull/469)) (closes [#414](https://github.com/PxA-Labs/AutoMaintainer/issues/414)) - @purvanshjoshi
+- **agents**: Verify each agent change with the repository's tests and gate MERGE_POLICY=ci on it ([#460](https://github.com/PxA-Labs/AutoMaintainer/pull/460)) - @purvanshjoshi
 - **dashboard**: Comprehensive professional UI/UX redesign & architecture decomposition ([#245](https://github.com/PxA-Labs/AutoMaintainer/pull/245)) - @purvanshjoshi
 - Web-first SaaS architecture with multi-tenancy, Celery queue, GitHub App auth, and observability ([#167](https://github.com/PxA-Labs/AutoMaintainer/pull/167)) - @purvanshjoshi
 - **ci**: Implement industry-standard changelog sync, PR title linter, and release automation ([#176](https://github.com/PxA-Labs/AutoMaintainer/pull/176)) (closes [#158](https://github.com/PxA-Labs/AutoMaintainer/issues/158)) - @purvanshjoshi
@@ -45,6 +86,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **trust**: Check trigger actors by GitHub user id, not stored login ([#494](https://github.com/PxA-Labs/AutoMaintainer/pull/494)) (closes [#491](https://github.com/PxA-Labs/AutoMaintainer/issues/491)) - @purvanshjoshi
+- **agents**: Only reuse a run issue the run itself opened ([#493](https://github.com/PxA-Labs/AutoMaintainer/pull/493)) (closes [#490](https://github.com/PxA-Labs/AutoMaintainer/issues/490), [#492](https://github.com/PxA-Labs/AutoMaintainer/issues/492)) - @purvanshjoshi
+- **engine**: Finish the SDK follow-ups: completed-write cancel race, FakeDB unique index, startup .env, distribution name ([#529](https://github.com/PxA-Labs/AutoMaintainer/pull/529)) (closes [#524](https://github.com/PxA-Labs/AutoMaintainer/issues/524)) - @purvanshjoshi
+- **deploy**: Bound the /start worker probe and read REDIS_URL from Render's connectionString ([#512](https://github.com/PxA-Labs/AutoMaintainer/pull/512)) - @purvanshjoshi
+- **ide**: Give each user their own view of their IDE working branch ([#507](https://github.com/PxA-Labs/AutoMaintainer/pull/507)) (closes [#505](https://github.com/PxA-Labs/AutoMaintainer/issues/505)) - @purvanshjoshi
+- Start the GitHub App install with the Supabase session only ([#509](https://github.com/PxA-Labs/AutoMaintainer/pull/509)) - @purvanshjoshi
+- **dashboard**: Label every run error code and stop retrying refused terminal sessions ([#508](https://github.com/PxA-Labs/AutoMaintainer/pull/508)) - @purvanshjoshi
+- Keep IDE writes off the default branch and enforce route auth and tenant checks ([#504](https://github.com/PxA-Labs/AutoMaintainer/pull/504)) (closes [#139](https://github.com/PxA-Labs/AutoMaintainer/issues/139), [#210](https://github.com/PxA-Labs/AutoMaintainer/issues/210)) - @purvanshjoshi
+- **agents**: Fail runs on clone failure and report missing target issues as INVALID_TARGET_ISSUE ([#497](https://github.com/PxA-Labs/AutoMaintainer/pull/497)) (closes [#138](https://github.com/PxA-Labs/AutoMaintainer/issues/138), [#142](https://github.com/PxA-Labs/AutoMaintainer/issues/142)) - @purvanshjoshi
+- **agents**: Require a trusted trigger to auto-merge and check limits before commit ([#489](https://github.com/PxA-Labs/AutoMaintainer/pull/489)) (closes [#488](https://github.com/PxA-Labs/AutoMaintainer/issues/488)) - @purvanshjoshi
+- **verification**: Hold test-runner configuration for a human and stop root modules shadowing pytest ([#484](https://github.com/PxA-Labs/AutoMaintainer/pull/484)) - @purvanshjoshi
+- **db**: Replace the non-re-runnable schema file with versioned migrations ([#475](https://github.com/PxA-Labs/AutoMaintainer/pull/475)) (closes [#473](https://github.com/PxA-Labs/AutoMaintainer/issues/473)) - @purvanshjoshi
+- **workspace**: Key clones by GitHub repository id for agent runs and IDE routes ([#474](https://github.com/PxA-Labs/AutoMaintainer/pull/474)) (closes [#392](https://github.com/PxA-Labs/AutoMaintainer/issues/392)) - @purvanshjoshi
+- **db**: Add runs.repo_name and check tenant references in run and IDE policies ([#472](https://github.com/PxA-Labs/AutoMaintainer/pull/472)) - @purvanshjoshi
+- **github-app**: Verified installation linking, minimum-permission tokens and tenant isolation hardening ([#466](https://github.com/PxA-Labs/AutoMaintainer/pull/466)) - @purvanshjoshi
+- **backend**: Run PyGithub calls off the event loop, fix trace-field logging, harden LocalRunner ([#458](https://github.com/PxA-Labs/AutoMaintainer/pull/458)) - @purvanshjoshi
+- **changelog**: Keep earlier entries and stop stacking separators ([#457](https://github.com/PxA-Labs/AutoMaintainer/pull/457)) - @purvanshjoshi
 - Add signed GitHub webhook ingestion ([#216](https://github.com/PxA-Labs/AutoMaintainer/pull/216)) (closes [#215](https://github.com/PxA-Labs/AutoMaintainer/issues/215)) - @SriRamkunamsetty
 - **dashboard**: Handle selectedRunId reset on new run and guest auth prompt on start ([#247](https://github.com/PxA-Labs/AutoMaintainer/pull/247)) - @purvanshjoshi
 - **backend**: Include target host diagnostic in healthz_supabase error response ([#244](https://github.com/PxA-Labs/AutoMaintainer/pull/244)) - @purvanshjoshi
@@ -92,6 +150,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **security**: State the support policy for Python SDK releases ([#565](https://github.com/PxA-Labs/AutoMaintainer/pull/565)) - @purvanshjoshi
+- **verification,observability**: Correct the audit backend column, settings, env allowlist, red-team list and label rule ([#575](https://github.com/PxA-Labs/AutoMaintainer/pull/575)) - @purvanshjoshi
+- **evals**: Explain how to add end-to-end tasks and Reviewer cases, and how to read a report ([#574](https://github.com/PxA-Labs/AutoMaintainer/pull/574)) - @purvanshjoshi
+- **evals**: Rewrite the statistical guidance for comparing Reviewer backends ([#573](https://github.com/PxA-Labs/AutoMaintainer/pull/573)) - @purvanshjoshi
+- **evals**: Correct --timeout, silent gates, pooled metrics and the scope of evals.compare ([#572](https://github.com/PxA-Labs/AutoMaintainer/pull/572)) - @purvanshjoshi
+- **env**: List the ADK Reviewer and code retrieval settings in backend/.env.example ([#571](https://github.com/PxA-Labs/AutoMaintainer/pull/571)) - @purvanshjoshi
+- **readme**: Add an SDK example for the ADK Reviewer and retrieval, and state the full enable rule ([#570](https://github.com/PxA-Labs/AutoMaintainer/pull/570)) - @purvanshjoshi
+- **architecture**: Add the non-fatal reviewer error, the transport consequence and new limitations ([#569](https://github.com/PxA-Labs/AutoMaintainer/pull/569)) - @purvanshjoshi
+- **adk**: Document operating the ADK Reviewer: prerequisites, checks, rollback, troubleshooting ([#568](https://github.com/PxA-Labs/AutoMaintainer/pull/568)) - @purvanshjoshi
+- **adk**: Correct the Reviewer's tool signature, budgets, error event and spike options ([#567](https://github.com/PxA-Labs/AutoMaintainer/pull/567)) - @purvanshjoshi
+- **rag**: Correct the fallback cases, egress, batch size and recall options ([#566](https://github.com/PxA-Labs/AutoMaintainer/pull/566)) - @purvanshjoshi
+- **contributing**: Describe workflow triggers, stacked PRs and the changelog flow ([#564](https://github.com/PxA-Labs/AutoMaintainer/pull/564)) - @purvanshjoshi
+- Install the server extra when running db-migrate ([#563](https://github.com/PxA-Labs/AutoMaintainer/pull/563)) - @purvanshjoshi
+- **deploy**: Add a troubleshooting table for the Google Cloud deployment ([#562](https://github.com/PxA-Labs/AutoMaintainer/pull/562)) - @purvanshjoshi
+- **deploy**: Document the worker VM as a single point of failure ([#561](https://github.com/PxA-Labs/AutoMaintainer/pull/561)) - @purvanshjoshi
+- **deploy**: Document Google Cloud teardown and Terraform state recovery ([#560](https://github.com/PxA-Labs/AutoMaintainer/pull/560)) - @purvanshjoshi
+- **deploy**: Add a rollback runbook for the Google Cloud deployment ([#559](https://github.com/PxA-Labs/AutoMaintainer/pull/559)) - @purvanshjoshi
+- **deploy**: Add a Google Cloud architecture diagram ([#558](https://github.com/PxA-Labs/AutoMaintainer/pull/558)) - @purvanshjoshi
+- **deploy**: Correct the Google Cloud runbook's variables, worker restart and zone ([#557](https://github.com/PxA-Labs/AutoMaintainer/pull/557)) - @purvanshjoshi
+- **terraform**: Fix stale runbook references and variable descriptions ([#556](https://github.com/PxA-Labs/AutoMaintainer/pull/556)) - @purvanshjoshi
+- Refresh the documentation for the engine, google cloud deployment, rag and sandboxed verification ([#542](https://github.com/PxA-Labs/AutoMaintainer/pull/542)) - @purvanshjoshi
+- **readme**: Add a roadmap section ([#528](https://github.com/PxA-Labs/AutoMaintainer/pull/528)) - @purvanshjoshi
+- **readme**: Remove the project status banner ([#520](https://github.com/PxA-Labs/AutoMaintainer/pull/520)) - @purvanshjoshi
+- Correct stale statements about verification and fix a changelog heading ([#463](https://github.com/PxA-Labs/AutoMaintainer/pull/463)) - @purvanshjoshi
+- Describe the system as implemented, retire ISSUES.md, refresh README and SECURITY ([#462](https://github.com/PxA-Labs/AutoMaintainer/pull/462)) (closes [#408](https://github.com/PxA-Labs/AutoMaintainer/issues/408)) - @purvanshjoshi
 - **readme**: Add release and changelog section ([#177](https://github.com/PxA-Labs/AutoMaintainer/pull/177)) - @purvanshjoshi
 - docs(changelog): update CHANGELOG.md for PR #172 ([#173](https://github.com/PxA-Labs/AutoMaintainer/pull/173)) - @github-actions[bot]
 - docs(changelog): update CHANGELOG.md for PR #171 ([#172](https://github.com/PxA-Labs/AutoMaintainer/pull/172)) - @github-actions[bot]
@@ -104,6 +187,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump fastapi from 0.162.7 to 0.165.0 in /backend ([#555](https://github.com/PxA-Labs/AutoMaintainer/pull/555)) - @dependabot[bot]
+- **deps**: Bump langchain from 1.5.0 to 1.5.1 in /backend ([#554](https://github.com/PxA-Labs/AutoMaintainer/pull/554)) - @dependabot[bot]
+- **deps**: Bump litellm from 1.109.1 to 1.110.0 in /backend ([#553](https://github.com/PxA-Labs/AutoMaintainer/pull/553)) - @dependabot[bot]
+- **deps**: Bump langgraph from 1.2.21 to 1.2.22 in /backend ([#552](https://github.com/PxA-Labs/AutoMaintainer/pull/552)) - @dependabot[bot]
+- **deps**: Bump langchain-groq from 1.1.3 to 1.2.1 in /backend ([#551](https://github.com/PxA-Labs/AutoMaintainer/pull/551)) - @dependabot[bot]
+- **deps-dev**: Bump vitest from 5.1.0 to 5.1.1 in /dashboard ([#549](https://github.com/PxA-Labs/AutoMaintainer/pull/549)) - @dependabot[bot]
+- **deps-dev**: Bump @playwright/test from 1.65.0 to 1.65.1 in /dashboard ([#548](https://github.com/PxA-Labs/AutoMaintainer/pull/548)) - @dependabot[bot]
+- **deps**: Bump @supabase/supabase-js from 2.119.0 to 2.119.1 in /dashboard ([#546](https://github.com/PxA-Labs/AutoMaintainer/pull/546)) - @dependabot[bot]
+- **deps**: Bump lucide-react from 1.73.0 to 1.75.0 in /dashboard ([#543](https://github.com/PxA-Labs/AutoMaintainer/pull/543)) - @dependabot[bot]
+- **deps**: Bump release-drafter/release-drafter from 7.10.0 to 7.11.0 ([#547](https://github.com/PxA-Labs/AutoMaintainer/pull/547)) - @dependabot[bot]
+- **deps**: Bump actions/download-artifact from 7.0.0 to 8.0.2 ([#545](https://github.com/PxA-Labs/AutoMaintainer/pull/545)) - @dependabot[bot]
+- **deps**: Bump astral-sh/setup-uv from 10.3.3 to 10.4.0 ([#544](https://github.com/PxA-Labs/AutoMaintainer/pull/544)) - @dependabot[bot]
+- **deps**: Add adk and rag extras and the Cloud Monitoring metrics exporter ([#533](https://github.com/PxA-Labs/AutoMaintainer/pull/533)) - @purvanshjoshi
+- **deps**: Bump langgraph from 1.2.20 to 1.2.21 in /backend ([#503](https://github.com/PxA-Labs/AutoMaintainer/pull/503)) - @dependabot[bot]
+- **deps-dev**: Bump pytest-asyncio from 1.4.1.post1 to 1.5.0 in /backend ([#501](https://github.com/PxA-Labs/AutoMaintainer/pull/501)) - @dependabot[bot]
+- **deps**: Bump fastapi from 0.162.5 to 0.162.7 in /backend ([#499](https://github.com/PxA-Labs/AutoMaintainer/pull/499)) - @dependabot[bot]
+- **deps-dev**: Bump @playwright/test from 1.64.1 to 1.65.0 in /dashboard ([#498](https://github.com/PxA-Labs/AutoMaintainer/pull/498)) - @dependabot[bot]
+- **deps**: Bump actions/first-interaction from 3.0.0 to 3.1.0 ([#502](https://github.com/PxA-Labs/AutoMaintainer/pull/502)) - @dependabot[bot]
+- **deps**: Keep mcp on 1.x and drop unused server-only ([#456](https://github.com/PxA-Labs/AutoMaintainer/pull/456)) - @purvanshjoshi
 - **deps**: Bump langchain from 1.4.2 to 1.4.3 in /backend ([#305](https://github.com/PxA-Labs/AutoMaintainer/pull/305)) - @dependabot[bot]
 - **deps**: Pin backend dependencies for reproducible installs ([#204](https://github.com/PxA-Labs/AutoMaintainer/pull/204)) (closes [#121](https://github.com/PxA-Labs/AutoMaintainer/issues/121)) - @SriRamkunamsetty
 - **deps**: Bump actions/setup-python from 5.4.0 to 7.0.0 ([#285](https://github.com/PxA-Labs/AutoMaintainer/pull/285)) - @dependabot[bot]
