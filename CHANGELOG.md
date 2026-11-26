@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **deploy**: Add a Google Cloud architecture diagram ([#558](https://github.com/PxA-Labs/AutoMaintainer/pull/558)) - @purvanshjoshi
 - **deploy**: Correct the Google Cloud runbook's variables, worker restart and zone ([#557](https://github.com/PxA-Labs/AutoMaintainer/pull/557)) - @purvanshjoshi
 - **terraform**: Fix stale runbook references and variable descriptions ([#556](https://github.com/PxA-Labs/AutoMaintainer/pull/556)) - @purvanshjoshi
 - Refresh the documentation for the engine, google cloud deployment, rag and sandboxed verification ([#542](https://github.com/PxA-Labs/AutoMaintainer/pull/542)) - @purvanshjoshi
