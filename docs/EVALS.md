@@ -357,11 +357,81 @@ Owner procedure:
      (its `std` is 0), not a mean per repeat; divide by `repeats` for a
      per-repeat figure.
 
-With 14 defective cases, one approval moves the rate by 0.071, so treat a
-difference smaller than the two spreads as no difference. The decision rule
-from the design note: enable `adk` only if its false-approval mean is not
-worse than the `langgraph` live mean and at least one other figure improves.
-Otherwise keep `REVIEWER_BACKEND=langgraph` and record the numbers in #525.
+The decision rule from the design note: enable `adk` only if its
+false-approval rate is not worse than the `langgraph` live rate and at least
+one other figure improves. Otherwise keep `REVIEWER_BACKEND=langgraph` and
+record the numbers in #525.
+
+#### How much the comparison can show
+
+Read the result with these limits in mind before deciding.
+
+- **The unit is the case, not the repeat.** The 14 defective cases are the
+  sample. Repeats measure the model's run-to-run noise on the same cases;
+  they do not add cases. At temperature 0 with a fixed seed, repeats can be
+  nearly identical, so their standard deviation can be close to 0 and make
+  a one-case difference (0.071) look real. Do not compare the two
+  standard deviations to decide.
+- **Pair by case.** Both backends review the same cases, so compare them
+  case by case. A case carries information only when the backends differ
+  on it.
+- **The smallest detectable change is large.** With an exact two-sided sign
+  test (McNemar's test on paired cases), p < 0.05 needs at least 6 cases
+  that differ, all in the same direction: 6–0 gives p = 0.031, 5–0 gives
+  p = 0.0625. With 14 defective cases that is a change of about
+  6/14 ≈ 0.43 in the false-approval rate. A realistic improvement, such as
+  3/14 to 1/14, cannot reach significance on this set.
+- **What follows.** A "no significant difference" result here does not show
+  that the backends are equivalent. Treat the comparison as a check that
+  the ADK Reviewer is not clearly worse, read the cases that differ one by
+  one, and grow the defective set ([Reviewer change set](#reviewer-change-set))
+  before relying on smaller differences.
+- **Fix the rule before the runs.** Write down in #525, before the live
+  runs, what "not worse" means in numbers (for example: the upper end of
+  the case-bootstrap interval for B − A is at most one case, 0.071) and
+  which other figure must improve and by how much. Deciding after seeing
+  the numbers invites reading noise as signal.
+
+This script pairs two reports by case, using `reviewer.summary.per_case`.
+It prints both rates, the number of cases where B approved a defective
+change less or more often than A, the exact sign-test p-value, and a 95 %
+bootstrap interval for B − A that resamples cases (repeats stay inside
+their case). Save it outside `backend/evals` and run it with the `langgraph`
+report as A and the `adk` report as B:
+
+```python
+import json, random, sys
+from math import comb
+
+def rates(path):
+    pc = json.load(open(path))["reviewer"]["summary"]["per_case"]
+    if any(c["errors"] for c in pc.values()):
+        sys.exit(f"{path}: runs with errors; fix them before comparing")
+    return {k: c["approvals"] / c["runs"] for k, c in pc.items()
+            if c["expected_verdict"] == "reject"}   # defective cases only
+
+a, b = rates(sys.argv[1]), rates(sys.argv[2])
+assert a.keys() == b.keys(), "run both backends on the same cases"
+cases = sorted(a)
+better = sum(b[c] < a[c] for c in cases)   # B approved this bad change less
+worse = sum(b[c] > a[c] for c in cases)
+n = better + worse
+p = min(1.0, 2 * sum(comb(n, i) for i in range(min(better, worse) + 1)) / 2**n) if n else 1.0
+diffs = [b[c] - a[c] for c in cases]
+rng = random.Random(0)
+boot = sorted(sum(rng.choice(diffs) for _ in cases) / len(cases) for _ in range(10_000))
+print(f"false-approval rate A={sum(a.values())/len(cases):.3f} B={sum(b.values())/len(cases):.3f}")
+print(f"cases where B is better/worse: {better}/{worse}, exact sign test p={p:.3f}")
+print(f"B-A, 95% case-bootstrap interval: [{boot[250]:.3f}, {boot[9749]:.3f}]")
+```
+
+```bash
+python3 paired.py e2e-reviewer-langgraph.json e2e-reviewer-adk.json
+```
+
+It was checked on replay-mode reports only; it computes nothing that
+depends on the backend. The same pairing applies to `--suite pipeline`
+(`pipeline.summary.per_task`) when you compare resolve rates.
 
 ### Limitations of the end-to-end evaluation
 
