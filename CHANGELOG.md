@@ -182,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump actions/download-artifact from 7.0.0 to 8.0.2 ([#545](https://github.com/PxA-Labs/AutoMaintainer/pull/545)) - @dependabot[bot]
 - **deps**: Bump astral-sh/setup-uv from 10.3.3 to 10.4.0 ([#544](https://github.com/PxA-Labs/AutoMaintainer/pull/544)) - @dependabot[bot]
 - **deps**: Add adk and rag extras and the Cloud Monitoring metrics exporter ([#533](https://github.com/PxA-Labs/AutoMaintainer/pull/533)) - @purvanshjoshi
 - **deps**: Bump langgraph from 1.2.20 to 1.2.21 in /backend ([#503](https://github.com/PxA-Labs/AutoMaintainer/pull/503)) - @dependabot[bot]
