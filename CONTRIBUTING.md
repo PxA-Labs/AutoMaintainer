@@ -67,7 +67,7 @@ Report security vulnerabilities privately, as described in
 
 4. Set up the database: apply `supabase/migrations` to your Supabase project
    (`supabase db push`, or
-   `DATABASE_URL=... uv run --project backend python scripts/db-migrate up`).
+   `DATABASE_URL=... uv run --project backend --extra server python scripts/db-migrate up`).
    To change the schema, add a new migration and regenerate
    `supabase_schema.sql`; never edit that file by hand. See
    [docs/DEPLOYMENT.md, "Changing the schema"](./docs/DEPLOYMENT.md#changing-the-schema).
