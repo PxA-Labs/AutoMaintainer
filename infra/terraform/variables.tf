@@ -36,7 +36,7 @@ variable "name_prefix" {
 }
 
 variable "deletion_protection" {
-  description = "Refuse to destroy the Cloud Run service and the worker VM."
+  description = "Refuse to destroy the Cloud Run service, the sandbox job and the worker VM."
   type        = bool
   default     = true
 }
@@ -170,7 +170,7 @@ variable "api_memory" {
 }
 
 variable "mount_secrets" {
-  description = "Mount the Secret Manager secrets into the API. Leave false for the first apply (the secrets have no versions yet and Cloud Run refuses a revision that names a missing one); set true once every mounted secret has a version (README.md, step 4)."
+  description = "Mount the Secret Manager secrets into the API. Leave false for the first apply (the secrets have no versions yet and Cloud Run refuses a revision that names a missing one); set true once every mounted secret has a version (docs/DEPLOYMENT.md, Option D, Step 3)."
   type        = bool
   default     = false
 }
@@ -299,8 +299,12 @@ variable "app_env" {
     (rag_enabled, rag_location) are set by this configuration. Secrets go in
     var.secrets.
     Refused: AUTH_DEV_BYPASS (never in a deployment), ENABLE_TERMINAL (the
-    API is public) and VERIFY_ALLOW_LOCAL (runs untrusted repository code on
-    the worker; stays off until sandboxed verification lands, #527).
+    API is public), VERIFY_ALLOW_LOCAL (the worker container uses the VM's
+    host network and can reach the metadata server, so repository code run
+    there could obtain the worker service account's token), ENVIRONMENT,
+    REDIS_URL and PORT (set by this configuration or by Cloud Run), any name
+    that is also in var.secrets, and multi-line values (the worker passes
+    app_env through docker run --env-file).
   EOT
   type        = map(string)
   default     = {}
@@ -346,7 +350,8 @@ variable "secrets" {
   description = <<-EOT
     Secret Manager secrets, by the environment variable they become, and
     which service reads them. Terraform creates the secret containers only;
-    the owner adds each value as a version (README.md, step 4), so no value
+    the owner adds each value as a version (docs/DEPLOYMENT.md, Option D,
+    Step 3), so no value
     is ever in the Terraform state. GITHUB_TOKEN is created but mounted
     nowhere: set api and worker to true only for single-tenant PAT mode.
     Extra Groq keys (GROQ_API_KEY_1 ...) can be added here.

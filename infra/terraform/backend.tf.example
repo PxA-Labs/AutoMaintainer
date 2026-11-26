@@ -1,4 +1,4 @@
-# Remote state in a GCS bucket the owner creates once (README.md, step 1).
+# Remote state in a GCS bucket the owner creates once (docs/DEPLOYMENT.md, Option D, Step 1).
 # Copy this file to backend.tf (git-ignored) and initialise with:
 #
 #   terraform init -backend-config="bucket=<project id>-tfstate"
