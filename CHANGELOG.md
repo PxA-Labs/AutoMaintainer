@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+- **trust**: Check trigger actors by GitHub user id, not stored login ([#494](https://github.com/PxA-Labs/AutoMaintainer/pull/494)) (closes [#491](https://github.com/PxA-Labs/AutoMaintainer/issues/491)) - @purvanshjoshi
 - **agents**: Only reuse a run issue the run itself opened ([#493](https://github.com/PxA-Labs/AutoMaintainer/pull/493)) (closes [#490](https://github.com/PxA-Labs/AutoMaintainer/issues/490), [#492](https://github.com/PxA-Labs/AutoMaintainer/issues/492)) - @purvanshjoshi
 - **engine**: Finish the SDK follow-ups: completed-write cancel race, FakeDB unique index, startup .env, distribution name ([#529](https://github.com/PxA-Labs/AutoMaintainer/pull/529)) (closes [#524](https://github.com/PxA-Labs/AutoMaintainer/issues/524)) - @purvanshjoshi
 - **deploy**: Bound the /start worker probe and read REDIS_URL from Render's connectionString ([#512](https://github.com/PxA-Labs/AutoMaintainer/pull/512)) - @purvanshjoshi
