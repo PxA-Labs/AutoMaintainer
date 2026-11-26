@@ -508,6 +508,32 @@ Keep `MERGE_POLICY=human`. Terraform refuses `VERIFY_ALLOW_LOCAL` in
 metadata server, so code running in it could obtain the worker service
 account's token and its secrets.
 
+**One worker VM is a single point of failure.** Every Celery queue, the beat
+scheduler and, in the default `vm` mode, Redis run on one Compute Engine VM
+in one zone. There is no managed instance group, no autohealing and no
+second zone. What that means in practice:
+
+| Event | Effect | Recovery |
+|---|---|---|
+| Worker container crashes | systemd restarts it. Tasks in progress are requeued (`task_acks_late`, `task_reject_on_worker_lost` in `celery_app.py`) and run again from the start | Automatic |
+| VM reset or host maintenance | Compute Engine restarts or live-migrates the VM (no `scheduling` block, so the defaults apply). Redis keeps its data: it runs with `appendonly yes` on the `automaintainer-redis` Docker volume on the boot disk | Automatic; runs in progress are requeued |
+| Zone outage | No agent runs, no webhook processing on the worker, no periodic tasks. In `vm` mode the API also loses Redis, so `/start` fails | Wait for the zone, or change `zone` and apply; a new VM starts with an empty Redis (in `vm` mode) and runs that were queued are lost |
+| VM recreated (a `zone` or boot image change, or a destroy) | The boot disk, and with it the Redis volume and the workspace clones, is replaced | Queued tasks are lost; clones are made again on the next run |
+
+The beat scheduler keeps its state in `/tmp/celerybeat-schedule` inside a
+container started with `--rm` (`run-worker.sh`), so the state is lost on
+every restart. All three periodic tasks use `crontab` schedules
+(`celery_app.py`), so beat computes the next run from the clock: a task due
+while the worker was down is skipped until its next slot, not run twice.
+The six-hourly repository sync is the one where a skipped slot is noticeable.
+
+Nothing alerts on a dead worker by default. Turn on Cloud Monitoring and the
+application alerts ([Metrics and alerts](#metrics-and-alerts)); the worker
+heartbeat alert fires after `alert_worker_heartbeat_absent_seconds`
+(default 600) without a heartbeat. `redis_mode = "memorystore"` takes Redis
+off the VM, so the API keeps its broker during a VM outage, but the workers
+are still on one VM.
+
 ### Redis
 
 **Why the VM by default.** The Redis container costs nothing extra. It shares
