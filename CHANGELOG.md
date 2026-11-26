@@ -182,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump langchain-groq from 1.1.3 to 1.2.1 in /backend ([#551](https://github.com/PxA-Labs/AutoMaintainer/pull/551)) - @dependabot[bot]
 - **deps-dev**: Bump vitest from 5.1.0 to 5.1.1 in /dashboard ([#549](https://github.com/PxA-Labs/AutoMaintainer/pull/549)) - @dependabot[bot]
 - **deps-dev**: Bump @playwright/test from 1.65.0 to 1.65.1 in /dashboard ([#548](https://github.com/PxA-Labs/AutoMaintainer/pull/548)) - @dependabot[bot]
 - **deps**: Bump @supabase/supabase-js from 2.119.0 to 2.119.1 in /dashboard ([#546](https://github.com/PxA-Labs/AutoMaintainer/pull/546)) - @dependabot[bot]
