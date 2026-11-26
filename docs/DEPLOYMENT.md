@@ -815,6 +815,68 @@ lock files to a new image, not the bytes that ran before.
 When the fix is ready, the next normal deploy replaces the rolled-back image
 on both the API and the worker.
 
+### Recovering the Terraform state
+
+[Step 1](#step-1-create-the-state-bucket-and-secure-the-default-service-account)
+turns on object versioning for the state bucket, so every earlier state is
+kept as a noncurrent version of `automaintainer/prod/default.tfstate`.
+Restore one only when the current state is corrupt or was overwritten by
+mistake. Restoring state never changes resources; the next `plan` compares
+the restored state with what exists.
+
+```bash
+B=gs://automaintainer-prod-tfstate
+OBJ=$B/automaintainer/prod/default.tfstate
+gcloud storage ls --all-versions -l "$OBJ"      # pick a generation number
+gcloud storage cp "$OBJ#<generation>" ./restored.tfstate
+terraform state push ./restored.tfstate         # refuses an older serial
+terraform plan                                  # review before any apply
+```
+
+`terraform state push` refuses a state with a lower serial than the current
+one. Add `-force` only after you have checked that the restored state is
+the one you want. Hold no other Terraform run while you do this; the GCS
+backend locks the state during `push`, `plan` and `apply`.
+
+### Tearing down
+
+`terraform destroy` removes almost everything this configuration created.
+Read this list first: some of it cannot be undone.
+
+- **Secret values are deleted.** Terraform owns the Secret Manager
+  containers, so destroying them also deletes every version you added in
+  [Step 3](#step-3-add-the-secret-values). Copy any value you still need
+  first, and rotate the keys if the project might have been compromised.
+- **Images are deleted** with the Artifact Registry repository.
+- **The sandbox bucket is emptied and deleted** (`force_destroy = true`); it
+  holds only transient copies.
+- **Memorystore data is lost** in `memorystore` mode. Queued Celery tasks
+  and locks live in Redis, so drain the worker first.
+
+Steps:
+
+1. Stop new work: remove the GitHub App's webhook URL (or uninstall the
+   App) and wait until no run is `queued` or `running` in the dashboard.
+2. Set `deletion_protection = false` in `terraform.tfvars`, then
+   `terraform plan -out=tfplan` and `terraform apply tfplan`. It guards the
+   Cloud Run service, the sandbox job and the worker VM.
+3. `terraform destroy`, and review the plan it prints before you confirm.
+
+What stays afterwards, and what to do with it:
+
+| Left behind | Why | Action |
+|---|---|---|
+| Enabled project APIs | `disable_on_destroy = false` in `main.tf` and `sandbox.tf`, so a destroy does not break other users of the project | Disable them by hand, or delete the project |
+| Custom IAM roles | Soft-deleted; their ids stay reserved for weeks | Nothing. To apply again soon, see the [Terraform README caveats](../infra/terraform/README.md#caveats) |
+| Default compute service account | Created by Google when the Compute Engine API was enabled | Leave it without `roles/editor` (Step 1) or delete the project |
+| State bucket | Created by hand in Step 1, outside Terraform | Delete it last: `gcloud storage rm --recursive gs://automaintainer-prod-tfstate` |
+| Repository variables and the `production` environment on GitHub | Set by hand in Step 4 | Delete them so `deploy-gcp.yml` is skipped again (it runs only while `GCP_WORKLOAD_IDENTITY_PROVIDER` is set) |
+| Supabase project | Not managed here | Keep or delete it separately |
+
+If the project exists only for AutoMaintainer, `gcloud projects delete`
+removes everything above except the GitHub settings and Supabase. A deleted
+project can be restored for 30 days.
+
 ### Sandboxed verification
 
 `infra/terraform/sandbox.tf` runs every verification command as one
