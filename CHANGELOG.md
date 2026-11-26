@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **evals**: Explain how to add end-to-end tasks and Reviewer cases, and how to read a report ([#574](https://github.com/PxA-Labs/AutoMaintainer/pull/574)) - @purvanshjoshi
 - **evals**: Rewrite the statistical guidance for comparing Reviewer backends ([#573](https://github.com/PxA-Labs/AutoMaintainer/pull/573)) - @purvanshjoshi
 - **evals**: Correct --timeout, silent gates, pooled metrics and the scope of evals.compare ([#572](https://github.com/PxA-Labs/AutoMaintainer/pull/572)) - @purvanshjoshi
 - **env**: List the ADK Reviewer and code retrieval settings in backend/.env.example ([#571](https://github.com/PxA-Labs/AutoMaintainer/pull/571)) - @purvanshjoshi
