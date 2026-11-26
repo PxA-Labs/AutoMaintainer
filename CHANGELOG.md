@@ -146,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation & Blueprints
 
+- **readme**: Add an SDK example for the ADK Reviewer and retrieval, and state the full enable rule ([#570](https://github.com/PxA-Labs/AutoMaintainer/pull/570)) - @purvanshjoshi
 - **architecture**: Add the non-fatal reviewer error, the transport consequence and new limitations ([#569](https://github.com/PxA-Labs/AutoMaintainer/pull/569)) - @purvanshjoshi
 - **adk**: Document operating the ADK Reviewer: prerequisites, checks, rollback, troubleshooting ([#568](https://github.com/PxA-Labs/AutoMaintainer/pull/568)) - @purvanshjoshi
 - **adk**: Correct the Reviewer's tool signature, budgets, error event and spike options ([#567](https://github.com/PxA-Labs/AutoMaintainer/pull/567)) - @purvanshjoshi
