@@ -182,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependency Updates & Maintenance
 
+- **deps**: Bump lucide-react from 1.73.0 to 1.75.0 in /dashboard ([#543](https://github.com/PxA-Labs/AutoMaintainer/pull/543)) - @dependabot[bot]
 - **deps**: Bump release-drafter/release-drafter from 7.10.0 to 7.11.0 ([#547](https://github.com/PxA-Labs/AutoMaintainer/pull/547)) - @dependabot[bot]
 - **deps**: Bump actions/download-artifact from 7.0.0 to 8.0.2 ([#545](https://github.com/PxA-Labs/AutoMaintainer/pull/545)) - @dependabot[bot]
 - **deps**: Bump astral-sh/setup-uv from 10.3.3 to 10.4.0 ([#544](https://github.com/PxA-Labs/AutoMaintainer/pull/544)) - @dependabot[bot]
